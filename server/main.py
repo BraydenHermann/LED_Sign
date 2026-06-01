@@ -522,7 +522,7 @@ async def play_preset(id: int):
 @app.get("/scan")
 async def scan_devices():
     try:
-        devices_dict = await BleakScanner.discover(timeout=8.0, return_adv=True)
+        devices_dict = await BleakScanner.discover(timeout=15.0, return_adv=True)
         print(f"[scan] Found {len(devices_dict)} total BLE devices:")
         results = []
         for address, (device, adv_data) in devices_dict.items():

@@ -10,7 +10,7 @@ import {
   Trash2, Pipette, Save, Send
 } from 'lucide-react';
 
-const API_BASE = 'http://127.0.0.1:8001';
+const API_BASE = '';
 const DEFAULT_MAC = 'FF:24:10:29:44:9B';
 const SCAN_PAGE_SIZE = 6;
 const PANEL_W = 64;
@@ -1305,7 +1305,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     setIsScanning(true);
     setScanResults([]);
     try {
-      const res = await axios.get(`${API_BASE}/scan`, { timeout: 12000 });
+      const res = await axios.get(`${API_BASE}/scan`, { timeout: 30000 });
       setScanResults(res.data.filter(d => d.is_led));
     } catch (e) {
       console.error("Scan error or timeout:", e);
@@ -1317,8 +1317,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     setScanOpen(true);
     setScanSearch('');
     setScanPage(0);
-    // Only auto-scan if 'all' tab is active and we have no results yet
-    if (scanTab === 'all' && scanResults.length === 0) {
+    // Always auto-scan if 'all' tab is active
+    if (scanTab === 'all') {
       startScan();
     }
   };
