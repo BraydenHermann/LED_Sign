@@ -489,7 +489,7 @@ const ClockPresetCardPreview = ({ preset, style }) => {
       width={64} 
       height={20} 
       className="preset-card-image" 
-      style={style || { width: '100%', height: '100%', objectFit: 'contain', imageRendering: 'pixelated' }}
+      style={style || { width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
     />
   );
 };
@@ -584,7 +584,57 @@ const AnimatedPresetCardPreview = ({ preset }) => {
       width={64} 
       height={20} 
       className="preset-card-image" 
-      style={{ width: '100%', height: '100%', objectFit: 'contain', imageRendering: 'pixelated' }}
+      style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
+    />
+  );
+};
+
+const PixelPresetCardPreview = ({ preset, style }) => {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const pixels = preset.pixels;
+    if (!pixels || pixels.length < 1280) return;
+
+    const imgData = ctx.createImageData(64, 20);
+    const bgCol = preset.bgColor || '#000000';
+    const bgR = parseInt(bgCol.slice(1, 3), 16) || 0;
+    const bgG = parseInt(bgCol.slice(3, 5), 16) || 0;
+    const bgB = parseInt(bgCol.slice(5, 7), 16) || 0;
+
+    for (let i = 0; i < 1280; i++) {
+      const p = pixels[i];
+      let r = bgR, g = bgG, b = bgB;
+      if (p && typeof p === 'string' && p.startsWith('#')) {
+        r = parseInt(p.slice(1, 3), 16) || 0;
+        g = parseInt(p.slice(3, 5), 16) || 0;
+        b = parseInt(p.slice(5, 7), 16) || 0;
+      } else if (p && p !== 0) {
+        const fgCol = preset.textColor || '#ffffff';
+        r = parseInt(fgCol.slice(1, 3), 16) || 0;
+        g = parseInt(fgCol.slice(3, 5), 16) || 0;
+        b = parseInt(fgCol.slice(5, 7), 16) || 0;
+      }
+      const idx = i * 4;
+      imgData.data[idx] = r;
+      imgData.data[idx + 1] = g;
+      imgData.data[idx + 2] = b;
+      imgData.data[idx + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }, [preset.pixels, preset.bgColor, preset.textColor]);
+
+  return (
+    <canvas 
+      ref={canvasRef} 
+      width={64} 
+      height={20} 
+      className="preset-card-image" 
+      style={style || { width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
     />
   );
 };
@@ -637,7 +687,6 @@ const TextPresetCardPreview = ({ preset }) => {
       width={64} 
       height={20} 
       className="preset-card-image" 
-      style={{ width: '100%', height: '100%', objectFit: 'contain', imageRendering: 'pixelated' }}
     />
   );
 };
@@ -659,12 +708,23 @@ export default function App() {
   const [power, setPower] = useState(false);
   const [macAddress, setMacAddress] = useState(localStorage.getItem('loy_mac') || '');
   const [isConnecting, setIsConnecting] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
   const [apiError, setApiError] = useState(false);
   const [hasFetchedStatus, setHasFetchedStatus] = useState(false);
   const [pushMessage, setPushMessage] = useState('');
   const [localPushMessage, setLocalPushMessage] = useState('');
   const [pushing, setPushing] = useState(false);
   const autoConnectTried = useRef(false);
+
+  const handleSetPushMessage = (msg) => {
+    setPushMessage(msg);
+    if (msg) setLocalPushMessage('');
+  };
+
+  const handleSetLocalPushMessage = (msg) => {
+    setLocalPushMessage(msg);
+    if (msg) setPushMessage('');
+  };
 
   useEffect(() => {
     if (window.location.hash === '#calendar') {
@@ -684,8 +744,8 @@ export default function App() {
       const res = await axios.get(`${API_BASE}/status`);
       setStatus(res.data);
       if (res.data && res.data.connected === false) {
-        setPushMessage('');
-        setLocalPushMessage('');
+        setPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
+        setLocalPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
       }
       setApiError(false);
       setHasFetchedStatus(true);
@@ -752,11 +812,12 @@ export default function App() {
 
   const handleDisconnect = async () => {
     setStatus(prev => ({ ...prev, connected: false, address: null, preview_url: null }));
-    setMacAddress('');
     setIsConnecting(false);
-    autoConnectTried.current = false;
+    autoConnectTried.current = true; // Prevent immediate auto-reconnect loop on manual disconnect
     setPushMessage('');
     setLocalPushMessage('');
+    setIsManualOverride(false);
+    setLastPushedId(null);
     try { await axios.post(`${API_BASE}/disconnect`); } catch (e) {}
   };
 
@@ -1056,6 +1117,7 @@ export default function App() {
   // Sync on connection
   useEffect(() => {
     if (status.connected) {
+      setScanOpen(false);
       fetchEvents();
       if (isManualOverride && lastPushedId) {
         const lastPreset = presets?.find(p => p.id === lastPushedId);
@@ -1065,6 +1127,12 @@ export default function App() {
             handlePush(lastPreset, false).catch(err => {
               console.error("[reconnect] Failed to restore last preset:", err);
             });
+          }, 800);
+        } else if (lastPushedId.startsWith('hw-slot-')) {
+          const hwSlotId = parseInt(lastPushedId.split('-')[2]);
+          console.log("[reconnect] Restoring last hardware slot:", hwSlotId);
+          setTimeout(() => {
+            axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => console.error(e));
           }, 800);
         } else {
           setIsManualOverride(false);
@@ -1085,13 +1153,12 @@ export default function App() {
     return () => clearInterval(id);
   }, [status.calendar_connected]);
 
-
   const handlePush = async (payload, manual = false, skipMessages = false) => {
     if (manual) setIsManualOverride(true);
     setPushing(true);
     if (!skipMessages) {
       if (manual) {
-        setLocalPushMessage('Pushing to sign...');
+        handleSetLocalPushMessage('Pushing to sign...');
       } else {
         setPushMessage('');
         setLocalPushMessage('');
@@ -1141,7 +1208,7 @@ export default function App() {
         await axios.post(`${API_BASE}/push-text`, data);
       }
       if (manual && !skipMessages) {
-        setLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
       }
       fetchStatus();
     } catch (e) {
@@ -1149,8 +1216,7 @@ export default function App() {
       const detail = e.response?.data?.detail;
       const errorMsg = typeof detail === 'string' ? detail : (Array.isArray(detail) ? detail[0]?.msg : JSON.stringify(detail));
       if (!isEvent && !skipMessages) {
-        setPushMessage('Error: ' + (errorMsg || e.message));
-        setLocalPushMessage('Error: ' + (errorMsg || e.message));
+        handleSetLocalPushMessage('Error: ' + (errorMsg || e.message));
       }
       throw e;
     } finally {
@@ -1179,7 +1245,7 @@ export default function App() {
       <div className="main-view-layout">
         <div className="left-column">
           <div className="dashboard-side">
-          <DashboardView 
+            <DashboardView 
               status={status} power={power} setPower={setPower}
               brightness={brightness} setBrightness={setBrightness}
               speed={speed} setSpeed={setSpeed}
@@ -1190,12 +1256,15 @@ export default function App() {
               onDisconnect={handleDisconnect}
               isConnecting={isConnecting}
               onClear={handleClear}
+              isModalOpen={isModalOpen}
+              onPush={handlePush}
               connectionFailed={connectionFailed}
               deviceNames={deviceNames}
               setDeviceName={setDeviceName}
               previewStamp={previewStamp}
               lastPushedId={lastPushedId}
               setLastPushedId={setLastPushedId}
+              setIsManualOverride={setIsManualOverride}
               presets={presets}
               savedPresets={savedPresets}
               setSavedPresets={setSavedPresets}
@@ -1205,9 +1274,11 @@ export default function App() {
               setSavedDragOverIdx={setSavedDragOverIdx}
               now={now}
               pushMessage={pushMessage}
-              setPushMessage={setPushMessage}
+              setPushMessage={handleSetPushMessage}
               pushing={pushing}
               setPushing={setPushing}
+              scanOpen={scanOpen}
+              setScanOpen={setScanOpen}
             />
           </div>
           <MediaView 
@@ -1249,7 +1320,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -1260,7 +1331,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [recents, setRecents] = useState(JSON.parse(localStorage.getItem('loy_recents') || '[]'));
   const [scanTab, setScanTab] = useState('all');
   const [isScanning, setIsScanning] = useState(false);
-  const [scanOpen, setScanOpen] = useState(false);
   const [scanSearch, setScanSearch] = useState('');
   const [scanPage, setScanPage] = useState(0);
   const [nameEditMode, setNameEditMode] = useState(false);
@@ -1355,6 +1425,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
 
   const pickDevice = (addr, name) => {
     setScanOpen(false);
+    setIsManualOverride(false);
+    setLastPushedId(null);
     pendingConnectRef.current = { addr, name }; // remember name; only commit to recents on success
     onConnect(addr);
   };
@@ -1401,6 +1473,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
 
     const presetCopy = { ...preset };
+    if (presetCopy.mode === 'text') {
+      delete presetCopy.pixels;
+    }
 
     if (globalIdx >= 12) {
       console.log('[assignPresetToSlot] Assigning to local UI slot:', globalIdx);
@@ -1423,7 +1498,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       const hwSlotId = globalIdx;
       console.log('[assignPresetToSlot] Mapped hwSlotId:', hwSlotId);
 
-      await axios.post(`${API_BASE}/save-preset`, {
+      const res = await axios.post(`${API_BASE}/save-preset`, {
         slot_id: hwSlotId,
         address: status.address || DEFAULT_MAC,
         preset: {
@@ -1433,10 +1508,18 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       });
       console.log('[assignPresetToSlot] API save-preset call succeeded');
 
+      const savedThumbnail = res.data?.preview_url 
+        ? `${API_BASE}${res.data.preview_url}?t=${Date.now()}` 
+        : presetCopy.thumbnail;
+
       const nextSaved = [...savedPresets];
       nextSaved[globalIdx] = {
         ...nextSaved[globalIdx],
-        preset: { ...presetCopy, id: `saved-${Date.now()}-${globalIdx}` }
+        preset: { 
+          ...presetCopy, 
+          id: `saved-${Date.now()}-${globalIdx}`,
+          thumbnail: savedThumbnail
+        }
       };
       setSavedPresets(nextSaved);
       setPushMessage(`Saved to slot ${globalIdx + 1}!`);
@@ -1457,10 +1540,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
 
     if (globalIdx < 12) {
-      
       const hwSlotId = globalIdx;
       setPushing(true);
       setPushMessage(`Pushing slot ${globalIdx + 1} to sign...`);
+      setIsManualOverride(true);
+      setLastPushedId(`hw-slot-${hwSlotId}`);
       try {
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         setPushMessage(`Pushed slot ${globalIdx + 1} to sign!`);
@@ -1471,8 +1555,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         setPushing(false);
       }
     } else {
+      setPushing(true);
+      setPushMessage(`Pushing slot ${globalIdx + 1} to sign...`);
+      setIsManualOverride(true);
       try {
-        await pushPreset(preset);
+        await onPush(preset, true, true);
         setPushMessage(`Pushed slot ${globalIdx + 1} to sign!`);
       } catch (err) {
         setPushMessage(`Error: ${err.message}`);
@@ -1841,7 +1928,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     const defaultName = sn || dev.name || 'LED Sign';
                     const displayName = customName || defaultName;
                     
-                    const isAvailable = scanTab === 'all' || scanResults.some(r => r.address === dev.address);
+                    const isAvailable = scanTab === 'all' || 
+                      scanResults.some(r => r.address === dev.address) ||
+                      (status.connected && status.address?.toLowerCase() === dev.address?.toLowerCase());
                     
                     return (
                       <div 
@@ -2054,10 +2143,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     >
                       {isClock ? (
                         <ClockPresetCardPreview preset={p} now={now} />
-                      ) : p.pixels && p.pixels.length > 1280 ? (
-                        <AnimatedPresetCardPreview preset={p} />
                       ) : p.mode === 'text' ? (
                         <TextPresetCardPreview preset={p} />
+                      ) : p.pixels && p.pixels.length > 1280 ? (
+                        <AnimatedPresetCardPreview preset={p} />
+                      ) : p.pixels && p.pixels.length === 1280 ? (
+                        <PixelPresetCardPreview preset={p} />
                       ) : p.thumbnail ? (
                         <img src={p.thumbnail} className="preset-card-image" draggable={false} />
                       ) : (
@@ -2184,10 +2275,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         >
                           {isClock ? (
                             <ClockPresetCardPreview preset={p} now={now} />
-                          ) : p.pixels && p.pixels.length > 1280 ? (
-                            <AnimatedPresetCardPreview preset={p} />
                           ) : p.mode === 'text' ? (
                             <TextPresetCardPreview preset={p} />
+                          ) : p.pixels && p.pixels.length > 1280 ? (
+                            <AnimatedPresetCardPreview preset={p} />
+                          ) : p.pixels && p.pixels.length === 1280 ? (
+                            <PixelPresetCardPreview preset={p} />
                           ) : p.thumbnail ? (
                             <img src={p.thumbnail} className="preset-card-image" draggable={false} />
                           ) : (
@@ -2271,13 +2364,14 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
       )}
 
       {!status.calendar_connected ? (
-        <div className="glass-panel w-full py-20 px-16 flex flex-col items-center justify-center text-center">
-          <p className="text-slate-400 mb-10">Sign in with Google to see today's meetings.</p>
+        <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+          <p className="text-slate-400" style={{ marginBottom: '24px' }}>Sign in with Google to see today's meetings.</p>
           <button 
             onClick={handleSignIn}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
+              justifyContent: 'center',
               gap: '12px',
               backgroundColor: '#f2f2f2',
               color: '#1f1f1f',
@@ -2875,6 +2969,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     const ctx = canvas.getContext('2d');
     if (!ctx) return Array(64 * 20).fill(0);
     
+    ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, 64, 20);
     ctx.drawImage(img, x, y, w, h);
@@ -3256,14 +3351,14 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           }
         }
       }
-
+      
       const thumbCanvas = document.createElement('canvas');
       thumbCanvas.width = 64;
       thumbCanvas.height = 20;
       const thumbCtx = thumbCanvas.getContext('2d');
       let thumbnail;
       
-      if (form.mode === 'clock') {
+      if (form.mode === 'clock' || form.mode === 'text' || !finalPixels) {
         thumbnail = null;
       } else {
         const imageData = thumbCtx.createImageData(64, 20);
@@ -3511,10 +3606,12 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 )}
                 {isClock ? (
                   <ClockPresetCardPreview preset={p} now={now} />
-                ) : p.pixels && p.pixels.length > 1280 ? (
-                  <AnimatedPresetCardPreview preset={p} />
                 ) : p.mode === 'text' ? (
                   <TextPresetCardPreview preset={p} />
+                ) : p.pixels && p.pixels.length > 1280 ? (
+                  <AnimatedPresetCardPreview preset={p} />
+                ) : p.pixels && p.pixels.length === 1280 ? (
+                  <PixelPresetCardPreview preset={p} />
                 ) : p.thumbnail ? (
                   <img src={p.thumbnail} className="preset-card-image" draggable={false} />
                 ) : (
@@ -3861,7 +3958,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           gap: '1px', 
                           background: form.bgColor || '#000000', 
                           padding: '8px', 
-                          borderRadius: '8px',
+                          borderRadius: '8px', 
                           width: '100%', 
                           aspectRatio: '64/20', 
                           minWidth: '600px',
@@ -3870,7 +3967,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         }}
                       >
                         {form.pixels.map((p, i) => {
-                          const activeColor = form.mode === 'clock' ? (form.clockStyle === 'default' ? '#ffffff' : (form.textColor || '#10B981')) : (form.textColor || '#ffffff');
+                          const activeColor = form.textColor || '#ffffff';
                           return (
                             <div 
                               key={i} 
@@ -3899,23 +3996,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                               }}
                               onDragStart={(e) => e.preventDefault()}
                               style={{ 
-                                background: 
-                                  form.mode === 'drawing' 
-                                    ? (p && p !== 0 ? p : 'rgba(255,255,255,0.05)')
-                                    : (p > 0.05 ? activeColor : 'rgba(255,255,255,0.05)'),
-                                borderRadius: '1px',
-                                cursor: form.mode === 'drawing' ? 'crosshair' : 'default',
-                                opacity: 
-                                  form.mode === 'drawing'
-                                    ? (p && p !== 0 ? 1 : 0.2)
-                                    : (p > 0.05 ? p : 0.2),
-                                boxShadow: 
-                                  (form.mode !== 'drawing' && p > 0.05)
-                                    ? `0 0 12px ${activeColor}` 
-                                    : (form.mode === 'drawing' && p && p !== 0) 
-                                      ? `0 0 12px ${p}` 
-                                      : 'none',
-                                transition: 'all 75ms'
+                                background: (p && p !== 0 ? (typeof p === 'string' && p.startsWith('#') ? p : activeColor) : (form.bgColor || '#000000')),
+                                cursor: 'crosshair',
+                                userSelect: 'none'
                               }}
                             />
                           );
