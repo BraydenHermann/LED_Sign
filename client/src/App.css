@@ -92,7 +92,11 @@
 }
 
 /* Shared class for ALL preset card preview canvases and thumbnail images */
+/* Absolutely fills its parent (which must be position:relative + overflow:hidden) */
 .led-preview {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   object-fit: fill;
