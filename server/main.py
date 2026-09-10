@@ -2154,13 +2154,11 @@ async def save_preset(req: SavePresetRequest):
             await safe_write_gatt_char(protocol.WRITE_UUID, slot_pkt, response=True)
             await asyncio.sleep(0.05)
 
-            # Step 7: For static presets, also push to display immediately
-            # (Animations play autonomously from flash without needing PC streaming)
-            if not is_anim:
-                try:
-                    await push_text(preset)
-                except Exception as pe:
-                    print(f"[save_preset] Display update: {pe}")
+            # Step 7: Immediately display the newly saved preset (static or animation)
+            try:
+                await push_text(preset)
+            except Exception as pe:
+                print(f"[save_preset] Display update: {pe}")
 
             print(f"[save_preset] Done. Slot {slot_id} (hw=0x{hw_addr:02X}) saved and locked to display.")
 
