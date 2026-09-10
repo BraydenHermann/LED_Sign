@@ -1152,300 +1152,296 @@ async def push_text(req: PushTextRequest):
     except Exception:
         pass
 
-        if req.pixels is not None:
-            # We will use the native GIF hardware decoder (0xC5) for all 64x20 image pushes (static or animated)
-            # This completely eliminates the slow "drawing" effect and the need for python background streaming.
-            is_image = req.fileType in ("gif", "video", "png", "jpg", "jpeg") or (len(req.pixels) % 1280 == 0 and len(req.pixels) > 0)
-            
-            # If it's a very wide image (scrolling text), we fall back to hardware_scroll_command (Mode 0)
-            if is_image and len(req.pixels) == 1280:
-                pass # It's a static 64x20 image, use GIF transfer
-            elif is_image and len(req.pixels) > 1280 and req.fileType not in ("gif", "video"):
-                is_image = False # It's scrolling text, fallback to Mode 0
-                
-            if is_image:
-                num_frames = max(1, len(req.pixels) // 1280)
-                raw_frames = extract_frames(req.pixels, num_frames)
-                frames = quantize_frames(raw_frames, req.bgColor or "#000000")
-                
-                speed = req.speed if req.speed is not None else current_speed
-                speed = max(1, min(15, speed))
-                
-                if req.frameDurationMs is not None and req.frameDurationMs > 0:
-                    delay_ms = req.frameDurationMs
-                else:
-                    delay_ms = int(max(0.05, 0.4 - (speed * 0.025)) * 1000)
-                
-                gif_path = os.path.join(STATIC_DIR, "current.gif")
-                # Save preview to disk
-                save_gif_preview(frames, req.bgColor or "#000000", delay_ms / 1000.0, gif_path)
-                
-                png_path = os.path.join(STATIC_DIR, "current.png")
-                if os.path.exists(png_path):
-                    try: os.remove(png_path)
-                    except: pass
-                        
-                current_width = 64
-                current_display_mode = "animation" if num_frames > 1 else "static"
-                frames_sent += 1
-                
-                if connected_client and connected_client.is_connected and connection_ready:
-                    # Generate GIF bytes in memory
-                    gif_io = io.BytesIO()
-                    if len(frames) > 1:
-                        frames[0].save(gif_io, format='GIF', save_all=True, append_images=frames[1:], duration=delay_ms, loop=0, optimize=True)
-                    else:
-                        frames[0].save(gif_io, format='GIF', optimize=True)
-                    gif_bytes = gif_io.getvalue()
-
-                    hw_addr = 0xC5
-                    CHUNK_SIZE = 960
-                    
-                    # Upload GIF to 0xC5
-                    session_pkt = protocol.build_file_transfer_session_init(hw_addr=hw_addr, num_files=1)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, session_pkt, response=True)
-                    await asyncio.sleep(0.05)
-                    
-                    total_chunks = (len(gif_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
-                    for i in range(total_chunks):
-                        start = i * CHUNK_SIZE
-                        chunk = gif_bytes[start:start+CHUNK_SIZE]
-                        chunk_pkt = protocol.build_file_transfer_chunk(
-                            hw_addr=hw_addr, file_index=0, chunk_index=i,
-                            total_chunks=total_chunks, data=chunk, chunk_size=len(chunk)
-                        )
-                        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
-                        
-                    # Commit file transfer to 0xC5
-                    commit_pkt = protocol.build_file_transfer_complete(hw_addr, num_frames=1)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
-                    await asyncio.sleep(0.05)
-                    
-                return {"status": "success"}
-
-            # Helper to parse hex to rgb
-            def hex_to_rgb(hex_str: Optional[str]):
-                if not hex_str:
-                    return (0, 0, 0)
-                hex_str = hex_str.lstrip('#')
-                if len(hex_str) != 6:
-                    return (255, 255, 255)
-                return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
-
-            # Group pixels by color
-            pixel_colors = []
-            bg_color_hex = (req.bgColor or "#000000").lower()
-            text_color_hex = (req.textColor or "#FFFFFF").lower()
-            for p in req.pixels:
-                if p is None or p == 0 or p == "0" or p == "#000000" or p is False:
-                    pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
-                elif isinstance(p, str) and p.startswith("#"):
-                    pixel_colors.append(p.lower())
-                elif isinstance(p, (int, float)) and not isinstance(p, bool):
-                    if math.isnan(p):
-                        pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
-                    elif p > 0.4:
-                        pixel_colors.append(text_color_hex)
-                    else:
-                        pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
-                elif p is True:
-                    pixel_colors.append(text_color_hex)
-                else:
-                    pixel_colors.append(text_color_hex)
-            
-            width = len(pixel_colors) // PANEL_H
-            
-            # Quantize colors to max 8 colors
-            non_none_colors = [c for c in pixel_colors if c is not None]
-            unique_colors = set(non_none_colors)
-            if len(unique_colors) > 8:
-                bg_rgb = hex_to_rgb(bg_color_hex)
-                pixels_rgb_for_pil = []
-                for c in pixel_colors:
-                    if c is None:
-                        pixels_rgb_for_pil.append(bg_rgb)
-                    else:
-                        pixels_rgb_for_pil.append(hex_to_rgb(c))
-
-                pil_img = Image.new("RGB", (width, PANEL_H))
-                pil_img.putdata(pixels_rgb_for_pil)
-
-                quantized_img = pil_img.quantize(colors=8, method=Image.Quantize.MAXCOVERAGE)
-                rgb_quantized = quantized_img.convert("RGB")
-                quantized_rgb_data = list(rgb_quantized.getdata())
-
-                def rgb_to_hex(rgb):
-                    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-
-                final_pixel_colors = []
-                for idx, rgb_val in enumerate(quantized_rgb_data):
-                    hex_val = rgb_to_hex(rgb_val)
-                    if pixel_colors[idx] is None or hex_val == "#000000":
-                        final_pixel_colors.append(None)
-                    else:
-                        final_pixel_colors.append(hex_val)
-
-                pixel_colors = final_pixel_colors
-                unique_colors = set([c for c in pixel_colors if c is not None])
-
-            if width > PANEL_W:
-                current_display_mode = "move-left-loop"
-            else:
-                current_display_mode = "static"
-
-            if connected_client and connected_client.is_connected and connection_ready:
-                # Turn off clock/preset and clear screen cleanly before drawing
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=False)
-                
-                speed = req.speed if req.speed is not None else current_speed
-                speed = max(1, min(15, speed))
-                hw_speed = speed
+    if req.pixels is not None:
+        # We will use the native GIF hardware decoder (0xC5) for all 64x20 image pushes (static or animated)
+        # This completely eliminates the slow "drawing" effect and the need for python background streaming.
+        is_image = req.fileType in ("gif", "video", "png", "jpg", "jpeg") or (len(req.pixels) % 1280 == 0 and len(req.pixels) > 0)
         
-                for color in unique_colors:
-                    bitmap = [1 if pixel_colors[idx] == color else 0 for idx in range(len(pixel_colors))]
-                    if width > PANEL_W:
-                        anim_code = 1 if req.animation == "move-left" else 2 if req.animation == "move-right" else 3 if req.animation == "move-up" else 4 if req.animation == "move-down" else 1
-                        packet = protocol.hardware_scroll_command(bitmap, width, PANEL_H, color=color, speed=hw_speed, animation=anim_code)
-                    else:
-                        packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=color)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, bytearray(packet), response=False)
-                
-                # Commit Session atomically so all pixels appear together
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+        # If it's a very wide image (scrolling text), we fall back to hardware_scroll_command (Mode 0)
+        if is_image and len(req.pixels) == 1280:
+            pass # It's a static 64x20 image, use GIF transfer
+        elif is_image and len(req.pixels) > 1280 and req.fileType not in ("gif", "video"):
+            is_image = False # It's scrolling text, fallback to Mode 0
             
-            # Dashboard preview
-            bg_rgb = hex_to_rgb(req.bgColor)
-            preview_img = Image.new("RGB", (width, PANEL_H), bg_rgb)
-            pixels_rgb = []
+        if is_image:
+            num_frames = max(1, len(req.pixels) // 1280)
+            raw_frames = extract_frames(req.pixels, num_frames)
+            frames = quantize_frames(raw_frames, req.bgColor or "#000000")
+            
+            speed = req.speed if req.speed is not None else current_speed
+            speed = max(1, min(15, speed))
+            
+            if req.frameDurationMs is not None and req.frameDurationMs > 0:
+                delay_ms = req.frameDurationMs
+            else:
+                delay_ms = int(max(0.05, 0.4 - (speed * 0.025)) * 1000)
+            
+            gif_path = os.path.join(STATIC_DIR, "current.gif")
+            # Save preview to disk
+            save_gif_preview(frames, req.bgColor or "#000000", delay_ms / 1000.0, gif_path)
+            
+            png_path = os.path.join(STATIC_DIR, "current.png")
+            if os.path.exists(png_path):
+                try: os.remove(png_path)
+                except: pass
+                    
+            current_width = 64
+            current_display_mode = "animation" if num_frames > 1 else "static"
+            frames_sent += 1
+            
+            if connected_client and connected_client.is_connected and connection_ready:
+                # Generate GIF bytes in memory
+                gif_io = io.BytesIO()
+                if len(frames) > 1:
+                    frames[0].save(gif_io, format='GIF', save_all=True, append_images=frames[1:], duration=delay_ms, loop=0, optimize=True)
+                else:
+                    frames[0].save(gif_io, format='GIF', optimize=True)
+                gif_bytes = gif_io.getvalue()
+
+                hw_addr = 0xC5
+                CHUNK_SIZE = 960
+                
+                # Upload GIF to 0xC5
+                session_pkt = protocol.build_file_transfer_session_init(hw_addr=hw_addr, num_files=1)
+                await safe_write_gatt_char(protocol.WRITE_UUID, session_pkt, response=True)
+                await asyncio.sleep(0.05)
+                
+                total_chunks = (len(gif_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
+                for i in range(total_chunks):
+                    start = i * CHUNK_SIZE
+                    chunk = gif_bytes[start:start+CHUNK_SIZE]
+                    chunk_pkt = protocol.build_file_transfer_chunk(
+                        hw_addr=hw_addr, file_index=0, chunk_index=i,
+                        total_chunks=total_chunks, data=chunk, chunk_size=len(chunk)
+                    )
+                    await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
+                    
+                # Commit file transfer to 0xC5
+                commit_pkt = protocol.build_file_transfer_complete(hw_addr, num_frames=1)
+                await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
+                await asyncio.sleep(0.05)
+                
+            return {"status": "success"}
+
+        # Helper to parse hex to rgb
+        def hex_to_rgb(hex_str: Optional[str]):
+            if not hex_str:
+                return (0, 0, 0)
+            hex_str = hex_str.lstrip('#')
+            if len(hex_str) != 6:
+                return (255, 255, 255)
+            return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+
+        # Group pixels by color
+        pixel_colors = []
+        bg_color_hex = (req.bgColor or "#000000").lower()
+        text_color_hex = (req.textColor or "#FFFFFF").lower()
+        for p in req.pixels:
+            if p is None or p == 0 or p == "0" or p == "#000000" or p is False:
+                pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
+            elif isinstance(p, str) and p.startswith("#"):
+                pixel_colors.append(p.lower())
+            elif isinstance(p, (int, float)) and not isinstance(p, bool):
+                if math.isnan(p):
+                    pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
+                elif p > 0.4:
+                    pixel_colors.append(text_color_hex)
+                else:
+                    pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
+            elif p is True:
+                pixel_colors.append(text_color_hex)
+            else:
+                pixel_colors.append(text_color_hex)
+        
+        width = len(pixel_colors) // PANEL_H
+        
+        # Quantize colors to max 8 colors
+        non_none_colors = [c for c in pixel_colors if c is not None]
+        unique_colors = set(non_none_colors)
+        if len(unique_colors) > 8:
+            bg_rgb = hex_to_rgb(bg_color_hex)
+            pixels_rgb_for_pil = []
             for c in pixel_colors:
                 if c is None:
-                    pixels_rgb.append(bg_rgb)
+                    pixels_rgb_for_pil.append(bg_rgb)
                 else:
-                    pixels_rgb.append(hex_to_rgb(c))
-            
-            preview_img.putdata(pixels_rgb)
-            save_preview(preview_img, os.path.join(STATIC_DIR, "current.png"))
-            current_width = width
-            frames_sent += 1
-            return {"status": "success"}
-            
-        # 2. Text rendering path
-        # Check if this is a calendar event with ||| separator (title ||| start - end)
-        text = req.text or ""
-        if "|||" in text:
-            parts = text.split("|||", 1)
-            title = parts[0].strip()
-            times = parts[1].strip()
-            # Start the flipper task: alternates between title and times every 3s
-            active_scroller_task = asyncio.create_task(
-                flipper_worker(title, times, req.textColor, req.bgColor)
-            )
-            current_display_mode = "flipper"
-            return {"status": "success"}
+                    pixels_rgb_for_pil.append(hex_to_rgb(c))
 
+            pil_img = Image.new("RGB", (width, PANEL_H))
+            pil_img.putdata(pixels_rgb_for_pil)
 
-        # Standard text rendering
-        try:
-            render_font = ImageFont.truetype("arialbd.ttf", 18)
-        except Exception:
-            try:
-                render_font = ImageFont.truetype("arial.ttf", 18)
-            except Exception:
-                render_font = ImageFont.load_default()
-            
-        # Measure text using a temporary canvas to get width and height
-        temp_img = Image.new("L", (1, 1), 0)
-        temp_draw = ImageDraw.Draw(temp_img)
-        bbox = temp_draw.textbbox((0, 0), text, font=render_font)
-        
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        
-        if tw <= 0 or th <= 0:
-            return {"status": "error", "message": "Nothing to render"}
-            
-        # Determine canvas width
-        is_static = (req.animation == "static")
-        if is_static:
-            current_display_mode = "static"
-            w = PANEL_W
-            if tw <= PANEL_W:
-                x = (PANEL_W - tw) // 2 - bbox[0]
-            else:
-                x = -bbox[0]
-        else:
+            quantized_img = pil_img.quantize(colors=8, method=Image.Quantize.MAXCOVERAGE)
+            rgb_quantized = quantized_img.convert("RGB")
+            quantized_rgb_data = list(rgb_quantized.getdata())
+
+            def rgb_to_hex(rgb):
+                return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+            final_pixel_colors = []
+            for idx, rgb_val in enumerate(quantized_rgb_data):
+                hex_val = rgb_to_hex(rgb_val)
+                if pixel_colors[idx] is None or hex_val == "#000000":
+                    final_pixel_colors.append(None)
+                else:
+                    final_pixel_colors.append(hex_val)
+
+            pixel_colors = final_pixel_colors
+            unique_colors = set([c for c in pixel_colors if c is not None])
+
+        if width > PANEL_W:
             current_display_mode = "move-left-loop"
-            w = max(PANEL_W, tw)
-            x = -bbox[0]
-            
-        y = (PANEL_H - th) // 2 - bbox[1]
-        
-        # Draw onto a 8-bit grayscale 'L' canvas to support antialiasing
-        text_img_L = Image.new('L', (w, PANEL_H), 0)
-        draw = ImageDraw.Draw(text_img_L)
-        draw.text((x, y), text, font=render_font, fill=255)
-        
-        final_img_L = text_img_L
-        tw_final = w
-        th = PANEL_H
+        else:
+            current_display_mode = "static"
 
-        final_img_1 = final_img_L.point(lambda p: 1 if p > 128 else 0, mode='1')
-
-        # 3. Hardware Decision
         if connected_client and connected_client.is_connected and connection_ready:
-            # Turn off clock/preset at the beginning to avoid interference
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-            await asyncio.sleep(0.05)
-            # Start session
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
-            await asyncio.sleep(0.05)
-            # Clear Screen first
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
-            await asyncio.sleep(0.05)
+            # Turn off clock/preset and clear screen cleanly before drawing
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=False)
             
-            anim_map = {"static": 0, "move-left": 1, "move-right": 2, "move-up": 3, "move-down": 4, "snow": 5, "bubble": 6, "flicker": 7}
-            anim_code = anim_map.get(req.animation or "move-left", 1)
-            bg_color = req.bgColor or "#000000"
+            speed = req.speed if req.speed is not None else current_speed
+            speed = max(1, min(15, speed))
+            hw_speed = speed
+    
+            for color in unique_colors:
+                bitmap = [1 if pixel_colors[idx] == color else 0 for idx in range(len(pixel_colors))]
+                if width > PANEL_W:
+                    anim_code = 1 if req.animation == "move-left" else 2 if req.animation == "move-right" else 3 if req.animation == "move-up" else 4 if req.animation == "move-down" else 1
+                    packet = protocol.hardware_scroll_command(bitmap, width, PANEL_H, color=color, speed=hw_speed, animation=anim_code)
+                else:
+                    packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=color)
+                await safe_write_gatt_char(protocol.WRITE_UUID, bytearray(packet), response=False)
             
-            if bg_color.lower() != "#000000" and tw_final <= PANEL_W and is_static:
-                bg_bitmap = [1] * (PANEL_W * PANEL_H)
-                bg_packet = protocol.bitmap_command(bg_bitmap, PANEL_W, PANEL_H, color=bg_color)
-                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(bg_packet), response=True)
-
-            if is_static and tw_final <= PANEL_W:
-                pixels = list(final_img_1.getdata())
-                bitmap = [1 if p > 0 else 0 for p in pixels]
-                packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=req.textColor)
-                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=True)
-                current_display_mode = "static"
+            # Commit Session atomically so all pixels appear together
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+        
+        # Dashboard preview
+        bg_rgb = hex_to_rgb(req.bgColor)
+        preview_img = Image.new("RGB", (width, PANEL_H), bg_rgb)
+        pixels_rgb = []
+        for c in pixel_colors:
+            if c is None:
+                pixels_rgb.append(bg_rgb)
             else:
-                speed = req.speed if req.speed is not None else current_speed
-                speed = max(1, min(15, speed))
-                hw_speed = speed
-                
-                pixels = list(final_img_1.getdata())
-                bitmap = [1 if p > 0 else 0 for p in pixels]
-                packet = protocol.hardware_scroll_command(bitmap, tw_final, PANEL_H, color=req.textColor, speed=hw_speed, animation=anim_code)
-                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=True)
-                
-            # Commit Session
-            await asyncio.sleep(0.05)
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
-
-        # 4. Dashboard Preview
-        preview_img = Image.new("RGB", (tw_final, PANEL_H), req.bgColor)
-        preview_img.paste(Image.new("RGB", (tw_final, PANEL_H), req.textColor), (0, 0), mask=final_img_L)
+                pixels_rgb.append(hex_to_rgb(c))
+        
+        preview_img.putdata(pixels_rgb)
         save_preview(preview_img, os.path.join(STATIC_DIR, "current.png"))
-        current_width = tw_final
+        current_width = width
         frames_sent += 1
-
         return {"status": "success"}
-    except Exception as e:
-        print(f"[push-text] Error: {e}")
-        import traceback; traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        
+    # 2. Text rendering path
+    # Check if this is a calendar event with ||| separator (title ||| start - end)
+    text = req.text or ""
+    if "|||" in text:
+        parts = text.split("|||", 1)
+        title = parts[0].strip()
+        times = parts[1].strip()
+        # Start the flipper task: alternates between title and times every 3s
+        active_scroller_task = asyncio.create_task(
+            flipper_worker(title, times, req.textColor, req.bgColor)
+        )
+        current_display_mode = "flipper"
+        return {"status": "success"}
+
+
+    # Standard text rendering
+    try:
+        render_font = ImageFont.truetype("arialbd.ttf", 18)
+    except Exception:
+        try:
+            render_font = ImageFont.truetype("arial.ttf", 18)
+        except Exception:
+            render_font = ImageFont.load_default()
+        
+    # Measure text using a temporary canvas to get width and height
+    temp_img = Image.new("L", (1, 1), 0)
+    temp_draw = ImageDraw.Draw(temp_img)
+    bbox = temp_draw.textbbox((0, 0), text, font=render_font)
+    
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    
+    if tw <= 0 or th <= 0:
+        return {"status": "error", "message": "Nothing to render"}
+        
+    # Determine canvas width
+    is_static = (req.animation == "static")
+    if is_static:
+        current_display_mode = "static"
+        w = PANEL_W
+        if tw <= PANEL_W:
+            x = (PANEL_W - tw) // 2 - bbox[0]
+        else:
+            x = -bbox[0]
+    else:
+        current_display_mode = "move-left-loop"
+        w = max(PANEL_W, tw)
+        x = -bbox[0]
+        
+    y = (PANEL_H - th) // 2 - bbox[1]
+    
+    # Draw onto a 8-bit grayscale 'L' canvas to support antialiasing
+    text_img_L = Image.new('L', (w, PANEL_H), 0)
+    draw = ImageDraw.Draw(text_img_L)
+    draw.text((x, y), text, font=render_font, fill=255)
+    
+    final_img_L = text_img_L
+    tw_final = w
+    th = PANEL_H
+
+    final_img_1 = final_img_L.point(lambda p: 1 if p > 128 else 0, mode='1')
+
+    # 3. Hardware Decision
+    if connected_client and connected_client.is_connected and connection_ready:
+        # Turn off clock/preset at the beginning to avoid interference
+        await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+        await asyncio.sleep(0.05)
+        # Start session
+        await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+        await asyncio.sleep(0.05)
+        # Clear Screen first
+        await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+        await asyncio.sleep(0.05)
+        
+        anim_map = {"static": 0, "move-left": 1, "move-right": 2, "move-up": 3, "move-down": 4, "snow": 5, "bubble": 6, "flicker": 7}
+        anim_code = anim_map.get(req.animation or "move-left", 1)
+        bg_color = req.bgColor or "#000000"
+        
+        if bg_color.lower() != "#000000" and tw_final <= PANEL_W and is_static:
+            bg_bitmap = [1] * (PANEL_W * PANEL_H)
+            bg_packet = protocol.bitmap_command(bg_bitmap, PANEL_W, PANEL_H, color=bg_color)
+            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(bg_packet), response=True)
+
+        if is_static and tw_final <= PANEL_W:
+            pixels = list(final_img_1.getdata())
+            bitmap = [1 if p > 0 else 0 for p in pixels]
+            packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=req.textColor)
+            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=True)
+            current_display_mode = "static"
+        else:
+            speed = req.speed if req.speed is not None else current_speed
+            speed = max(1, min(15, speed))
+            hw_speed = speed
+            
+            pixels = list(final_img_1.getdata())
+            bitmap = [1 if p > 0 else 0 for p in pixels]
+            packet = protocol.hardware_scroll_command(bitmap, tw_final, PANEL_H, color=req.textColor, speed=hw_speed, animation=anim_code)
+            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=True)
+            
+        # Commit Session
+        await asyncio.sleep(0.05)
+        await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+
+    # 4. Dashboard Preview
+    preview_img = Image.new("RGB", (tw_final, PANEL_H), req.bgColor)
+    preview_img.paste(Image.new("RGB", (tw_final, PANEL_H), req.textColor), (0, 0), mask=final_img_L)
+    save_preview(preview_img, os.path.join(STATIC_DIR, "current.png"))
+    current_width = tw_final
+    frames_sent += 1
+
+    return {"status": "success"}
 
 def save_preview(img: Image.Image, filepath: str):
     try:
