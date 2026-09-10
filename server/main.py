@@ -1152,46 +1152,75 @@ async def push_text(req: PushTextRequest):
     except Exception:
         pass
 
-    try:
         if req.pixels is not None:
-            is_anim = req.fileType in ("gif", "video") or (len(req.pixels) > 1280)
-            if is_anim:
-                num_frames = len(req.pixels) // 1280
+            # We will use the native GIF hardware decoder (0xC5) for all 64x20 image pushes (static or animated)
+            # This completely eliminates the slow "drawing" effect and the need for python background streaming.
+            is_image = req.fileType in ("gif", "video", "png", "jpg", "jpeg") or (len(req.pixels) % 1280 == 0 and len(req.pixels) > 0)
+            
+            # If it's a very wide image (scrolling text), we fall back to hardware_scroll_command (Mode 0)
+            if is_image and len(req.pixels) == 1280:
+                pass # It's a static 64x20 image, use GIF transfer
+            elif is_image and len(req.pixels) > 1280 and req.fileType not in ("gif", "video"):
+                is_image = False # It's scrolling text, fallback to Mode 0
+                
+            if is_image:
+                num_frames = max(1, len(req.pixels) // 1280)
                 raw_frames = extract_frames(req.pixels, num_frames)
                 frames = quantize_frames(raw_frames, req.bgColor or "#000000")
                 
                 speed = req.speed if req.speed is not None else current_speed
                 speed = max(1, min(15, speed))
                 
-                # Prefer exact frame duration over speed-formula
                 if req.frameDurationMs is not None and req.frameDurationMs > 0:
-                    delay_sec = max(0.016, req.frameDurationMs / 1000.0)
+                    delay_ms = req.frameDurationMs
                 else:
-                    delay_sec = max(0.05, 0.4 - (speed * 0.025))
+                    delay_ms = int(max(0.05, 0.4 - (speed * 0.025)) * 1000)
                 
                 gif_path = os.path.join(STATIC_DIR, "current.gif")
-                save_gif_preview(frames, req.bgColor or "#000000", delay_sec, gif_path)
+                # Save preview to disk
+                save_gif_preview(frames, req.bgColor or "#000000", delay_ms / 1000.0, gif_path)
                 
                 png_path = os.path.join(STATIC_DIR, "current.png")
                 if os.path.exists(png_path):
-                    try:
-                        os.remove(png_path)
-                    except Exception:
-                        pass
+                    try: os.remove(png_path)
+                    except: pass
                         
                 current_width = 64
-                current_display_mode = "animation"
+                current_display_mode = "animation" if num_frames > 1 else "static"
                 frames_sent += 1
                 
                 if connected_client and connected_client.is_connected and connection_ready:
-                    await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-                    await asyncio.sleep(0.05)
-                    await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+                    # Generate GIF bytes in memory
+                    gif_io = io.BytesIO()
+                    if len(frames) > 1:
+                        frames[0].save(gif_io, format='GIF', save_all=True, append_images=frames[1:], duration=delay_ms, loop=0, optimize=True)
+                    else:
+                        frames[0].save(gif_io, format='GIF', optimize=True)
+                    gif_bytes = gif_io.getvalue()
+
+                    hw_addr = 0xC5
+                    CHUNK_SIZE = 960
+                    
+                    # Upload GIF to 0xC5
+                    session_pkt = protocol.build_file_transfer_session_init(hw_addr=hw_addr, num_files=1)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, session_pkt, response=True)
                     await asyncio.sleep(0.05)
                     
-                    active_scroller_task = asyncio.create_task(
-                        animation_worker(frames, req.bgColor, speed, frame_duration_ms=req.frameDurationMs)
-                    )
+                    total_chunks = (len(gif_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
+                    for i in range(total_chunks):
+                        start = i * CHUNK_SIZE
+                        chunk = gif_bytes[start:start+CHUNK_SIZE]
+                        chunk_pkt = protocol.build_file_transfer_chunk(
+                            hw_addr=hw_addr, file_index=0, chunk_index=i,
+                            total_chunks=total_chunks, data=chunk, chunk_size=len(chunk)
+                        )
+                        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
+                        
+                    # Commit file transfer to 0xC5
+                    commit_pkt = protocol.build_file_transfer_complete(hw_addr, num_frames=1)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
+                    await asyncio.sleep(0.05)
+                    
                 return {"status": "success"}
 
             # Helper to parse hex to rgb
@@ -2069,98 +2098,102 @@ async def save_preset(req: SavePresetRequest):
             LOY_CHUNK_OVERHEAD = 37
             mtu = getattr(connected_client, 'mtu_size', 23)
             max_single_write = mtu - 3
-            CHUNK_SIZE = max(20, max_single_write - LOY_CHUNK_OVERHEAD)
-            hw_addr = slot_id + 36  # user slot 0 -> hw 0x24, slot 1 -> 0x25, etc.
+            # Save to hardware slot
+            hw_addr = protocol.WRITE_SLOT_USER_START + slot_id
+            
+            # Stop playlist and screen while saving to flash
+            try:
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
+                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+                await asyncio.sleep(0.02)
+            except Exception:
+                pass
 
-            # Build per-frame YSTP files (Mode 1 RGB24 for full 24-bit color fidelity)
-            ystp_files = []
-            for frame_img in pil_frames:
-                frame_rgb = frame_img.convert("RGB")
-                fw, fh = frame_rgb.size
-                fw = min(fw, 64); fh = min(fh, 20)
-                frame_pixels = []
-                for py in range(fh):
-                    for px in range(fw):
-                        r, g, b = frame_rgb.getpixel((px, py))
-                        frame_pixels.append(f"#{r:02x}{g:02x}{b:02x}")
-                
-                # If scrolling animation selected on text, speed controls scroll speed
-                if preset.mode == 'text' and preset.animation and preset.animation != "static":
-                    speed_val = max(1, min(255, preset.speed if preset.speed is not None else 48))
-                else:
-                    speed_val = 64
-                
-                ystp = protocol.generate_ystp(
-                    width=fw, height=fh,
-                    mode=1,
-                    speed=speed_val,
-                    pixels=frame_pixels
-                )
-                ystp_files.append(ystp)
+            if req.mode == 'image' or req.mode == 'text':
+                try:
+                    if req.mode == 'image':
+                        img_path = get_asset_path("images", preset.filename)
+                        if os.path.exists(img_path):
+                            pil_img = Image.open(img_path).convert('RGBA')
+                            if getattr(pil_img, 'is_animated', False):
+                                # It's an animated GIF
+                                with open(img_path, 'rb') as f:
+                                    gif_bytes = f.read()
+                            else:
+                                # Static image, generate 1-frame GIF
+                                canvas = Image.new('RGB', (64, 20), (0,0,0))
+                                pil_img.thumbnail((64, 20), Image.Resampling.LANCZOS)
+                                x = (64 - pil_img.width) // 2
+                                y = (20 - pil_img.height) // 2
+                                canvas.paste(pil_img, (x, y), pil_img if pil_img.mode == 'RGBA' else None)
+                                
+                                gif_io = io.BytesIO()
+                                canvas.save(gif_io, format='GIF', optimize=True)
+                                gif_bytes = gif_io.getvalue()
+                    else:
+                        # Text Mode - create GIF frames
+                        frames = generate_text_frames(preset)
+                        if not frames: frames = [Image.new('RGB', (64,20), (0,0,0))]
+                        
+                        if preset.animation and preset.animation != "static":
+                            speed_val = max(1, min(255, preset.speed if preset.speed is not None else 48))
+                            duration = int(1000 / (speed_val * 2))
+                            if duration <= 0: duration = 100
+                        else:
+                            duration = 100
+                            
+                        gif_io = io.BytesIO()
+                        frames[0].save(
+                            gif_io, format='GIF',
+                            save_all=True, append_images=frames[1:],
+                            duration=duration, loop=0, optimize=True
+                        )
+                        gif_bytes = gif_io.getvalue()
 
-            num_files = len(ystp_files)
-            CHUNK_SIZE = 960
-
-            print(f"[save_preset] slot={slot_id} hw=0x{hw_addr:02X} num_files={num_files} speed={speed_val}")
-
-            # Step 1: Session Init
-            session_pkt = protocol.build_file_transfer_session_init(hw_addr=hw_addr, num_files=num_files)
-            print(f"[save_preset] SESSION INIT: {session_pkt[:16].hex()}...")
-            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, session_pkt, response=True)
-            await asyncio.sleep(0.3)
-
-            # Step 2: Transfer each YSTP file (frame 0..N-1)
-            for fi, ystp in enumerate(ystp_files):
-                ystp_chunk_count = (len(ystp) + CHUNK_SIZE - 1) // CHUNK_SIZE
-                ystp_hdr = protocol.build_file_header(hw_addr=hw_addr, file_index=fi)
-                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, ystp_hdr, response=True)
-                await asyncio.sleep(0.05)
-
-                for ci in range(ystp_chunk_count):
-                    chunk = ystp[ci * CHUNK_SIZE : (ci + 1) * CHUNK_SIZE]
-                    pkt = protocol.build_file_transfer_chunk(
-                        hw_addr=hw_addr, file_index=fi, chunk_index=ci,
-                        total_chunks=ystp_chunk_count, data=chunk, chunk_size=CHUNK_SIZE)
-                    print(f"[save_preset] YSTP[{fi}] chunk {ci+1}/{ystp_chunk_count} ({len(chunk)}B pkt={len(pkt)}B)")
-                    await write_large_gatt_char(connected_client, protocol.WRITE_UUID, pkt, response=True, delay=0.005)
+                    # Upload GIF directly as File 0
+                    CHUNK_SIZE = 960
+                    session_pkt = protocol.build_file_transfer_session_init(hw_addr=hw_addr, num_files=1)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, session_pkt, response=True)
+                    await asyncio.sleep(0.05)
+                    
+                    total_chunks = (len(gif_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
+                    for i in range(total_chunks):
+                        start = i * CHUNK_SIZE
+                        chunk = gif_bytes[start:start+CHUNK_SIZE]
+                        chunk_pkt = protocol.build_file_transfer_chunk(
+                            hw_addr=hw_addr, file_index=0, chunk_index=i,
+                            total_chunks=total_chunks, data=chunk, chunk_size=len(chunk)
+                        )
+                        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
+                        
+                    # Commit file transfer
+                    commit_pkt = protocol.build_file_transfer_complete(hw_addr, num_frames=1)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
                     await asyncio.sleep(0.05)
 
-            await asyncio.sleep(0.3)
+                    # Enable user slots in hardware sequencer table
+                    p1 = bytes([0x35, 0x0a, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d])
+                    p2 = bytes([0x35, 0x02, 0x2e, 0x2f])
+                    pkt1 = protocol.build_packet(p1, cmd_type=0xC1, sub_type=0x03)
+                    pkt2 = protocol.build_packet(p2, cmd_type=0xC1, sub_type=0x03)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
+                    await asyncio.sleep(0.02)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
+                    await asyncio.sleep(0.02)
 
-            # Step 3: Flash session commit flush (Packet [135])
-            flush_pkt = protocol.build_packet(bytes([0x08, 0x02, 0x00, hw_addr]), cmd_type=0xC1, sub_type=0x02)
-            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, flush_pkt, response=True)
-            await asyncio.sleep(0.05)
+                    # Command the sign to play the newly saved user slot from flash memory
+                    slot_pkt = protocol.build_user_slot_play_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, slot_pkt, response=True)
+                    await asyncio.sleep(0.05)
 
-            # Step 4: Link and commit hw_addr in sign's config table (Packet [119]: 35 19 hw_addr ...)
-            config_bytes = bytes([0x01, 0x99, 0x01, 0x99, 0x01, 0x99, 0x01, 0x99, 0x01, 0x99, 0x01, 0x99, 0x01, 0x99, 0x02, 0x02, 0x50, 0x73, 0x01, 0x98])
-            save_payload = bytes([0x35, 0x19, hw_addr]) + config_bytes + bytes([0, 0, 0, 0])
-            save_pkt = protocol.build_packet(save_payload, cmd_type=0xC1, sub_type=0x02)
-            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, save_pkt, response=True)
-            await asyncio.sleep(0.05)
+                    # Do NOT call push_text here, as it starts the Python streaming loop which overrides the hardware playback
+                    print(f"[save_preset] Done. Slot {slot_id} (hw=0x{hw_addr:02X}) saved GIF ({len(gif_bytes)} bytes) and locked to display.")
 
-            # Step 5: Enable user slots in hardware sequencer table (seq 8 & 9)
-            p1 = bytes([0x35, 0x0a, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d])
-            p2 = bytes([0x35, 0x02, 0x2e, 0x2f])
-            pkt1 = protocol.build_packet(p1, cmd_type=0xC1, sub_type=0x03)
-            pkt2 = protocol.build_packet(p2, cmd_type=0xC1, sub_type=0x03)
-            await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
-            await asyncio.sleep(0.02)
-            await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
-            await asyncio.sleep(0.02)
-
-            # Step 6: Command the sign to play the newly saved user slot from flash memory (seq 7)
-            slot_pkt = protocol.build_user_slot_play_command(slot_id)
-            await safe_write_gatt_char(protocol.WRITE_UUID, slot_pkt, response=True)
-            await asyncio.sleep(0.05)
-
-            # Step 7: Immediately display the newly saved preset (static or animation)
-            try:
-                await push_text(preset)
-            except Exception as pe:
-                print(f"[save_preset] Display update: {pe}")
-
-            print(f"[save_preset] Done. Slot {slot_id} (hw=0x{hw_addr:02X}) saved and locked to display.")
+                except Exception as e:
+                    print(f"[save_preset] File mode error: {e}")
 
         # Increment frames sent to signal status updates
         frames_sent += 1
