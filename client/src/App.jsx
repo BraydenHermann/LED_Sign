@@ -488,8 +488,7 @@ const ClockPresetCardPreview = ({ preset, style }) => {
       ref={canvasRef} 
       width={64} 
       height={20} 
-      className="preset-card-image" 
-      style={style || { width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
+      className="led-preview"
     />
   );
 };
@@ -583,8 +582,7 @@ const AnimatedPresetCardPreview = ({ preset }) => {
       ref={canvasRef} 
       width={64} 
       height={20} 
-      className="preset-card-image" 
-      style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
+      className="led-preview" 
     />
   );
 };
@@ -633,8 +631,7 @@ const PixelPresetCardPreview = ({ preset, style }) => {
       ref={canvasRef} 
       width={64} 
       height={20} 
-      className="preset-card-image" 
-      style={style || { width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
+      className="led-preview"
     />
   );
 };
@@ -686,8 +683,7 @@ const TextPresetCardPreview = ({ preset }) => {
       ref={canvasRef} 
       width={64} 
       height={20} 
-      className="preset-card-image" 
-      style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
+      className="led-preview" 
     />
   );
 };
@@ -2151,7 +2147,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                       ) : p.pixels && p.pixels.length === 1280 ? (
                         <PixelPresetCardPreview preset={p} />
                       ) : p.thumbnail ? (
-                        <img src={p.thumbnail} className="preset-card-image" style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }} draggable={false} />
+                        <img src={p.thumbnail} className="led-preview" draggable={false} />
                       ) : (
                         <div className="preset-card-content" style={{ background: p.bgColor || '#000000' }}>
                           <p style={{ color: p.textColor || '#fff', fontSize: 16, fontWeight: 900, transform: `rotate(${p.rotation || 0}deg)`, textAlign: 'center', lineHeight: 1 }}>
@@ -2283,7 +2279,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                           ) : p.pixels && p.pixels.length === 1280 ? (
                             <PixelPresetCardPreview preset={p} />
                           ) : p.thumbnail ? (
-                            <img src={p.thumbnail} className="preset-card-image" style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }} draggable={false} />
+                            <img src={p.thumbnail} className="led-preview" draggable={false} />
                           ) : (
                             <div className="preset-card-content" style={{ background: p.bgColor || '#000000' }}>
                               <p style={{ color: p.textColor || '#fff', fontSize: 16, fontWeight: 900, transform: `rotate(${p.rotation || 0}deg)`, textAlign: 'center', lineHeight: 1 }}>
@@ -3614,7 +3610,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 ) : p.pixels && p.pixels.length === 1280 ? (
                   <PixelPresetCardPreview preset={p} />
                 ) : p.thumbnail ? (
-                  <img src={p.thumbnail} className="preset-card-image" style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }} draggable={false} />
+                  <img src={p.thumbnail} className="led-preview" draggable={false} />
                 ) : (
                   <div className="preset-card-content" style={{ background: p.bgColor || '#000000' }}>
                     <p style={{ color: p.textColor || '#fff', fontSize: 16, fontWeight: 900, transform: `rotate(${p.rotation || 0}deg)`, textAlign: 'center', lineHeight: 1 }}>

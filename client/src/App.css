@@ -70,10 +70,11 @@
   }
 }
 
+/* Live preview image: fills the full preview box with pixelated rendering */
 .preview-box img.static-preview,
 .preview-box img.scrolling-preview {
+  width: 100% !important;
   height: 100% !important;
-  width: auto !important;
   max-width: none !important;
   object-fit: fill;
   image-rendering: pixelated;
@@ -88,6 +89,15 @@
 .preview-box img.scrolling-preview.loaded,
 .preview-box img.static-preview.loaded {
   opacity: 1;
+}
+
+/* Shared class for ALL preset card preview canvases and thumbnail images */
+.led-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  image-rendering: pixelated;
+  display: block;
 }
 
 #next-steps {
