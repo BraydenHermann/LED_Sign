@@ -1,4 +1,6 @@
 import os
+import io
+import json as _json
 import asyncio
 import struct
 import datetime
@@ -31,26 +33,40 @@ def save_preview(img: Image.Image, path: str):
             pass
         raise
 
+ble_lock = asyncio.Lock()
+
+async def cancel_active_worker():
+    global active_scroller_task
+    if active_scroller_task and not active_scroller_task.done():
+        task = active_scroller_task
+        active_scroller_task = None
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=1.5)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass
+        await asyncio.sleep(0.05)
+
 async def write_large_gatt_char(client: BleakClient, char_uuid: str, data: bytes, response: bool = True, chunk_size: Optional[int] = None, delay: float = 0.002):
     """Writes a potentially large bytearray/bytes payload by chunking it.
-    If chunk_size is not provided, it is dynamically determined using client.mtu_size.
-    We chunk all packets exceeding chunk_size to avoid MTU/Prepare Queue write errors.
+    Protected by ble_lock to prevent concurrent BLE operations on Windows.
     """
     if not client or not getattr(client, "is_connected", False):
         return
     try:
-        if chunk_size is None:
-            mtu = getattr(client, "mtu_size", 23)
-            chunk_size = max(20, min(244, mtu - 3))
-            
-        if len(data) <= chunk_size:
-            await client.write_gatt_char(char_uuid, bytearray(data), response=response)
-            return
-        for i in range(0, len(data), chunk_size):
-            chunk = data[i:i+chunk_size]
-            await client.write_gatt_char(char_uuid, bytearray(chunk), response=response)
-            if delay > 0:
-                await asyncio.sleep(delay)
+        async with ble_lock:
+            if chunk_size is None:
+                mtu = getattr(client, "mtu_size", 23)
+                chunk_size = max(20, min(244, mtu - 3))
+                
+            if len(data) <= chunk_size:
+                await client.write_gatt_char(char_uuid, bytearray(data), response=response)
+                return
+            for i in range(0, len(data), chunk_size):
+                chunk = data[i:i+chunk_size]
+                await client.write_gatt_char(char_uuid, bytearray(chunk), response=response)
+                if delay > 0:
+                    await asyncio.sleep(delay)
     except Exception as e:
         print(f"[BLE write_large_gatt_char error] {e}")
 
@@ -58,9 +74,25 @@ async def safe_write_gatt_char(char_uuid: str, data: Union[bytes, bytearray], re
     global connected_client, connection_ready
     if connected_client and connected_client.is_connected and getattr(connected_client, "_backend", None):
         try:
-            await connected_client.write_gatt_char(char_uuid, bytearray(data), response=response)
+            async with ble_lock:
+                await connected_client.write_gatt_char(char_uuid, bytearray(data), response=response)
         except Exception as e:
             print(f"[safe_write_gatt_char error] {e}")
+
+async def stop_all_playback(blank: bool = False):
+    """Halts the onboard hardware playlist engine and clock."""
+    global connected_client, connection_ready
+    if connected_client and connected_client.is_connected and connection_ready:
+        try:
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
+            await asyncio.sleep(0.02)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+            await asyncio.sleep(0.02)
+            if blank:
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+                await asyncio.sleep(0.02)
+        except Exception as e:
+            print(f"[stop_all_playback error] {e}")
 
 app = FastAPI()
 protocol = LOYWebProtocol()
@@ -78,7 +110,7 @@ PANEL_H = 20
 current_display_mode: str = "static"
 
 current_width: int = 64
-current_speed: int = 13
+current_speed: int = 8
 brightness: int = 15
 power: bool = True
 start_time = datetime.datetime.now()
@@ -89,6 +121,65 @@ current_clock_bg_color: str = "#000000"
 current_clock_format: str = "24h"
 current_clock_show_seconds: bool = True
 current_clock_style: str = "default"
+
+# Hardware Slots State
+# Hardware Slots State
+hardware_slots_state = {i: {"slot_id": i, "occupied": False, "key": ""} for i in range(12)}
+notification_buffer = bytearray()
+
+def notification_handler(sender, data: bytearray):
+    global hardware_slots_state, notification_buffer
+    try:
+        notification_buffer.extend(data)
+        while len(notification_buffer) >= 10:
+            idx = notification_buffer.find(b'\xaa\x55')
+            if idx == -1:
+                notification_buffer.clear()
+                break
+            if idx > 0:
+                del notification_buffer[:idx]
+            if len(notification_buffer) < 10:
+                break
+
+            pkt_len = struct.unpack('<H', notification_buffer[4:6])[0]
+            total_pkt_len = pkt_len + 4
+            if len(notification_buffer) < total_pkt_len:
+                break
+
+            packet = bytes(notification_buffer[:total_pkt_len])
+            del notification_buffer[:total_pkt_len]
+
+            cmd_type = packet[8]
+            sub_type = packet[9]
+            cmd = packet[10]
+
+            if cmd_type == 0x81 and sub_type == 0x83 and cmd == 0x35:
+                payload = packet[10:-2] if len(packet) > 12 else packet[10:]
+                if len(payload) > 3 and payload[0] == 0x35 and payload[1] == 0x81:
+                    entries = payload[3:]
+                elif len(payload) > 2 and payload[0] == 0x81:
+                    entries = payload[2:]
+                elif len(payload) > 1:
+                    entries = payload[1:]
+                else:
+                    entries = b''
+
+                i = 0
+                while i + 21 <= len(entries):
+                    s_id = entries[i]
+                    s_key = entries[i+1:i+21]
+                    is_occ = any(b != 0 for b in s_key)
+                    if 0 <= s_id < 12:
+                        hardware_slots_state[s_id] = {
+                            "slot_id": s_id,
+                            "occupied": is_occ,
+                            "key": s_key.hex()
+                        }
+                    i += 21
+                occ_slots = [s for s, v in hardware_slots_state.items() if v.get("occupied")]
+                print(f"[notification_handler] Hardware slot inventory updated. Occupied slots: {occ_slots}")
+    except Exception as e:
+        print(f"[notification_handler error] {e}")
 
 
 # Enable CORS for frontend Vite dev server (port 5173) to backend communication
@@ -128,6 +219,11 @@ class PushTextRequest(BaseModel):
     id: Optional[Any] = None
 
     model_config = {"extra": "allow"}
+
+class RenderTextPreviewRequest(BaseModel):
+    text: Optional[str] = ""
+    textColor: Optional[str] = "#FFFFFF"
+    bgColor: Optional[str] = "#000000"
 
 class ProcessGifRequest(BaseModel):
     imgSrc: str
@@ -231,18 +327,10 @@ async def process_gif(req: ProcessGifRequest):
         w = req.dwBase * req.zoom
         h = req.dhBase * req.zoom
         pixels, speed, duration_ms = process_gif_pixels(req.imgSrc, req.canvasX, req.canvasY, w, h, req.bgColor or "#000000")
-        
-        num_frames = len(pixels) // 1280
-        raw_frames = extract_frames(pixels, num_frames)
-        quantized_frames = quantize_frames(raw_frames, req.bgColor or "#000000")
-        
-        stitched_pixels = []
-        for r in range(20):
-            for f in range(num_frames):
-                row_start = r * 64
-                stitched_pixels.extend(quantized_frames[f][row_start : row_start + 64])
-                
-        return {"pixels": stitched_pixels, "speed": speed, "frameDurationMs": duration_ms}
+        # Return the RGB pixels directly — process_gif_pixels() already renders full-color
+        # RGB frames. Applying quantize_frames() here (MAXCOVERAGE → 3 colors) was causing
+        # drastic color corruption (e.g. beer mug GIF turning mostly yellow on re-save).
+        return {"pixels": pixels, "speed": speed, "frameDurationMs": duration_ms}
     except Exception as e:
         print(f"Error processing GIF: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -308,10 +396,13 @@ async def connect(req: ConnectRequest):
     connection_ready = False
     if connected_client:
         try:
-            await connected_client.disconnect()
+            if connected_client.is_connected:
+                await connected_client.stop_notify(protocol.NOTIFY_UUID)
+                await connected_client.disconnect()
         except Exception:
             pass
         connected_client = None
+        await asyncio.sleep(0.5)
     try:
         if os.path.exists(os.path.join(STATIC_DIR, "current.gif")):
             os.remove(os.path.join(STATIC_DIR, "current.gif"))
@@ -321,102 +412,153 @@ async def connect(req: ConnectRequest):
         pass
 
     try:
+        client = None
+        print(f"[connect] Discovering LED sign (requested: {req.address})...")
         device = None
-        print(f"Scanning for LED sign (requested: {req.address})...")
-        devices_dict = await BleakScanner.discover(timeout=5.0, return_adv=True)
-        
-        # 1. First, try to find the exact requested MAC address
-        for addr, (d, adv) in devices_dict.items():
-            if addr.lower() == req.address.lower():
-                device = d
-                print(f"Found exact requested MAC address match: {d.name} ({addr})")
-                break
-                
-        # 2. If exact MAC not found, auto-resolve to best sign
-        if not device and not req.address:
-            active_named = []
-            unnamed_candidates = []
-            
-            for addr, (d, adv) in devices_dict.items():
-                name = d.name or ""
-                services = adv.service_uuids or []
-                is_named_led = (
-                    "HELLO" in name
-                    or "SIGN" in name
-                    or name.startswith("YS")
-                    or name.startswith("TL")
-                    or name.startswith("LOY")
-                    or name.startswith("a00")
-                )
-                is_unnamed_led = (
-                    not is_named_led and (
-                        "0000fff0-0000-1000-8000-00805f9b34fb" in [s.lower() for s in services]
-                        or "0000fff1-0000-1000-8000-00805f9b34fb" in [s.lower() for s in services]
-                    )
-                )
-                if is_named_led:
-                    active_named.append((d, adv))
-                    print(f"  Found active named LED sign: {name} ({addr}), RSSI: {adv.rssi}")
-                elif is_unnamed_led:
-                    unnamed_candidates.append((d, adv))
-                    print(f"  Found active unnamed candidate: {name or 'unnamed'} ({addr}), RSSI: {adv.rssi}")
-
-            if active_named:
-                active_named.sort(key=lambda x: -(x[1].rssi or -100))
-                device = active_named[0][0]
-                print(f"Auto-resolved to active named sign: {device.name} ({device.address}), RSSI: {active_named[0][1].rssi}")
-            elif unnamed_candidates:
-                unnamed_candidates.sort(key=lambda x: -(x[1].rssi or -100))
-                device = unnamed_candidates[0][0]
-                print(f"Auto-resolved to active unnamed sign: {device.name} ({device.address}), RSSI: {unnamed_candidates[0][1].rssi}")
+        if req.address:
+            try:
+                device = await BleakScanner.find_device_by_address(req.address, timeout=8.0)
+                if device:
+                    print(f"[connect] Found exact requested MAC via find_device: {device.name} ({device.address})")
+            except Exception as fe:
+                print(f"[connect] find_device_by_address fallback: {fe}")
 
         if not device:
+            devices_dict = await BleakScanner.discover(timeout=7.0, return_adv=True)
+            # Match exact address if provided
             if req.address:
-                print(f"Device {req.address} not found in scan, attempting direct connection...")
-                device = req.address
-            else:
-                raise Exception(f"LED sign not found in scan. Ensure the sign is powered on and nearby.")
-        
-        if isinstance(device, str):
-            print(f"Connecting to {device}...")
-        else:
-            print(f"Connecting to {device.name} ({device.address})...")
-        client = BleakClient(device)
-        await client.connect(timeout=30.0)
-        
-        # Test and initialize connection
-        if client.is_connected:
-            connected_client = client
-            connection_ready = True
-            
-            # Stop any hardware clock and halt boot playlist immediately upon connection
+                for addr, (d, adv) in devices_dict.items():
+                    if addr.lower() == req.address.lower():
+                        device = d
+                        print(f"[connect] Found exact requested MAC in scan: {d.name} ({addr})")
+                        break
+
+                # If an address was explicitly requested but not found at all, fail clearly
+                if not device:
+                    raise Exception(
+                        f"LED sign {req.address} was not found in BLE scan. "
+                        "Ensure the sign is powered on and nearby, then try again."
+                    )
+                    
+            # Auto-resolve only when no address was requested
+            if not device and not req.address:
+                active_named = []
+                unnamed_candidates = []
+                for addr, (d, adv) in devices_dict.items():
+                    name = d.name or ""
+                    services = adv.service_uuids or []
+                    is_named_led = (
+                        "HELLO" in name
+                        or "SIGN" in name
+                        or name.startswith("YS")
+                        or name.startswith("TL")
+                        or name.startswith("LOY")
+                        or name.startswith("a00")
+                    )
+                    is_unnamed_led = (
+                        not is_named_led and (
+                            "0000fff0-0000-1000-8000-00805f9b34fb" in [s.lower() for s in services]
+                            or "0000fff1-0000-1000-8000-00805f9b34fb" in [s.lower() for s in services]
+                        )
+                    )
+                    if is_named_led:
+                        active_named.append((d, adv))
+                    elif is_unnamed_led:
+                        unnamed_candidates.append((d, adv))
+
+                if active_named:
+                    active_named.sort(key=lambda x: -(x[1].rssi or -100))
+                    device = active_named[0][0]
+                    print(f"[connect] Auto-resolved to named sign: {device.name} ({device.address})")
+                elif unnamed_candidates:
+                    unnamed_candidates.sort(key=lambda x: -(x[1].rssi or -100))
+                    device = unnamed_candidates[0][0]
+                    print(f"[connect] Auto-resolved to unnamed sign: {device.name} ({device.address})")
+
+        if not device:
+            raise Exception(f"LED sign {req.address or ''} not found. Ensure the sign is powered on and in range.")
+
+        def on_disconnect(c):
+            global connected_client, connection_ready
+            print(f"[BLE] Device disconnected callback: {getattr(c, 'address', 'unknown')}")
+            connected_client = None
+            connection_ready = False
+
+        last_connect_error = None
+        for attempt in range(2):
             try:
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-                await asyncio.sleep(0.05)
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
-            except Exception as se:
-                print(f"[connect] Warning turning off clock/playlist: {se}")
-            
+                if attempt > 0:
+                    # Re-scan to get a fresh BLEDevice handle — Windows caches can go stale
+                    print(f"[connect] Retry {attempt}: re-scanning for fresh device handle...")
+                    await asyncio.sleep(1.0)
+                    fresh = await BleakScanner.find_device_by_address(device.address, timeout=8.0)
+                    if fresh:
+                        device = fresh
+                        print(f"[connect] Got fresh device handle: {device.name} ({device.address})")
+                c = BleakClient(device, disconnected_callback=on_disconnect)
+                await c.connect(timeout=12.0)
+                if c.is_connected:
+                    client = c
+                    break
+            except Exception as ce:
+                last_connect_error = ce
+                print(f"[connect] Attempt {attempt + 1} failed: {ce}")
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+
+        if not client or not client.is_connected:
+            raise Exception(
+                f"Could not connect to sign after {2} attempts. "
+                f"Last error: {last_connect_error}. "
+                "Try: 1) Power cycle the sign, 2) Remove the sign from Windows Bluetooth settings and re-pair."
+            )
+
+        connected_client = client
+        connection_ready = True
+        
+        # Subscribe to notifications for slot query replies
+        try:
+            await connected_client.start_notify(protocol.NOTIFY_UUID, notification_handler)
+            print("[connect] Subscribed to NOTIFY_UUID notifications.")
+        except Exception as ne:
+            print(f"[connect] Warning starting notify: {ne}")
+
+        # Stop any hardware clock and halt boot playlist immediately upon connection
+        await stop_all_playback(blank=False)
+        try:
+            # Query hardware slot inventory
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 10), response=True)
+            await asyncio.sleep(0.05)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(10, 2), response=True)
+        except Exception as se:
+            print(f"[connect] Warning initializing slots: {se}")
+        
         return {"status": "success", "address": connected_client.address}
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         print(f"[connect] FAILED: {type(e).__name__}: {e}")
-        print(f"[connect] Traceback:\n{tb}")
         connected_client = None
         connection_ready = False
         raise HTTPException(status_code=408, detail=f"{type(e).__name__}: {e}")
 
 @app.post("/disconnect")
 async def disconnect():
-    global connected_client, connection_ready
+    global connected_client, connection_ready, current_display_mode
     connection_ready = False
     if connected_client:
+        try:
+            await connected_client.stop_notify(protocol.NOTIFY_UUID)
+        except Exception:
+            pass
         try:
             await connected_client.disconnect()
         except Exception:
             pass
         connected_client = None
+        await asyncio.sleep(0.5)
         
     try:
         if os.path.exists(os.path.join(STATIC_DIR, "current.gif")):
@@ -428,25 +570,47 @@ async def disconnect():
         pass
         
     return {"status": "success"}
+
+@app.get("/hardware-slots")
+async def get_hardware_slots(mac: str = ""):
+    global connected_client, connection_ready, hardware_slots_state, target_address
+            
+    current_mac = (mac or target_address or "").replace(':', '').lower()
+    slots_res = []
+    for slot_data in hardware_slots_state.values():
+        slot_id = slot_data.get("slot_id")
+        slot_info = dict(slot_data)
+        if current_mac and slot_id is not None:
+            json_file = f"preset_{current_mac}_{slot_id}.json"
+            gif_file = f"preset_{current_mac}_{slot_id}.gif"
+            has_local = os.path.exists(os.path.join(STATIC_DIR, json_file)) or os.path.exists(os.path.join(STATIC_DIR, gif_file))
+            if has_local:
+                slot_info["occupied"] = True
+            if os.path.exists(os.path.join(STATIC_DIR, json_file)):
+                try:
+                    with open(os.path.join(STATIC_DIR, json_file), "r") as fj:
+                        slot_info["preset_data"] = _json.load(fj)
+                except Exception:
+                    pass
+            if os.path.exists(os.path.join(STATIC_DIR, gif_file)):
+                slot_info["preview_url"] = f"/static/{gif_file}"
+        slots_res.append(slot_info)
+    return {"slots": slots_res}
 @app.post("/clear")
 async def clear():
     global connected_client, connection_ready, active_scroller_task, current_display_mode, current_width
     
-    # Cancel any active scrolling/flipper task
-    if active_scroller_task:
-        active_scroller_task.cancel()
-        active_scroller_task = None
+    # Cancel any active scrolling/flipper task cleanly
+    await cancel_active_worker()
         
     if connected_client and connected_client.is_connected and connection_ready:
         try:
-            # Turn off clock at the beginning to avoid interference
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-            await asyncio.sleep(0.05)
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
-            await asyncio.sleep(0.05)
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
-            await asyncio.sleep(0.05)
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+            await stop_all_playback(blank=True)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+            await asyncio.sleep(0.02)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+            await asyncio.sleep(0.02)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
             
@@ -527,7 +691,8 @@ async def play_preset(id: int, mac: str = ""):
             with open(json_path, "r") as fj:
                 preset_data = _json.load(fj)
             
-            is_anim = preset_data.get("fileType") in ("gif", "video") or (preset_data.get("pixels") and len(preset_data.get("pixels")) > 1280) or (preset_data.get("mode") == "text" and preset_data.get("animation") and preset_data.get("animation") != "static")
+            anim_name = preset_data.get("animation")
+            is_anim = preset_data.get("fileType") in ("gif", "video") or (preset_data.get("pixels") and len(preset_data.get("pixels")) > 1280) or (anim_name and anim_name not in ("static", "show now"))
             
             if is_anim:
                 if os.path.exists(gif_path):
@@ -549,18 +714,12 @@ async def play_preset(id: int, mac: str = ""):
         frames_sent += 1
 
         if connected_client and connected_client.is_connected and connection_ready:
-            # Select and play the user slot directly from flash!
-            slot_pkt = protocol.build_user_slot_play_command(id)
-            await safe_write_gatt_char(protocol.WRITE_UUID, slot_pkt, response=False)
-            
-            # Also push the preset directly to ensure display is updated immediately!
-            if os.path.exists(json_path):
-                try:
-                    with open(json_path, "r") as fj:
-                        saved_preset = _json.load(fj)
-                    await push_text(PushTextRequest(**saved_preset))
-                except Exception as pe:
-                    print(f"[/preset] Error updating display: {pe}")
+            # Tell sign to display this specific saved slot in single mode
+            select_pkt = protocol.build_slot_select_command(id)
+            await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+            await asyncio.sleep(0.02)
+            play_pkt = protocol.build_user_slot_play_command(id, loop_mode=0)
+            await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
 
         return {"status": "success"}
     except Exception as e:
@@ -769,14 +928,11 @@ def quantize_frames(frames_pixels: List[List[Any]], bg_color_hex: str) -> List[L
     pil_img = Image.new("RGB", (width, height))
     pil_img.putdata(all_rgbs)
     
-    quantized_img = pil_img.quantize(colors=3, method=Image.Quantize.MAXCOVERAGE)
+    # 6 colors preserves full fidelity (e.g. red background, yellow beer, white foam, accents)
+    # while keeping BLE packet count small enough (<=6 packets/frame) to prevent dropped packets.
+    quantized_img = pil_img.quantize(colors=6, method=Image.Quantize.MAXCOVERAGE)
     rgb_quantized = quantized_img.convert("RGB")
     quantized_rgbs = list(rgb_quantized.getdata())
-    
-    bg_pil = Image.new("RGB", (1, 1), bg_rgb)
-    bg_quantized_img = bg_pil.quantize(palette=quantized_img)
-    bg_quantized_rgb = bg_quantized_img.convert("RGB").getpixel((0, 0))
-    bg_quantized_hex = rgb_to_hex(bg_quantized_rgb)
     
     quantized_frames_list = []
     for f in range(num_frames):
@@ -788,7 +944,7 @@ def quantize_frames(frames_pixels: List[List[Any]], bg_color_hex: str) -> List[L
                 hex_val = rgb_to_hex(rgb_val)
                 
                 orig_idx = r * 64 + c
-                if hex_val == bg_quantized_hex or canonical_frames[f][orig_idx] is None:
+                if canonical_frames[f][orig_idx] is None:
                     frame_pixels.append(None)
                 else:
                     frame_pixels.append(hex_val)
@@ -890,7 +1046,7 @@ async def animation_worker(frames_pixels: List[List[Any]], bg_color_hex: str, sp
             delay = max(0.016, frame_duration_ms / 1000.0)  # min ~60fps
             print(f"[animation_worker] Using exact frame duration: {frame_duration_ms:.1f}ms ({1000/frame_duration_ms:.1f}fps)")
         else:
-            delay = max(0.05, 0.4 - (speed * 0.025))
+            delay = max(0.01, (80 - speed * 5) / 1000.0)
             print(f"[animation_worker] Using speed-based delay: {delay*1000:.0f}ms (speed={speed})")
         
         if connected_client and connected_client.is_connected and connection_ready:
@@ -908,7 +1064,7 @@ async def animation_worker(frames_pixels: List[List[Any]], bg_color_hex: str, sp
             frame_start = asyncio.get_event_loop().time()
             
             # Start session for the frame
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
             
             packets = frame_packets[frame_idx]
             
@@ -917,7 +1073,7 @@ async def animation_worker(frames_pixels: List[List[Any]], bg_color_hex: str, sp
                 await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=False, delay=0.0)
                     
             # End/commit session for the frame to display all pixels atomically
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
             
             frame_idx = (frame_idx + 1) % num_frames
             
@@ -1135,12 +1291,10 @@ async def flipper_worker(title: str, times: str, textColor: str, bgColor: str):
 
 @app.post("/push-text")
 async def push_text(req: PushTextRequest):
-    global connected_client, frames_sent, active_scroller_task, current_display_mode, current_width, current_speed
+    global connected_client, connection_ready, frames_sent, active_scroller_task, current_display_mode, current_width, current_speed
     
-    # 1. Cancel previous scroller/flipper task
-    if active_scroller_task:
-        active_scroller_task.cancel()
-        active_scroller_task = None
+    # 1. Cancel previous scroller/flipper task cleanly
+    await cancel_active_worker()
 
     try:
         gif_path = os.path.join(STATIC_DIR, "current.gif")
@@ -1152,296 +1306,362 @@ async def push_text(req: PushTextRequest):
     except Exception:
         pass
 
-    if req.pixels is not None:
-        # We will use the native GIF hardware decoder (0xC5) for all 64x20 image pushes (static or animated)
-        # This completely eliminates the slow "drawing" effect and the need for python background streaming.
-        is_image = req.fileType in ("gif", "video", "png", "jpg", "jpeg") or (len(req.pixels) % 1280 == 0 and len(req.pixels) > 0)
+    try:
+        if req.pixels is not None:
+            is_anim = req.fileType in ("gif", "video") or (len(req.pixels) > 1280)
+            if is_anim:
+                num_frames = len(req.pixels) // 1280
+                raw_frames = extract_frames(req.pixels, num_frames)
+                frames = quantize_frames(raw_frames, req.bgColor or "#000000")
+                
+                speed = req.speed if req.speed is not None else current_speed
+                speed = max(1, min(15, speed))
+                
+                # Prefer exact frame duration over speed-formula
+                if req.frameDurationMs is not None and req.frameDurationMs > 0:
+                    delay_sec = max(0.016, req.frameDurationMs / 1000.0)
+                else:
+                    delay_sec = max(0.05, 0.4 - (speed * 0.025))
+                
+                gif_path = os.path.join(STATIC_DIR, "current.gif")
+                save_gif_preview(frames, req.bgColor or "#000000", delay_sec, gif_path)
+                
+                png_path = os.path.join(STATIC_DIR, "current.png")
+                if os.path.exists(png_path):
+                    try:
+                        os.remove(png_path)
+                    except Exception:
+                        pass
+                        
+                current_width = 64
+                current_display_mode = "animation"
+                frames_sent += 1
+                
+                if connected_client and connected_client.is_connected and connection_ready:
+                    # Explicitly stop onboard hardware slot player so sign stays on stream
+                    await stop_all_playback(blank=True)
+                    
+                    active_scroller_task = asyncio.create_task(
+                        animation_worker(frames, req.bgColor, speed, frame_duration_ms=req.frameDurationMs)
+                    )
+                return {"status": "success"}
+
+            # Helper to parse hex to rgb
+            def hex_to_rgb(hex_str: Optional[str]):
+                if not hex_str:
+                    return (0, 0, 0)
+                hex_str = hex_str.lstrip('#')
+                if len(hex_str) != 6:
+                    return (255, 255, 255)
+                return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+
+            # Group pixels by color
+            pixel_colors = []
+            bg_color_hex = (req.bgColor or "#000000").lower()
+            text_color_hex = (req.textColor or "#FFFFFF").lower()
+            for p in req.pixels:
+                if p is None or p == 0 or p == "0" or p == "#000000" or p is False:
+                    pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
+                elif isinstance(p, str) and p.startswith("#"):
+                    pixel_colors.append(p.lower())
+                elif isinstance(p, (int, float)) and not isinstance(p, bool):
+                    if math.isnan(p):
+                        pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
+                    elif p > 0.4:
+                        pixel_colors.append(text_color_hex)
+                    else:
+                        pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
+                elif p is True:
+                    pixel_colors.append(text_color_hex)
+                else:
+                    pixel_colors.append(text_color_hex)
+            
+            width = len(pixel_colors) // PANEL_H
+            
+            # Quantize colors to max 8 colors
+            non_none_colors = [c for c in pixel_colors if c is not None]
+            unique_colors = set(non_none_colors)
+            if len(unique_colors) > 8:
+                bg_rgb = hex_to_rgb(bg_color_hex)
+                pixels_rgb_for_pil = []
+                for c in pixel_colors:
+                    if c is None:
+                        pixels_rgb_for_pil.append(bg_rgb)
+                    else:
+                        pixels_rgb_for_pil.append(hex_to_rgb(c))
+
+                pil_img = Image.new("RGB", (width, PANEL_H))
+                pil_img.putdata(pixels_rgb_for_pil)
+
+                quantized_img = pil_img.quantize(colors=8, method=Image.Quantize.MAXCOVERAGE)
+                rgb_quantized = quantized_img.convert("RGB")
+                quantized_rgb_data = list(rgb_quantized.getdata())
+
+                def rgb_to_hex(rgb):
+                    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+                final_pixel_colors = []
+                for idx, rgb_val in enumerate(quantized_rgb_data):
+                    hex_val = rgb_to_hex(rgb_val)
+                    if pixel_colors[idx] is None or hex_val == "#000000":
+                        final_pixel_colors.append(None)
+                    else:
+                        final_pixel_colors.append(hex_val)
+
+                pixel_colors = final_pixel_colors
+                unique_colors = set([c for c in pixel_colors if c is not None])
+
+            is_static_pixels = (not req.animation or req.animation in ("static", "show now"))
+            if is_static_pixels and width <= PANEL_W:
+                current_display_mode = "static"
+            else:
+                current_display_mode = req.animation or "move-left"
+
+            if connected_client and connected_client.is_connected and connection_ready:
+                # Stop hardware slot engine before streaming — sign would otherwise revert
+                # to its saved slot after our session ends.
+                await stop_all_playback(blank=False)
+
+                # Start Session for atomic refresh
+                await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
+                
+                if is_static_pixels and width <= PANEL_W:
+                    # Atomic static push: render all 64x20 pixels simultaneously without slow drawing
+                    # 1. Background packet covering all empty/background pixels
+                    bg_bitmap = [1 if (pixel_colors[idx] is None or pixel_colors[idx] == bg_color_hex) else 0 for idx in range(len(pixel_colors))]
+                    bg_packet = protocol.bitmap_command(bg_bitmap, PANEL_W, PANEL_H, color=bg_color_hex)
+                    await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(bg_packet), response=False, delay=0.0)
+
+                    # 2. Foreground color packets
+                    unique_fg_colors = [c for c in unique_colors if c is not None and c != bg_color_hex]
+                    for color in unique_fg_colors:
+                        bitmap = [1 if pixel_colors[idx] == color else 0 for idx in range(len(pixel_colors))]
+                        packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=color)
+                        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=False, delay=0.0)
+                else:
+                    speed = req.speed if req.speed is not None else current_speed
+                    speed = max(1, min(15, speed))
+                    hw_speed = speed
+                    anim_map = {
+                        "show now": 1, "static": 1,
+                        "continuous left shift": 0,
+                        "shift left": 2, "move-left": 2,
+                        "move right": 3, "move-right": 3,
+                        "move up": 4, "move-up": 4,
+                        "move down": 5, "move-down": 5,
+                        "snow": 9, "bubble": 10, "flicker": 30
+                    }
+                    anim_code = anim_map.get((req.animation or "continuous left shift").strip().lower(), 0)
+                    for color in unique_colors:
+                        bitmap = [1 if pixel_colors[idx] == color else 0 for idx in range(len(pixel_colors))]
+                        packet = protocol.hardware_scroll_command(bitmap, width, PANEL_H, color=color, speed=hw_speed, animation=anim_code)
+                        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=False, delay=0.0)
+                
+                # Commit Session: LED matrix updates all pixels at once
+                await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+            
+            # Dashboard preview
+            bg_rgb = hex_to_rgb(req.bgColor)
+            preview_img = Image.new("RGB", (width, PANEL_H), bg_rgb)
+            pixels_rgb = []
+            for c in pixel_colors:
+                if c is None:
+                    pixels_rgb.append(bg_rgb)
+                else:
+                    pixels_rgb.append(hex_to_rgb(c))
+            
+            preview_img.putdata(pixels_rgb)
+            save_preview(preview_img, os.path.join(STATIC_DIR, "current.png"))
+            current_width = width
+            frames_sent += 1
+            return {"status": "success"}
+            
+        # 2. Text rendering path
+        # Check if this is a calendar event with ||| separator (title ||| start - end)
+        text = req.text or ""
+        if "|||" in text:
+            parts = text.split("|||", 1)
+            title = parts[0].strip()
+            times = parts[1].strip()
+            # Start the flipper task: alternates between title and times every 3s
+            active_scroller_task = asyncio.create_task(
+                flipper_worker(title, times, req.textColor, req.bgColor)
+            )
+            current_display_mode = "flipper"
+            return {"status": "success"}
+
+
+        # Standard text rendering
+        try:
+            render_font = ImageFont.truetype("arialbd.ttf", 18)
+        except Exception:
+            try:
+                render_font = ImageFont.truetype("arial.ttf", 18)
+            except Exception:
+                render_font = ImageFont.load_default()
+            
+        # Measure text using a temporary canvas to get width and height
+        temp_img = Image.new("L", (1, 1), 0)
+        temp_draw = ImageDraw.Draw(temp_img)
+        bbox = temp_draw.textbbox((0, 0), text, font=render_font)
         
-        # If it's a very wide image (scrolling text), we fall back to hardware_scroll_command (Mode 0)
-        if is_image and len(req.pixels) == 1280:
-            pass # It's a static 64x20 image, use GIF transfer
-        elif is_image and len(req.pixels) > 1280 and req.fileType not in ("gif", "video"):
-            is_image = False # It's scrolling text, fallback to Mode 0
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        
+        if tw <= 0 or th <= 0:
+            return {"status": "error", "message": "Nothing to render"}
             
-        if is_image:
-            num_frames = max(1, len(req.pixels) // 1280)
-            raw_frames = extract_frames(req.pixels, num_frames)
-            frames = quantize_frames(raw_frames, req.bgColor or "#000000")
-            
+        # Determine canvas width
+        # Determine canvas width
+        is_static = (not req.animation or req.animation in ("static", "show now"))
+        if is_static:
+            current_display_mode = "static"
+            w = PANEL_W
+            if tw <= PANEL_W:
+                x = (PANEL_W - tw) // 2 - bbox[0]
+            else:
+                x = -bbox[0]
+            y = (PANEL_H - th) // 2 - bbox[1]
+
+            # Draw onto a 8-bit grayscale 'L' canvas to support antialiasing
+            text_img_L = Image.new('L', (w, PANEL_H), 0)
+            draw = ImageDraw.Draw(text_img_L)
+            draw.text((x, y), text, font=render_font, fill=255)
+            final_img_1 = text_img_L.point(lambda p: 1 if p > 128 else 0, mode='1')
+
+            if connected_client and connected_client.is_connected and connection_ready:
+                # Turn off clock at the beginning to avoid interference
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+                await asyncio.sleep(0.05)
+                # Start session
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+                await asyncio.sleep(0.05)
+                # Clear Screen first
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+                await asyncio.sleep(0.05)
+
+                bg_color = req.bgColor or "#000000"
+                if bg_color.lower() != "#000000":
+                    bg_bitmap = [1] * (PANEL_W * PANEL_H)
+                    bg_packet = protocol.bitmap_command(bg_bitmap, PANEL_W, PANEL_H, color=bg_color)
+                    await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(bg_packet), response=True)
+
+                pixels = list(final_img_1.getdata())
+                bitmap = [1 if p > 0 else 0 for p in pixels]
+                packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=req.textColor)
+                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=True)
+
+                # Commit Session
+                await asyncio.sleep(0.05)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+
+            # Dashboard Preview
+            preview_img = Image.new("RGB", (PANEL_W, PANEL_H), req.bgColor or "#000000")
+            preview_img.paste(Image.new("RGB", (PANEL_W, PANEL_H), req.textColor or "#FFFFFF"), (0, 0), mask=text_img_L)
+            save_preview(preview_img, os.path.join(STATIC_DIR, "current.png"))
+
+            gif_path = os.path.join(STATIC_DIR, "current.gif")
+            if os.path.exists(gif_path):
+                try: os.remove(gif_path)
+                except Exception: pass
+
+            current_width = PANEL_W
+            frames_sent += 1
+            return {"status": "success"}
+
+        else:
             speed = req.speed if req.speed is not None else current_speed
             speed = max(1, min(15, speed))
-            
-            if req.frameDurationMs is not None and req.frameDurationMs > 0:
-                delay_ms = req.frameDurationMs
-            else:
-                delay_ms = int(max(0.05, 0.4 - (speed * 0.025)) * 1000)
-            
+            current_speed = speed
+            hw_speed = speed
+            y = (PANEL_H - th) // 2 - bbox[1]
+
+            anim_clean = (req.animation or "continuous left shift").strip().lower()
+
+            # 1. Update web dashboard / live preview GIF
+            step = 2
+            total_dist = PANEL_W + tw
+            num_anim_frames = max(1, total_dist // step)
+
+            scroll_interval_ms = max(10, 80 - speed * 5)
+            frame_delay_ms = max(20, scroll_interval_ms * step)
+            delay_sec = frame_delay_ms / 1000.0
+
+            anim_frames_pixels = []
+            for fi in range(num_anim_frames):
+                if anim_clean in ("move right", "move-right"):
+                    x_offset = -tw + fi * step - bbox[0]
+                    y_offset = y
+                elif anim_clean in ("move up", "move-up"):
+                    x_offset = (PANEL_W - tw) // 2 - bbox[0] if tw <= PANEL_W else -bbox[0]
+                    y_offset = PANEL_H - fi * step - bbox[1]
+                elif anim_clean in ("move down", "move-down"):
+                    x_offset = (PANEL_W - tw) // 2 - bbox[0] if tw <= PANEL_W else -bbox[0]
+                    y_offset = -th + fi * step - bbox[1]
+                else:
+                    x_offset = PANEL_W - fi * step - bbox[0]
+                    y_offset = y
+
+                frame_L = Image.new('L', (PANEL_W, PANEL_H), 0)
+                f_draw = ImageDraw.Draw(frame_L)
+                f_draw.text((x_offset, y_offset), text, font=render_font, fill=255)
+
+                f_pixels = [req.textColor if p > 128 else None for p in frame_L.getdata()]
+                anim_frames_pixels.append(f_pixels)
+
             gif_path = os.path.join(STATIC_DIR, "current.gif")
-            # Save preview to disk
-            save_gif_preview(frames, req.bgColor or "#000000", delay_ms / 1000.0, gif_path)
-            
+            save_gif_preview(anim_frames_pixels, req.bgColor or "#000000", delay_sec, gif_path)
+
             png_path = os.path.join(STATIC_DIR, "current.png")
             if os.path.exists(png_path):
                 try: os.remove(png_path)
-                except: pass
-                    
+                except Exception: pass
+
             current_width = 64
-            current_display_mode = "animation" if num_frames > 1 else "static"
+            current_display_mode = "animation"
             frames_sent += 1
-            
+
+            # 2. Hardware push using hardware_scroll_command (streaming directly on physical sign)
             if connected_client and connected_client.is_connected and connection_ready:
-                # Generate GIF bytes in memory
-                gif_io = io.BytesIO()
-                if len(frames) > 1:
-                    frames[0].save(gif_io, format='GIF', save_all=True, append_images=frames[1:], duration=delay_ms, loop=0, optimize=True)
-                else:
-                    frames[0].save(gif_io, format='GIF', optimize=True)
-                gif_bytes = gif_io.getvalue()
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+                await asyncio.sleep(0.05)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+                await asyncio.sleep(0.05)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+                await asyncio.sleep(0.05)
 
-                hw_addr = 0xC5
-                CHUNK_SIZE = 960
-                
-                # Upload GIF to 0xC5
-                session_pkt = protocol.build_file_transfer_session_init(hw_addr=hw_addr, num_files=1)
-                await safe_write_gatt_char(protocol.WRITE_UUID, session_pkt, response=True)
+                anim_map = {
+                    "static": 0, "show now": 0,
+                    "continuous left shift": 1, "move-left": 1,
+                    "move right": 2, "move-right": 2,
+                    "move up": 3, "move-up": 3,
+                    "move down": 4, "move-down": 4,
+                    "snow": 5, "bubble": 6, "flicker": 7
+                }
+                anim_code = anim_map.get(anim_clean, 1)
+
+                w_full = max(PANEL_W, tw)
+                full_text_img_L = Image.new('L', (w_full, PANEL_H), 0)
+                f_draw = ImageDraw.Draw(full_text_img_L)
+                f_draw.text((-bbox[0], y), text, font=render_font, fill=255)
+                full_1 = full_text_img_L.point(lambda p: 1 if p > 128 else 0, mode='1')
+                bitmap = [1 if p > 0 else 0 for p in list(full_1.getdata())]
+
+                packet = protocol.hardware_scroll_command(bitmap, w_full, PANEL_H, color=req.textColor, speed=hw_speed, animation=anim_code)
+                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=True)
+
                 await asyncio.sleep(0.05)
-                
-                total_chunks = (len(gif_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
-                for i in range(total_chunks):
-                    start = i * CHUNK_SIZE
-                    chunk = gif_bytes[start:start+CHUNK_SIZE]
-                    chunk_pkt = protocol.build_file_transfer_chunk(
-                        hw_addr=hw_addr, file_index=0, chunk_index=i,
-                        total_chunks=total_chunks, data=chunk, chunk_size=len(chunk)
-                    )
-                    await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
-                    
-                # Commit file transfer to 0xC5
-                commit_pkt = protocol.build_file_transfer_complete(hw_addr, num_frames=1)
-                await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
-                await asyncio.sleep(0.05)
-                
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+
             return {"status": "success"}
+    except Exception as e:
+        print(f"[push-text] Error: {e}")
+        err_str = str(e)
+        if "-2147023673" in err_str or "canceled" in err_str.lower() or "disconnected" in err_str.lower():
+            connection_ready = False
+            return {"status": "disconnected"}
+        raise HTTPException(status_code=500, detail=str(e))
 
-        # Helper to parse hex to rgb
-        def hex_to_rgb(hex_str: Optional[str]):
-            if not hex_str:
-                return (0, 0, 0)
-            hex_str = hex_str.lstrip('#')
-            if len(hex_str) != 6:
-                return (255, 255, 255)
-            return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
-
-        # Group pixels by color
-        pixel_colors = []
-        bg_color_hex = (req.bgColor or "#000000").lower()
-        text_color_hex = (req.textColor or "#FFFFFF").lower()
-        for p in req.pixels:
-            if p is None or p == 0 or p == "0" or p == "#000000" or p is False:
-                pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
-            elif isinstance(p, str) and p.startswith("#"):
-                pixel_colors.append(p.lower())
-            elif isinstance(p, (int, float)) and not isinstance(p, bool):
-                if math.isnan(p):
-                    pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
-                elif p > 0.4:
-                    pixel_colors.append(text_color_hex)
-                else:
-                    pixel_colors.append(bg_color_hex if bg_color_hex != "#000000" else None)
-            elif p is True:
-                pixel_colors.append(text_color_hex)
-            else:
-                pixel_colors.append(text_color_hex)
-        
-        width = len(pixel_colors) // PANEL_H
-        
-        # Quantize colors to max 8 colors
-        non_none_colors = [c for c in pixel_colors if c is not None]
-        unique_colors = set(non_none_colors)
-        if len(unique_colors) > 8:
-            bg_rgb = hex_to_rgb(bg_color_hex)
-            pixels_rgb_for_pil = []
-            for c in pixel_colors:
-                if c is None:
-                    pixels_rgb_for_pil.append(bg_rgb)
-                else:
-                    pixels_rgb_for_pil.append(hex_to_rgb(c))
-
-            pil_img = Image.new("RGB", (width, PANEL_H))
-            pil_img.putdata(pixels_rgb_for_pil)
-
-            quantized_img = pil_img.quantize(colors=8, method=Image.Quantize.MAXCOVERAGE)
-            rgb_quantized = quantized_img.convert("RGB")
-            quantized_rgb_data = list(rgb_quantized.getdata())
-
-            def rgb_to_hex(rgb):
-                return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-
-            final_pixel_colors = []
-            for idx, rgb_val in enumerate(quantized_rgb_data):
-                hex_val = rgb_to_hex(rgb_val)
-                if pixel_colors[idx] is None or hex_val == "#000000":
-                    final_pixel_colors.append(None)
-                else:
-                    final_pixel_colors.append(hex_val)
-
-            pixel_colors = final_pixel_colors
-            unique_colors = set([c for c in pixel_colors if c is not None])
-
-        if width > PANEL_W:
-            current_display_mode = "move-left-loop"
-        else:
-            current_display_mode = "static"
-
-        if connected_client and connected_client.is_connected and connection_ready:
-            # Turn off clock/preset and clear screen cleanly before drawing
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=False)
-            
-            speed = req.speed if req.speed is not None else current_speed
-            speed = max(1, min(15, speed))
-            hw_speed = speed
-    
-            for color in unique_colors:
-                bitmap = [1 if pixel_colors[idx] == color else 0 for idx in range(len(pixel_colors))]
-                if width > PANEL_W:
-                    anim_code = 1 if req.animation == "move-left" else 2 if req.animation == "move-right" else 3 if req.animation == "move-up" else 4 if req.animation == "move-down" else 1
-                    packet = protocol.hardware_scroll_command(bitmap, width, PANEL_H, color=color, speed=hw_speed, animation=anim_code)
-                else:
-                    packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=color)
-                await safe_write_gatt_char(protocol.WRITE_UUID, bytearray(packet), response=False)
-            
-            # Commit Session atomically so all pixels appear together
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
-        
-        # Dashboard preview
-        bg_rgb = hex_to_rgb(req.bgColor)
-        preview_img = Image.new("RGB", (width, PANEL_H), bg_rgb)
-        pixels_rgb = []
-        for c in pixel_colors:
-            if c is None:
-                pixels_rgb.append(bg_rgb)
-            else:
-                pixels_rgb.append(hex_to_rgb(c))
-        
-        preview_img.putdata(pixels_rgb)
-        save_preview(preview_img, os.path.join(STATIC_DIR, "current.png"))
-        current_width = width
-        frames_sent += 1
-        return {"status": "success"}
-        
-    # 2. Text rendering path
-    # Check if this is a calendar event with ||| separator (title ||| start - end)
-    text = req.text or ""
-    if "|||" in text:
-        parts = text.split("|||", 1)
-        title = parts[0].strip()
-        times = parts[1].strip()
-        # Start the flipper task: alternates between title and times every 3s
-        active_scroller_task = asyncio.create_task(
-            flipper_worker(title, times, req.textColor, req.bgColor)
-        )
-        current_display_mode = "flipper"
-        return {"status": "success"}
-
-
-    # Standard text rendering
-    try:
-        render_font = ImageFont.truetype("arialbd.ttf", 18)
-    except Exception:
-        try:
-            render_font = ImageFont.truetype("arial.ttf", 18)
-        except Exception:
-            render_font = ImageFont.load_default()
-        
-    # Measure text using a temporary canvas to get width and height
-    temp_img = Image.new("L", (1, 1), 0)
-    temp_draw = ImageDraw.Draw(temp_img)
-    bbox = temp_draw.textbbox((0, 0), text, font=render_font)
-    
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    
-    if tw <= 0 or th <= 0:
-        return {"status": "error", "message": "Nothing to render"}
-        
-    # Determine canvas width
-    is_static = (req.animation == "static")
-    if is_static:
-        current_display_mode = "static"
-        w = PANEL_W
-        if tw <= PANEL_W:
-            x = (PANEL_W - tw) // 2 - bbox[0]
-        else:
-            x = -bbox[0]
-    else:
-        current_display_mode = "move-left-loop"
-        w = max(PANEL_W, tw)
-        x = -bbox[0]
-        
-    y = (PANEL_H - th) // 2 - bbox[1]
-    
-    # Draw onto a 8-bit grayscale 'L' canvas to support antialiasing
-    text_img_L = Image.new('L', (w, PANEL_H), 0)
-    draw = ImageDraw.Draw(text_img_L)
-    draw.text((x, y), text, font=render_font, fill=255)
-    
-    final_img_L = text_img_L
-    tw_final = w
-    th = PANEL_H
-
-    final_img_1 = final_img_L.point(lambda p: 1 if p > 128 else 0, mode='1')
-
-    # 3. Hardware Decision
-    if connected_client and connected_client.is_connected and connection_ready:
-        # Turn off clock/preset at the beginning to avoid interference
-        await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-        await asyncio.sleep(0.05)
-        # Start session
-        await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
-        await asyncio.sleep(0.05)
-        # Clear Screen first
-        await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
-        await asyncio.sleep(0.05)
-        
-        anim_map = {"static": 0, "move-left": 1, "move-right": 2, "move-up": 3, "move-down": 4, "snow": 5, "bubble": 6, "flicker": 7}
-        anim_code = anim_map.get(req.animation or "move-left", 1)
-        bg_color = req.bgColor or "#000000"
-        
-        if bg_color.lower() != "#000000" and tw_final <= PANEL_W and is_static:
-            bg_bitmap = [1] * (PANEL_W * PANEL_H)
-            bg_packet = protocol.bitmap_command(bg_bitmap, PANEL_W, PANEL_H, color=bg_color)
-            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(bg_packet), response=True)
-
-        if is_static and tw_final <= PANEL_W:
-            pixels = list(final_img_1.getdata())
-            bitmap = [1 if p > 0 else 0 for p in pixels]
-            packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=req.textColor)
-            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=True)
-            current_display_mode = "static"
-        else:
-            speed = req.speed if req.speed is not None else current_speed
-            speed = max(1, min(15, speed))
-            hw_speed = speed
-            
-            pixels = list(final_img_1.getdata())
-            bitmap = [1 if p > 0 else 0 for p in pixels]
-            packet = protocol.hardware_scroll_command(bitmap, tw_final, PANEL_H, color=req.textColor, speed=hw_speed, animation=anim_code)
-            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=True)
-            
-        # Commit Session
-        await asyncio.sleep(0.05)
-        await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
-
-    # 4. Dashboard Preview
-    preview_img = Image.new("RGB", (tw_final, PANEL_H), req.bgColor)
-    preview_img.paste(Image.new("RGB", (tw_final, PANEL_H), req.textColor), (0, 0), mask=final_img_L)
-    save_preview(preview_img, os.path.join(STATIC_DIR, "current.png"))
-    current_width = tw_final
-    frames_sent += 1
-
-    return {"status": "success"}
 
 def save_preview(img: Image.Image, filepath: str):
     try:
@@ -1449,6 +1669,40 @@ def save_preview(img: Image.Image, filepath: str):
         img.save(filepath, "PNG")
     except Exception as e:
         print(f"[preview] Failed to save {filepath}: {e}")
+
+@app.post("/render-text-preview")
+async def render_text_preview(req: RenderTextPreviewRequest):
+    import base64
+    from io import BytesIO
+    text = req.text or ""
+    try:
+        render_font = ImageFont.truetype("arialbd.ttf", 18)
+    except Exception:
+        try:
+            render_font = ImageFont.truetype("arial.ttf", 18)
+        except Exception:
+            render_font = ImageFont.load_default()
+
+    temp_img = Image.new("L", (1, 1), 0)
+    temp_draw = ImageDraw.Draw(temp_img)
+    bbox = temp_draw.textbbox((0, 0), text, font=render_font)
+    tw = max(1, bbox[2] - bbox[0])
+    th = max(1, bbox[3] - bbox[1])
+    w = max(PANEL_W, tw)
+    x = (PANEL_W - tw) // 2 - bbox[0] if (tw <= PANEL_W) else -bbox[0]
+    y = (PANEL_H - th) // 2 - bbox[1]
+
+    text_img_L = Image.new('L', (w, PANEL_H), 0)
+    draw = ImageDraw.Draw(text_img_L)
+    draw.text((x, y), text, font=render_font, fill=255)
+
+    preview_img = Image.new("RGB", (w, PANEL_H), req.bgColor or "#000000")
+    preview_img.paste(Image.new("RGB", (w, PANEL_H), req.textColor or "#FFFFFF"), (0, 0), mask=text_img_L)
+
+    buf = BytesIO()
+    preview_img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return {"status": "success", "data_url": f"data:image/png;base64,{b64}", "width": w}
 
 def draw_custom_time(draw, time_str_full, font, color, y_offset, PANEL_W, show_colon=True):
     parts = time_str_full.split(':')
@@ -1685,9 +1939,12 @@ async def clock_preview_worker(color: str, format: str = "12h", bg_color: str = 
         
         # Ensure built-in clock is off when streaming custom clock
         if clock_style == "custom" and connected_client and connected_client.is_connected and connection_ready:
-            await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
             await asyncio.sleep(0.05)
             
+        # Sleep until the next second boundary so we don't immediately collide with set_clock's initial frame
+        await asyncio.sleep(max(0.2, 1.0 - datetime.datetime.now().microsecond / 1000000.0))
+
         while current_display_mode == "clock":
             now = datetime.datetime.now()
             if format == "24h":
@@ -1750,19 +2007,19 @@ async def clock_preview_worker(color: str, format: str = "12h", bg_color: str = 
             # Stream frame to device only if custom style
             if clock_style == "custom" and connected_client and connected_client.is_connected and connection_ready:
                 try:
-                    await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
                     await asyncio.sleep(0.02)
                     
                     inverted_bitmap = [1 if b == 0 else 0 for b in bitmap]
                     bg_packet = protocol.bitmap_command(inverted_bitmap, PANEL_W, PANEL_H, color=(bg_color or "#000000"))
-                    await connected_client.write_gatt_char(protocol.WRITE_UUID, bytearray(bg_packet), response=False)
+                    await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(bg_packet), response=True)
                     await asyncio.sleep(0.01)
                     
                     fg_packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=color)
-                    await connected_client.write_gatt_char(protocol.WRITE_UUID, bytearray(fg_packet), response=False)
+                    await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(fg_packet), response=True)
                     await asyncio.sleep(0.01)
                     
-                    await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
                 except Exception as e:
                     print(f"[clock-stream] BLE error: {e}")
                     
@@ -1782,9 +2039,7 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
     if on and clock_style == "default":
         color = "#ffffff"
         
-    if active_scroller_task:
-        active_scroller_task.cancel()
-        active_scroller_task = None
+    await cancel_active_worker()
     try:
         gif_path = os.path.join(STATIC_DIR, "current.gif")
         if os.path.exists(gif_path):
@@ -1807,19 +2062,19 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
                 
                 # Sync time
                 time_pkt = protocol.time_command(year, month, day, hour, minute, second, dow)
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, bytearray(time_pkt), response=True)
+                await safe_write_gatt_char(protocol.WRITE_UUID, bytearray(time_pkt), response=True)
                 await asyncio.sleep(0.05)
                 
                 # Turn clock on
                 clock_pkt = protocol.clock_on_command()
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, bytearray(clock_pkt), response=True)
+                await safe_write_gatt_char(protocol.WRITE_UUID, bytearray(clock_pkt), response=True)
                 await asyncio.sleep(0.05)
         else:
             # Turn off the hardware clock unconditionally if setting custom mode or turning off
             if connected_client and connected_client.is_connected and connection_ready:
                 packet = protocol.clock_off_command()
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, bytearray(packet), response=False)
-                await asyncio.sleep(0.04)
+                await safe_write_gatt_char(protocol.WRITE_UUID, bytearray(packet), response=True)
+                await asyncio.sleep(0.05)
             
         if on:
             # Update last pushed clock configuration
@@ -1881,19 +2136,19 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
             save_preview(img, os.path.join(STATIC_DIR, "current.png"))
             
             if clock_style == "custom" and connected_client and connected_client.is_connected and connection_ready:
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
                 await asyncio.sleep(0.02)
                 
                 inverted_bitmap = [1 if b == 0 else 0 for b in bitmap]
                 bg_packet = protocol.bitmap_command(inverted_bitmap, PANEL_W, PANEL_H, color=(bg_color or "#000000"))
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, bytearray(bg_packet), response=False)
+                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(bg_packet), response=True)
                 await asyncio.sleep(0.01)
                 
                 fg_packet = protocol.bitmap_command(bitmap, PANEL_W, PANEL_H, color=color)
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, bytearray(fg_packet), response=False)
+                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(fg_packet), response=True)
                 await asyncio.sleep(0.01)
                 
-                await connected_client.write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
             
             save_preview(img, os.path.join(STATIC_DIR, "current.png"))
             current_display_mode = "clock"
@@ -1924,29 +2179,18 @@ def encode_var_len(val: int) -> bytes:
 async def save_preset(req: SavePresetRequest):
     global connected_client, connection_ready, current_speed, active_scroller_task, current_width, current_display_mode, frames_sent
     
-    # Cancel any active scrolling or flipper task
-    if active_scroller_task:
-        active_scroller_task.cancel()
-        active_scroller_task = None
+    # Cancel any active scrolling or flipper task cleanly
+    await cancel_active_worker()
         
     preset = req.preset
     slot_id = req.slot_id # 0-indexed slot index (0 to 11)
+    mac_str = (req.address or target_address or "").replace(':', '').lower()
     
     if preset.mode == 'clock':
         raise HTTPException(status_code=400, detail="Clocks cannot be saved to hardware slots.")
         
     if connected_client and connected_client.is_connected and connection_ready:
-        try:
-            # Stop any onboard playlist completely (seq=3: 36 00)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
-            await asyncio.sleep(0.02)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-            await asyncio.sleep(0.02)
-            # Clear the screen to solid black while saving
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
-            await asyncio.sleep(0.02)
-        except Exception:
-            pass
+        await stop_all_playback(blank=True)
 
     try:
         # Step 1: Render the preset content to standard GIF bytes
@@ -1956,6 +2200,7 @@ async def save_preset(req: SavePresetRequest):
         pil_frames = []
         delay_sec = 0.1
         is_anim = False
+        is_anim_text = False
         
         if preset.pixels is not None:
             # Drawing or animation
@@ -1963,14 +2208,19 @@ async def save_preset(req: SavePresetRequest):
             if is_anim:
                 num_frames = len(preset.pixels) // 1280
                 raw_frames = extract_frames(preset.pixels, num_frames)
-                frames = quantize_frames(raw_frames, preset.bgColor or "#000000")
+                frames = raw_frames
                 
                 speed = preset.speed if preset.speed is not None else current_speed
                 speed = max(1, min(15, speed))
                 if preset.frameDurationMs is not None and preset.frameDurationMs > 0:
                     delay_sec = max(0.016, preset.frameDurationMs / 1000.0)
+                    frame_delay_ms = max(16, min(500, int(preset.frameDurationMs)))
+                elif preset.speed is not None:
+                    frame_delay_ms = max(20, min(500, 80 - speed * 5))
+                    delay_sec = frame_delay_ms / 1000.0
                 else:
-                    delay_sec = max(0.05, 0.4 - (speed * 0.025))
+                    frame_delay_ms = max(20, min(500, 80 - speed * 5))
+                    delay_sec = frame_delay_ms / 1000.0
                     
                 # Convert color lists to PIL images
                 def hex_to_rgb(hex_str: Optional[str]):
@@ -2028,16 +2278,43 @@ async def save_preset(req: SavePresetRequest):
             th = bbox[3] - bbox[1]
             if tw <= 0 or th <= 0:
                 raise Exception("Nothing to render")
-            x = (PANEL_W - tw) // 2 - bbox[0] if (tw <= PANEL_W) else -bbox[0]
             y = (PANEL_H - th) // 2 - bbox[1]
+
+            anim_clean = (preset.animation or "show now").strip().lower()
+            is_anim_text = anim_clean not in ('static', 'show now')
+            is_anim = is_anim_text
             
-            text_img_L = Image.new('L', (PANEL_W, PANEL_H), 0)
-            draw = ImageDraw.Draw(text_img_L)
-            draw.text((x, y), text, font=render_font, fill=255)
-            
-            full_rgb = Image.new("RGB", (PANEL_W, PANEL_H), preset.bgColor or "#000000")
-            full_rgb.paste(Image.new("RGB", (PANEL_W, PANEL_H), preset.textColor or "#FFFFFF"), (0, 0), mask=text_img_L)
-            pil_frames.append(full_rgb)
+            speed = preset.speed if preset.speed is not None else current_speed
+            speed = max(1, min(15, speed))
+            frame_delay_ms = max(20, min(500, int((0.4 - (speed * 0.025)) * 1000)))
+            delay_sec = frame_delay_ms / 1000.0
+
+            if is_anim_text:
+                # Text with continuous left shift: render scrolling 64x20 frames
+                step = 2
+                total_dist = PANEL_W + tw
+                num_anim_frames = max(1, total_dist // step)
+                bg_color = preset.bgColor or "#000000"
+                text_color = preset.textColor or "#FFFFFF"
+                
+                for fi in range(num_anim_frames):
+                    x_offset = PANEL_W - fi * step - bbox[0]
+                    frame_L = Image.new('L', (PANEL_W, PANEL_H), 0)
+                    f_draw = ImageDraw.Draw(frame_L)
+                    f_draw.text((x_offset, y), text, font=render_font, fill=255)
+                    
+                    frame_rgb = Image.new("RGB", (PANEL_W, PANEL_H), bg_color)
+                    frame_rgb.paste(Image.new("RGB", (PANEL_W, PANEL_H), text_color), (0, 0), mask=frame_L)
+                    pil_frames.append(frame_rgb)
+            else:
+                x = (PANEL_W - tw) // 2 - bbox[0] if (tw <= PANEL_W) else -bbox[0]
+                text_img_L = Image.new('L', (PANEL_W, PANEL_H), 0)
+                draw = ImageDraw.Draw(text_img_L)
+                draw.text((x, y), text, font=render_font, fill=255)
+                
+                full_rgb = Image.new("RGB", (PANEL_W, PANEL_H), preset.bgColor or "#000000")
+                full_rgb.paste(Image.new("RGB", (PANEL_W, PANEL_H), preset.textColor or "#FFFFFF"), (0, 0), mask=text_img_L)
+                pil_frames.append(full_rgb)
             
         if not pil_frames:
             raise Exception("Failed to render frames for preset")
@@ -2053,30 +2330,18 @@ async def save_preset(req: SavePresetRequest):
         )
         gif_bytes = gif_io.getvalue()
         
-        # Calculate resource ID hash
-        gif_hex = gif_bytes.hex().lower()
-        md5_hash = hashlib.md5(gif_hex.encode('utf-8')).hexdigest().lower()
-        id_pro_ui = slot_id + 1
-        prefix = f"{id_pro_ui}0000000"[:8]
-        id_res_hex = prefix + md5_hash
-        hash_bytes = bytes.fromhex(id_res_hex)
-
-        # --- Save preset data as JSON for reliable replay later ---
-        import json as _json
-        mac_str = req.address.replace(':', '').lower()
-        preset_json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.json")
-        with open(preset_json_path, "w") as fj:
-            _json.dump(preset.dict(), fj)
-
-        # --- Save GIF preview to disk ---
-        preset_gif_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.gif")
-        with open(preset_gif_path, "wb") as f:
-            f.write(gif_bytes)
-
-        # --- Update live preview with the newly saved preset ---
-        current_gif = os.path.join(STATIC_DIR, "current.gif")
-        current_png = os.path.join(STATIC_DIR, "current.png")
+        # Cache preview files
         try:
+            preset_json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.json")
+            preset_gif_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.gif")
+            current_gif = os.path.join(STATIC_DIR, "current.gif")
+            current_png = os.path.join(STATIC_DIR, "current.png")
+
+            with open(preset_json_path, "w") as f:
+                _json.dump(preset.model_dump(), f)
+            with open(preset_gif_path, "wb") as f:
+                f.write(gif_bytes)
+
             if is_anim or (preset.mode == 'text' and preset.animation and preset.animation != 'static'):
                 shutil.copy(preset_gif_path, current_gif)
                 if os.path.exists(current_png):
@@ -2091,111 +2356,119 @@ async def save_preset(req: SavePresetRequest):
             pass
 
         if connected_client and connected_client.is_connected and connection_ready:
-            LOY_CHUNK_OVERHEAD = 37
-            mtu = getattr(connected_client, 'mtu_size', 23)
-            max_single_write = mtu - 3
-            # Save to hardware slot
-            hw_addr = protocol.WRITE_SLOT_USER_START + slot_id
-            
-            # Stop playlist and screen while saving to flash
             try:
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
-                await asyncio.sleep(0.02)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-                await asyncio.sleep(0.02)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
-                await asyncio.sleep(0.02)
-            except Exception:
-                pass
+                speed = preset.speed if preset.speed is not None else current_speed
+                speed = max(1, min(15, speed))
 
-            if req.mode == 'image' or req.mode == 'text':
-                try:
-                    if req.mode == 'image':
-                        img_path = get_asset_path("images", preset.filename)
-                        if os.path.exists(img_path):
-                            pil_img = Image.open(img_path).convert('RGBA')
-                            if getattr(pil_img, 'is_animated', False):
-                                # It's an animated GIF
-                                with open(img_path, 'rb') as f:
-                                    gif_bytes = f.read()
-                            else:
-                                # Static image, generate 1-frame GIF
-                                canvas = Image.new('RGB', (64, 20), (0,0,0))
-                                pil_img.thumbnail((64, 20), Image.Resampling.LANCZOS)
-                                x = (64 - pil_img.width) // 2
-                                y = (20 - pil_img.height) // 2
-                                canvas.paste(pil_img, (x, y), pil_img if pil_img.mode == 'RGBA' else None)
-                                
-                                gif_io = io.BytesIO()
-                                canvas.save(gif_io, format='GIF', optimize=True)
-                                gif_bytes = gif_io.getvalue()
-                    else:
-                        # Text Mode - create GIF frames
-                        frames = generate_text_frames(preset)
-                        if not frames: frames = [Image.new('RGB', (64,20), (0,0,0))]
-                        
-                        if preset.animation and preset.animation != "static":
-                            speed_val = max(1, min(255, preset.speed if preset.speed is not None else 48))
-                            duration = int(1000 / (speed_val * 2))
-                            if duration <= 0: duration = 100
-                        else:
-                            duration = 100
-                            
-                        gif_io = io.BytesIO()
-                        frames[0].save(
-                            gif_io, format='GIF',
-                            save_all=True, append_images=frames[1:],
-                            duration=duration, loop=0, optimize=True
-                        )
-                        gif_bytes = gif_io.getvalue()
+                if is_anim:
+                    # Animated GIF/video and animated text:
+                    # Keep the current verified changes for GIFs (Slot 4)
+                    slot_payload = gif_bytes
+                    anim_code = 0
+                    speed_val = speed
+                    stay_time = 0
 
-                    # Upload GIF directly as File 0
-                    CHUNK_SIZE = 960
-                    session_pkt = protocol.build_file_transfer_session_init(hw_addr=hw_addr, num_files=1)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, session_pkt, response=True)
+                    await asyncio.sleep(0.2)
+                    init_pkt = protocol.build_slot_session_init(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, init_pkt, response=True)
+                    await asyncio.sleep(0.1)
+
+                    hdr_pkt = protocol.build_slot_file_header(slot_id, anim_code=anim_code, speed_val=speed_val, stay_time=stay_time)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, hdr_pkt, response=True)
                     await asyncio.sleep(0.05)
-                    
-                    total_chunks = (len(gif_bytes) + CHUNK_SIZE - 1) // CHUNK_SIZE
-                    for i in range(total_chunks):
-                        start = i * CHUNK_SIZE
-                        chunk = gif_bytes[start:start+CHUNK_SIZE]
-                        chunk_pkt = protocol.build_file_transfer_chunk(
-                            hw_addr=hw_addr, file_index=0, chunk_index=i,
-                            total_chunks=total_chunks, data=chunk, chunk_size=len(chunk)
-                        )
+
+                    chunk_size = 960
+                    total_chunks = math.ceil(len(slot_payload) / chunk_size)
+                    for c_idx in range(total_chunks):
+                        if not connected_client or not connected_client.is_connected:
+                            raise Exception(f"BLE disconnected during chunk write (chunk {c_idx}/{total_chunks})")
+                        c_data = slot_payload[c_idx * chunk_size : (c_idx + 1) * chunk_size]
+                        chunk_pkt = protocol.build_slot_file_chunk(slot_id, c_idx, total_chunks, chunk_size, c_data)
                         await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
-                        
-                    # Commit file transfer
-                    commit_pkt = protocol.build_file_transfer_complete(hw_addr, num_frames=1)
+                        await asyncio.sleep(0.02)
+
+                    if not connected_client or not connected_client.is_connected:
+                        raise Exception("BLE disconnected after chunk writes")
+
+                    commit_pkt = protocol.build_slot_commit(slot_id, slot_payload)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
+                    await asyncio.sleep(0.1)
+
+                    if not connected_client or not connected_client.is_connected:
+                        raise Exception("BLE disconnected after commit")
+
+                    # Select and play the newly saved user slot once
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+                    await asyncio.sleep(0.05)
+
+                    hardware_slots_state[slot_id] = {
+                        "slot_id": slot_id,
+                        "occupied": True,
+                        "key": hashlib.md5(gif_bytes).hexdigest()
+                    }
+                else:
+                    # Static image/text: EXACT configuration from Step 14108 (verified working in Step 14507 for Slot 1 & Slot 3)
+                    frame_w = PANEL_W
+                    frame_h = PANEL_H
+                    frame_delay_ms = 100
+                    speed_val = current_speed
+                    anim_code = 1  # 1 = Show Now / Static frame
+                    stay_time = 3
+
+                    ystp_header = b'YSTP01' + struct.pack('<HHHHB', frame_w, frame_h, 1, frame_delay_ms, 24)
+                    frame_bytes = pil_frames[0].resize((frame_w, frame_h)).convert("RGB").tobytes()
+                    ystp_bytes = ystp_header + frame_bytes
+
+                    init_pkt = protocol.build_slot_session_init(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, init_pkt, response=True)
+                    await asyncio.sleep(0.05)
+
+                    hdr_pkt = protocol.build_slot_file_header(slot_id, anim_code=anim_code, speed_val=speed_val, stay_time=stay_time)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, hdr_pkt, response=True)
+                    await asyncio.sleep(0.05)
+
+                    chunk_size = 960
+                    total_chunks = math.ceil(len(ystp_bytes) / chunk_size)
+                    for c_idx in range(total_chunks):
+                        if not connected_client or not connected_client.is_connected:
+                            raise Exception(f"BLE disconnected during chunk write (chunk {c_idx}/{total_chunks})")
+                        c_data = ystp_bytes[c_idx * chunk_size : (c_idx + 1) * chunk_size]
+                        chunk_pkt = protocol.build_slot_file_chunk(slot_id, c_idx, total_chunks, chunk_size, c_data)
+                        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
+                        await asyncio.sleep(0.02)
+
+                    if not connected_client or not connected_client.is_connected:
+                        raise Exception("BLE disconnected after chunk writes")
+
+                    commit_pkt = protocol.build_slot_commit(slot_id, ystp_bytes)
                     await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
                     await asyncio.sleep(0.05)
 
-                    # Enable user slots in hardware sequencer table
-                    p1 = bytes([0x35, 0x0a, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d])
-                    p2 = bytes([0x35, 0x02, 0x2e, 0x2f])
-                    pkt1 = protocol.build_packet(p1, cmd_type=0xC1, sub_type=0x03)
-                    pkt2 = protocol.build_packet(p2, cmd_type=0xC1, sub_type=0x03)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
-                    await asyncio.sleep(0.02)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
-                    await asyncio.sleep(0.02)
+                    if not connected_client or not connected_client.is_connected:
+                        raise Exception("BLE disconnected after commit")
 
-                    # Command the sign to play the newly saved user slot from flash memory
-                    slot_pkt = protocol.build_user_slot_play_command(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, slot_pkt, response=True)
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
 
-                    # Do NOT call push_text here, as it starts the Python streaming loop which overrides the hardware playback
-                    print(f"[save_preset] Done. Slot {slot_id} (hw=0x{hw_addr:02X}) saved GIF ({len(gif_bytes)} bytes) and locked to display.")
+                    hardware_slots_state[slot_id] = {
+                        "slot_id": slot_id,
+                        "occupied": True,
+                        "key": hashlib.md5(ystp_bytes).hexdigest()
+                    }
 
-                except Exception as e:
-                    print(f"[save_preset] File mode error: {e}")
+                print(f"[save_preset] Done. Slot {slot_id} saved (is_anim={is_anim}).")
+
+            except Exception as e:
+                print(f"[save_preset] Error: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
 
         # Increment frames sent to signal status updates
+        current_display_mode = f"preset-{slot_id}"
+        current_width = PANEL_W
         frames_sent += 1
         return {"status": "success", "preview_url": f"/static/preset_{mac_str}_{slot_id}.gif"}
-
-
 
     except Exception as e:
         import traceback

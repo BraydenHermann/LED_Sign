@@ -180,17 +180,22 @@ body {
   position: relative;
 }
 
-.preview-box img.static-preview,
-.preview-box img.scrolling-preview {
+.preview-box img.static-preview {
+  width: 100% !important;
   height: 100% !important;
-  width: auto !important;
   max-width: none !important;
   object-fit: fill;
   image-rendering: pixelated;
   display: block;
 }
 
-.preview-box img.scrolling-preview {
+img.scrolling-preview {
+  height: 100% !important;
+  width: auto !important;
+  max-width: none !important;
+  object-fit: fill;
+  image-rendering: pixelated;
+  display: block;
   position: absolute;
   animation: scroll-proper var(--scroll-duration, 15s) linear infinite;
 }
@@ -227,7 +232,8 @@ body {
   aspect-ratio: 64 / 20;
   background: #000;
   border-radius: 18px;
-  border: 1px solid var(--glass-border);
+  border: 2px solid var(--glass-border);
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -238,13 +244,23 @@ body {
   transform: translateZ(0);
 }
 .preset-card:hover { border-color: var(--accent-primary); }
+.preset-card.empty-slot {
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+}
+.preset-card.empty-slot:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.3);
+}
 .preset-card.declined { opacity: 0.5; filter: grayscale(1); cursor: not-allowed; }
+
 
 /* Preset Card Enhancements */
 .preset-card-badge {
   position: absolute;
   top: 8px;
-  left: 8px;
+  right: 8px;
   z-index: 10;
   padding: 2px 6px;
   border-radius: 4px;
@@ -255,6 +271,24 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   border: 1px solid rgba(16, 185, 129, 0.2);
+  pointer-events: none;
+}
+
+.preset-card-slot-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid rgba(255, 255, 255, 0.15);
   pointer-events: none;
 }
 
@@ -277,9 +311,9 @@ body {
   left: 0;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: fill;
   image-rendering: pixelated;
-  opacity: 0.8;
+  opacity: 1;
   transition: opacity 0.2s ease-in-out;
   pointer-events: none;
   transform: translateZ(0);
@@ -431,7 +465,7 @@ body {
   image-rendering: pixelated;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: fill;
 }
 
 /* No signal placeholder — perfectly centered */

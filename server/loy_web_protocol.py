@@ -80,7 +80,7 @@ class LOYWebProtocol(BaseProtocol):
         inner_payload += struct.pack("<HHHH", x0, y0, x1, y1)
         inner_payload += data
         
-        payload = bytes([0x32, len(inner_payload)]) + inner_payload
+        payload = build_tlv(0x32, inner_payload)
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
 
     def hardware_scroll_command(self, bitmap: List[int], width: int, height: int, color: str = "#ffffff", speed: int = 5, animation: int = 1):
@@ -219,22 +219,21 @@ class LOYWebProtocol(BaseProtocol):
 
     def generate_ystp_mode2(self, width: int = 64, height: int = 20, speed: int = 48, fg_color: str = "#ffffff", bg_color: str = "#000000", bitmap: List[int] = None, animation: int = 0):
         """Generates a Mode 2 (1-bit bitmap with FG/BG colors) YSTP01 file for hardware flash slots.
-        Matches official iOS app trace (Occurrence [7] in latest2.pklg):
-          - Header (29 bytes):
-            - 'YSTP01' (6 bytes)
-            - width (uint16 LE, 2 bytes)
-            - height (uint16 LE, 2 bytes)
-            - mode (uint16 LE = 2, 2 bytes)
-            - speed (uint16 LE, 2 bytes)
-            - animation (uint8: 0=static, 1=move-left, 2=move-right, etc.) + 0, 0, 0 (4 bytes)
-            - fg_r, fg_g, fg_b (3 bytes)
-            - bg_r, bg_g, bg_b (3 bytes)
-            - 0x00, 0x00, 0x00, 0x00, 0x00 (5 bytes)
-          - Body: 160 bytes of 64x20 bitmap (20 rows of 8 bytes, LSB first).
+        Matches official iOS app trace (Occurrence [7] in latest2.pklg).
+        Header layout (29 bytes):
+          bytes  0-5:  'YSTP01'
+          bytes  6-7:  width uint16 LE
+          bytes  8-9:  height uint16 LE
+          bytes 10-11: mode uint16 LE = 2
+          bytes 12-13: speed uint16 LE
+          bytes 14-15: animation uint16 LE (0=static, 1=move-left, 2=move-right, etc.)
+          bytes 16-17: reserved uint16 LE = 0
+          bytes 18-20: fg_r, fg_g, fg_b
+          bytes 21-23: bg_r, bg_g, bg_b
+          bytes 24-28: reserved (5 zero bytes)
         """
         header = bytearray(b'YSTP01')
-        header += struct.pack('<HHHH', width, height, 2, speed)
-        header += bytes([animation, 0, 0, 0])
+        header += struct.pack('<HHHHHH', width, height, 2, speed, animation, 0)
         
         def hex_to_rgb(h):
             if not h: return (255, 255, 255)
@@ -330,9 +329,9 @@ class LOYWebProtocol(BaseProtocol):
         payload += build_tlv(0x13, data)                       # T:13 chunk data
         return self.build_packet(bytes(payload), cmd_type=0xC1, sub_type=0x02)
 
-    def build_file_transfer_complete(self, hw_addr: int, num_frames: int = 1):
+    def build_file_transfer_complete(self, hw_addr: int, num_frames: int = 1, is_static: bool = False):
         """CMD=0x35 sub=0x02: Commit the file transfer from write buffer (0xC5) to hardware."""
-        frame_bytes = bytes([0x01, 0x99]) * num_frames
+        frame_bytes = (bytes([0x00, 0x00]) if is_static else bytes([0x01, 0x99])) * num_frames
         tail = bytes.fromhex("02025073019800000000")
         val = bytes([hw_addr]) + frame_bytes + tail
         payload = bytes([0x35, len(val)]) + val
@@ -357,84 +356,123 @@ class LOYWebProtocol(BaseProtocol):
         pkt2 = self.build_packet(p2, cmd_type=0xC1, sub_type=0x03)
         return pkt1, pkt2
 
-    def build_direct_slot_save_packet(self, hw_addr: int, ystp_bytes: bytes):
-        """Build the complete compound single-packet file transfer for a hardware slot.
-        Matches packet [123] from official iOS app trace (521 bytes, seq=12):
-          - Session Init (T:08, T:09, T:0C, T:1C, T:0D, T:1D, T:0D, T:1D, T:0E)
-          - File Header (T:09, T:0C, T:0D, T:0E, T:14, T:11)
-          - File Chunk (T:09, T:0C, T:0D, T:0E, T:12, T:13)
-        """
-        # Ensure ystp payload matches the 341-byte block expected by hardware EEPROM parser
-        if len(ystp_bytes) < 341:
-            ystp_bytes = ystp_bytes + b'\x00' * (341 - len(ystp_bytes))
-        else:
-            ystp_bytes = ystp_bytes[:341]
-
+    def build_slot_session_init(self, slot_id: int):
+        """CMD=0x08: Open file-transfer session targeting slot slot_id (0..11)."""
         payload = bytearray()
-        # 1. Session Init
-        payload += build_tlv(0x08, bytes([0x00, hw_addr]))
+        payload += build_tlv(0x08, bytes([0x00, slot_id]))
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([hw_addr]))
+        payload += build_tlv(0x0C, bytes([slot_id]))
         payload += build_tlv(0x1C, bytes.fromhex('000001000300'))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x1D, bytes.fromhex('000000004000140000'))
-        payload += build_tlv(0x0D, bytes([0x01]))
-        payload += build_tlv(0x1D, bytes.fromhex('000000004000140001'))
-        payload += build_tlv(0x0E, bytes([0x00]))
-        
-        # 2. File Header
+        return self.build_packet(bytes(payload), cmd_type=0xC1, sub_type=0x02)
+
+    def build_slot_file_header(self, slot_id: int, anim_code: int = 1, speed_val: int = 13, stay_time: int = 3):
+        """CMD=0x09 File Header: Initialize file 0 with animation and speed."""
+        payload = bytearray()
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([hw_addr]))
+        payload += build_tlv(0x0C, bytes([slot_id]))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x0E, bytes([0x00]))
-        payload += build_tlv(0x14, bytes.fromhex('000c03'))
+        payload += build_tlv(0x14, bytes([anim_code, speed_val, stay_time]))
+        payload += build_tlv(0x11, bytes.fromhex('0001000a'))
+        return self.build_packet(bytes(payload), cmd_type=0xC1, sub_type=0x02)
+
+    def build_slot_file_chunk(self, slot_id: int, chunk_idx: int, total_chunks: int, chunk_size: int, chunk_data: bytes):
+        """CMD=0x09 File Chunk: Send chunk of file 0."""
+        payload = bytearray()
+        payload += build_tlv(0x09, bytes([0x01]))
+        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x0D, bytes([0x00]))
+        payload += build_tlv(0x0E, bytes([0x00]))
+        t12 = struct.pack('<HHHB', total_chunks, chunk_idx, chunk_size, 0)
+        payload += build_tlv(0x12, t12)
+        payload += build_tlv(0x13, chunk_data)
+        return self.build_packet(bytes(payload), cmd_type=0xC1, sub_type=0x02)
+
+    def build_slot_commit(self, slot_id: int, ystp_bytes: bytes):
+        """CMD=0x35: Commit slot file transfer."""
+        import hashlib, time
+        key = struct.pack('<I', len(ystp_bytes)) + hashlib.md5(ystp_bytes).digest()
+        ts = struct.pack('<I', int(time.time()))
+        val = bytes([slot_id]) + key + ts
+        payload = bytes([0x35, len(val)]) + val
+        return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
+
+    def build_direct_slot_save_packet(self, slot_id: int, ystp_bytes: bytes, anim_code: int = 1, speed_val: int = 13, stay_time: int = 3):
+        """Build the complete compound single-packet file transfer for a hardware slot.
+        Matches official iOS app LOY SPACE trace:
+          - Session Init (Tag-0x08, Tag-0x09, Tag-0x0C, Tag-0x1C, Tag-0x0D, Tag-0x1D)
+          - File Header File 0 (Tag-0x09, Tag-0x0C, Tag-0x0D, Tag-0x0E, Tag-0x14, Tag-0x11)
+          - File Chunk File 0 (Tag-0x09, Tag-0x0C, Tag-0x0D, Tag-0x0E, Tag-0x12, Tag-0x13) (YSTP payload)
+          - Commit (Tag-0x35 Len-0x19 slot_id key ts)
+        """
+        import hashlib, time
+        payload = bytearray()
+        # 1. Session Init
+        payload += build_tlv(0x08, bytes([0x00, slot_id]))
+        payload += build_tlv(0x09, bytes([0x01]))
+        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x1C, bytes.fromhex('000001000300'))
+        payload += build_tlv(0x0D, bytes([0x00]))
+        payload += build_tlv(0x1D, bytes.fromhex('000000004000140000'))
+        payload += build_tlv(0x0E, bytes([0x00]))
+        
+        # 2. File Header File 0
+        payload += build_tlv(0x09, bytes([0x01]))
+        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x0D, bytes([0x00]))
+        payload += build_tlv(0x0E, bytes([0x00]))
+        payload += build_tlv(0x14, bytes([anim_code, speed_val, stay_time]))
         payload += build_tlv(0x11, bytes.fromhex('0001000a'))
         
-        # 3. File Chunk (exact 341-byte payload)
+        # 3. File Chunk File 0
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([hw_addr]))
+        payload += build_tlv(0x0C, bytes([slot_id]))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x0E, bytes([0x00]))
         payload += build_tlv(0x12, bytes.fromhex('01000000c00300'))
         payload += build_tlv(0x13, ystp_bytes)
+
+        # 4. Commit Tag 0x35
+        key = struct.pack('<I', len(ystp_bytes)) + hashlib.md5(ystp_bytes).digest()
+        ts = struct.pack('<I', int(time.time()))
+        commit_val = bytes([slot_id]) + key + ts
+        payload += build_tlv(0x35, commit_val)
         
         return self.build_packet(bytes(payload), cmd_type=0xC1, sub_type=0x02)
 
     def build_play_preset_command(self, user_slot: int, loop_mode: int = 0x00):
-        """CMD=0x36: Play the slot that was just saved.
-
-        Real trace: 36 1a [loop_mode] [target_idx] 00 01 02 09 03 04 05 06 07 08 0a 0b 24 25 26 27 28 29 2a 2b 2c 2d 2e 2f
-          - byte 0: loop_mode: 0x00 (single static play), 0x01 (playlist cycle loop)
-          - byte 1: target playlist index: 0x0C for user slot 0 (0x24), 0x0D for user slot 1 (0x25), etc.
-          - bytes 2+: full playlist (factory slots 00,01,02,09,03-08,0a,0b then user hw 0x24-0x2F)
-        """
-        factory = [0x00, 0x01, 0x02, 0x09, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b]
-        all_hw  = list(range(0x24, 0x24 + 12))  # [0x24..0x2F]
-        target_idx = 12 + max(0, min(11, user_slot))
-        val = bytearray([loop_mode, target_idx]) + bytes(factory) + bytes(all_hw)
+        """CMD=0x36: Play the slot that was just saved."""
+        all_slots = bytes(range(60))
+        val = bytes([loop_mode, user_slot]) + all_slots
         payload = bytes([0x36, len(val)]) + val
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
 
     def build_slot_select_command(self, slot_id: int):
-        """CMD=0xC1 sub=0x06: Legacy slot select command (plays factory slot)."""
+        """CMD=0xC1 sub=0x06: Legacy slot select command."""
         payload = bytes([0x36, 0x02, 0x00, slot_id])
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x06)
 
-    def build_user_slot_play_command(self, slot_id: int):
-        """CMD=0xC1 sub=0x02: Select and play a user saved slot from flash memory.
-        Official app trace packet (seq=7):
-        36 1a 01 [hw_addr] 00 01 02 09 03 04 05 06 07 08 0a 0b 24 25 26 27 28 29 2a 2b 2c 2d 2e 2f
-        Where hw_addr = 0x24 + slot_id (0x24 for slot 0, 0x25 for slot 1, etc.)
+    def build_user_slot_play_command(self, slot_id: int, loop_mode: int = 0x00):
+        """CMD=0xC1 sub=0x02: Select and play a saved slot from flash memory.
+        Uses a playlist of length 1 (just the target slot) to enforce single mode.
+        If slot_id == 0xFF, it stops the player (used by stop_slot_playback_command).
         """
-        slot_list = bytes([0x00, 0x01, 0x02, 0x09, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f])
-        hw_addr = 0x24 + max(0, min(11, slot_id))
-        payload = bytes([0x36, len(slot_list) + 2, 0x01, hw_addr]) + slot_list
+        val = bytes([loop_mode, 0x00, slot_id])
+        payload = bytes([0x36, len(val)]) + val
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
+
+    def build_query_slots_command(self, start_slot: int = 0, count: int = 10):
+        """CMD=0x35 SubType 0x03: Query status of hardware slots."""
+        slots = bytes(range(start_slot, start_slot + count))
+        payload = bytes([0x35, len(slots)]) + slots
+        return self.build_packet(payload, cmd_type=0xC1, sub_type=0x03)
 
     def build_post_save_packets(self, slot_id: int):
         """Builds the post-save finalization sequence for user flash slots:
-        1. Flash session flush/close command for hw_addr (CMD=0xC1 0x02 08 02 00 hw_addr)
-        2. Direct slot select command (CMD=0xC1 0x06 36 02 00 slot_id)
+        1. Flash session flush/close command for hw_addr (CMD=0xC1 sub=0x02, bytes: 0x08 0x02 0x00 hw_addr)
+        2. Direct slot select command (CMD=0xC1 sub=0x06, bytes: 0x36 0x02 0x00 slot_id)
         """
         hw_addr = 0x24 + slot_id
         packets = []
@@ -455,7 +493,18 @@ class LOYWebProtocol(BaseProtocol):
 
     def stop_playlist_command(self):
         """CMD=0xC1 sub=0x03: Stop onboard playlist engine.
-        Exact official trace packet (seq=3): 36 00 (CMD=0x36, length=0).
+        Exact official trace packet (seq=3): 0x36 0x00 (CMD=0x36, length=0).
         """
         payload = bytes([0x36, 0x00])
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x03)
+
+    def cancel_playlist_command(self):
+        """CMD=0xC1 sub=0x02: Cancel active playlist (Tag 0x27 len=0x00).
+        This is the LOY SPACE official 'cancel play_list' command observed in PCAP traces.
+        Use before streaming local presets to prevent the sign from reverting to its
+        saved hardware slot after the session ends.
+        """
+        payload = bytes([0x27, 0x00])
+        return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
+
+

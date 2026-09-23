@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Power, Sun, Calendar, Image as ImageIcon, Bluetooth, Wifi,
   Activity, Upload, Clock, ExternalLink, Link2Off, Link2,
-  FileSearch, Search, RefreshCw, EyeOff, ChevronRight, X,
+  FileSearch, Search, RefreshCw, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
   Trash2, Pipette, Save, Send
 } from 'lucide-react';
@@ -489,6 +489,7 @@ const ClockPresetCardPreview = ({ preset, style }) => {
       width={64} 
       height={20} 
       className="led-preview"
+      style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated', position: 'absolute', inset: 0, ...(style || {}) }}
     />
   );
 };
@@ -583,12 +584,88 @@ const AnimatedPresetCardPreview = ({ preset }) => {
       width={64} 
       height={20} 
       className="led-preview" 
+      style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated', position: 'absolute', inset: 0 }}
     />
+  );
+};
+
+const PresetCardMedia = ({ preset, now }) => {
+  if (!preset) return null;
+  const isClock = preset.mode === 'clock' || preset.id === 'clock-default';
+  if (isClock) {
+    return <ClockPresetCardPreview preset={preset} now={now} />;
+  }
+  if (preset.mode === 'text') {
+    return <TextPresetCardPreview preset={preset} />;
+  }
+  if (preset.pixels && preset.pixels.length > 1280) {
+    return <AnimatedPresetCardPreview preset={preset} />;
+  }
+  if (preset.pixels && preset.pixels.length === 1280) {
+    return <PixelPresetCardPreview preset={preset} />;
+  }
+  if (preset.fileType === 'video' && preset.imgSrc) {
+    return (
+      <video 
+        src={preset.imgSrc} 
+        className="led-preview" 
+        autoPlay 
+        loop 
+        muted 
+        playsInline 
+        style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }} 
+      />
+    );
+  }
+  if (preset.fileType === 'gif' && preset.imgSrc) {
+    return (
+      <img 
+        src={preset.imgSrc} 
+        className="led-preview" 
+        draggable={false} 
+        alt={preset.name || "GIF"} 
+        style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }} 
+      />
+    );
+  }
+  if (preset.thumbnail) {
+    return (
+      <img 
+        src={preset.thumbnail} 
+        className="led-preview" 
+        draggable={false} 
+        alt={preset.name || "Thumbnail"} 
+        style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }} 
+      />
+    );
+  }
+  if (preset.imgSrc) {
+    return (
+      <img 
+        src={preset.imgSrc} 
+        className="led-preview" 
+        draggable={false} 
+        alt={preset.name || "Media"} 
+        style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }} 
+      />
+    );
+  }
+  return (
+    <div className="preset-card-content" style={{ background: preset.bgColor || '#000000' }}>
+      <p style={{ color: preset.textColor || '#fff', fontSize: 16, fontWeight: 900, transform: `rotate(${preset.rotation || 0}deg)`, textAlign: 'center', lineHeight: 1 }}>
+        {preset.text || preset.name || 'Untitled'}
+      </p>
+    </div>
   );
 };
 
 const PixelPresetCardPreview = ({ preset, style }) => {
   const canvasRef = useRef(null);
+  const scrollOffsetRef = useRef(0);
+  const animName = preset?.animation;
+  const isAnimating = Boolean(animName && animName !== 'show now' && animName !== 'static');
+  const animSpeed = preset?.speed !== undefined ? preset?.speed : 8;
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -598,33 +675,77 @@ const PixelPresetCardPreview = ({ preset, style }) => {
     const pixels = preset.pixels;
     if (!pixels || pixels.length < 1280) return;
 
-    const imgData = ctx.createImageData(64, 20);
     const bgCol = preset.bgColor || '#000000';
     const bgR = parseInt(bgCol.slice(1, 3), 16) || 0;
     const bgG = parseInt(bgCol.slice(3, 5), 16) || 0;
     const bgB = parseInt(bgCol.slice(5, 7), 16) || 0;
 
-    for (let i = 0; i < 1280; i++) {
-      const p = pixels[i];
-      let r = bgR, g = bgG, b = bgB;
-      if (p && typeof p === 'string' && p.startsWith('#')) {
-        r = parseInt(p.slice(1, 3), 16) || 0;
-        g = parseInt(p.slice(3, 5), 16) || 0;
-        b = parseInt(p.slice(5, 7), 16) || 0;
-      } else if (p && p !== 0) {
-        const fgCol = preset.textColor || '#ffffff';
-        r = parseInt(fgCol.slice(1, 3), 16) || 0;
-        g = parseInt(fgCol.slice(3, 5), 16) || 0;
-        b = parseInt(fgCol.slice(5, 7), 16) || 0;
+    const renderFrame = (offset = 0) => {
+      const imgData = ctx.createImageData(64, 20);
+      const isFlickerOff = animName === 'flicker' && (Math.floor(offset / 4) % 2 === 1);
+
+      for (let y = 0; y < 20; y++) {
+        for (let x = 0; x < 64; x++) {
+          const destIdx = (y * 64 + x) * 4;
+          if (isFlickerOff) {
+            imgData.data[destIdx] = bgR;
+            imgData.data[destIdx + 1] = bgG;
+            imgData.data[destIdx + 2] = bgB;
+            imgData.data[destIdx + 3] = 255;
+            continue;
+          }
+
+          let srcX = x;
+          let srcY = y;
+          if (animName === 'shift left' || animName === 'continuous left shift' || animName === 'move-left') {
+            srcX = (x + offset) % 64;
+          } else if (animName === 'move right' || animName === 'move-right') {
+            srcX = (x - (offset % 64) + 64) % 64;
+          } else if (animName === 'move up' || animName === 'move-up') {
+            srcY = (y + offset) % 20;
+          } else if (animName === 'move down' || animName === 'move-down') {
+            srcY = (y - (offset % 20) + 20) % 20;
+          } else if (animName === 'snow') {
+            srcY = (y - (offset % 20) + 20) % 20;
+            srcX = (x + ((y * 3 + offset) % 3) - 1 + 64) % 64;
+          } else if (animName === 'bubble') {
+            srcY = (y + offset) % 20;
+            srcX = (x + ((y * 2 + offset) % 3) - 1 + 64) % 64;
+          }
+
+          const srcIdx = srcY * 64 + srcX;
+          const p = pixels[srcIdx];
+          let r = bgR, g = bgG, b = bgB;
+          if (p && typeof p === 'string' && p.startsWith('#')) {
+            r = parseInt(p.slice(1, 3), 16) || 0;
+            g = parseInt(p.slice(3, 5), 16) || 0;
+            b = parseInt(p.slice(5, 7), 16) || 0;
+          } else if (p && p !== 0) {
+            const fgCol = preset.textColor || '#ffffff';
+            r = parseInt(fgCol.slice(1, 3), 16) || 0;
+            g = parseInt(fgCol.slice(3, 5), 16) || 0;
+            b = parseInt(fgCol.slice(5, 7), 16) || 0;
+          }
+          imgData.data[destIdx] = r;
+          imgData.data[destIdx + 1] = g;
+          imgData.data[destIdx + 2] = b;
+          imgData.data[destIdx + 3] = 255;
+        }
       }
-      const idx = i * 4;
-      imgData.data[idx] = r;
-      imgData.data[idx + 1] = g;
-      imgData.data[idx + 2] = b;
-      imgData.data[idx + 3] = 255;
+      ctx.putImageData(imgData, 0, 0);
+    };
+
+    renderFrame(scrollOffsetRef.current);
+
+    if (isAnimating) {
+      const intervalMs = Math.max(10, 80 - animSpeed * 5);
+      const interval = setInterval(() => {
+        scrollOffsetRef.current = (scrollOffsetRef.current + 1) % 64;
+        renderFrame(scrollOffsetRef.current);
+      }, intervalMs);
+      return () => clearInterval(interval);
     }
-    ctx.putImageData(imgData, 0, 0);
-  }, [preset.pixels, preset.bgColor, preset.textColor]);
+  }, [preset.pixels, preset.bgColor, preset.textColor, preset.animation, preset.speed, isAnimating, animSpeed]);
 
   return (
     <canvas 
@@ -632,13 +753,35 @@ const PixelPresetCardPreview = ({ preset, style }) => {
       width={64} 
       height={20} 
       className="led-preview"
+      style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated', position: 'absolute', inset: 0, ...(style || {}) }}
     />
   );
 };
 
+const parseHexColor = (hex, def = [255, 255, 255]) => {
+  if (!hex || typeof hex !== 'string') return def;
+  const clean = hex.replace('#', '');
+  if (clean.length === 6) {
+    const r = parseInt(clean.slice(0, 2), 16);
+    const g = parseInt(clean.slice(2, 4), 16);
+    const b = parseInt(clean.slice(4, 6), 16);
+    return [isNaN(r) ? def[0] : r, isNaN(g) ? def[1] : g, isNaN(b) ? def[2] : b];
+  }
+  return def;
+};
+
+const textPreviewCache = new Map();
+
 const TextPresetCardPreview = ({ preset }) => {
   const canvasRef = useRef(null);
   const scrollOffsetRef = useRef(0);
+
+  const textToDraw = preset?.text || preset?.name || '';
+  const textColor = preset?.textColor || '#ffffff';
+  const bgColor = preset?.bgColor || '#000000';
+  const animName = preset?.animation;
+  const isAnimating = Boolean(animName && animName !== 'show now' && animName !== 'static');
+  const animationSpeed = preset?.speed !== undefined ? preset?.speed : 8;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -646,37 +789,155 @@ const TextPresetCardPreview = ({ preset }) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let textToDraw = preset.text || preset.name || '';
-    let isAnimating = preset.animation === 'move-left';
-    let animationSpeed = preset.speed !== undefined ? preset.speed : 13;
+    let active = true;
+    let animInterval = null;
 
-    ctx.font = '18px Arial, sans-serif';
-    ctx.textBaseline = 'middle';
-    
-    if (!isAnimating) {
-       ctx.fillStyle = preset.bgColor || '#000000';
-       ctx.fillRect(0, 0, 64, 20);
-       ctx.fillStyle = preset.textColor || '#ffffff';
-       ctx.textAlign = 'center';
-       ctx.fillText(textToDraw, 32, 10);
-       return;
+    // Local crisp fallback renderer using 18px Arial Bold matching PIL
+    const renderLocalFallback = (offset = 0) => {
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = 64;
+      offCanvas.height = 20;
+      const offCtx = offCanvas.getContext('2d');
+      offCtx.fillStyle = '#000000';
+      offCtx.fillRect(0, 0, 64, 20);
+      offCtx.font = '18px Arial, sans-serif';
+      offCtx.textBaseline = 'middle';
+      offCtx.fillStyle = '#ffffff';
+
+      const tw = Math.ceil(offCtx.measureText(textToDraw).width);
+      if (!isAnimating) {
+        if (tw <= 64) {
+          offCtx.textAlign = 'center';
+          offCtx.fillText(textToDraw, 32, 10);
+        } else {
+          offCtx.textAlign = 'left';
+          offCtx.fillText(textToDraw, 0, 10);
+        }
+      } else {
+        const isFlickerOff = animName === 'flicker' && (Math.floor(offset / 4) % 2 === 1);
+        if (!isFlickerOff) {
+          offCtx.textAlign = 'left';
+          let x = 64 - (offset % (64 + tw));
+          let y = 10;
+          if (animName === 'move right' || animName === 'move-right') {
+            x = (offset % (64 + tw)) - tw;
+          } else if (animName === 'move up' || animName === 'move-up') {
+            x = tw <= 64 ? (32 - tw / 2) : 0;
+            y = 10 - (offset % 30);
+          } else if (animName === 'move down' || animName === 'move-down') {
+            x = tw <= 64 ? (32 - tw / 2) : 0;
+            y = -10 + (offset % 30);
+          } else if (animName === 'snow') {
+            x = tw <= 64 ? (32 - tw / 2) : 0;
+            y = -10 + (offset % 30);
+          } else if (animName === 'bubble') {
+            x = tw <= 64 ? (32 - tw / 2) : 0;
+            y = 10 - (offset % 30);
+          }
+          offCtx.fillText(textToDraw, x, y);
+        }
+      }
+
+      const maskData = offCtx.getImageData(0, 0, 64, 20).data;
+      const [tcR, tcG, tcB] = parseHexColor(textColor, [255, 255, 255]);
+      const [bgR, bgG, bgB] = parseHexColor(bgColor, [0, 0, 0]);
+
+      const outImg = ctx.createImageData(64, 20);
+      const outData = outImg.data;
+      for (let i = 0; i < maskData.length; i += 4) {
+        if (maskData[i] > 100) {
+          outData[i] = tcR;
+          outData[i+1] = tcG;
+          outData[i+2] = tcB;
+          outData[i+3] = 255;
+        } else {
+          outData[i] = bgR;
+          outData[i+1] = bgG;
+          outData[i+2] = bgB;
+          outData[i+3] = 255;
+        }
+      }
+      ctx.putImageData(outImg, 0, 0);
+    };
+
+    const applyImage = (img, imgWidth) => {
+      if (!active) return;
+      if (animInterval) clearInterval(animInterval);
+
+      if (!isAnimating) {
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(0, 0, 64, 20);
+        ctx.drawImage(img, 0, 0);
+      } else {
+        scrollOffsetRef.current = 0;
+        const totalSpan = 64 + imgWidth;
+        const drawFrame = () => {
+          if (!active) return;
+          const isFlickerOff = animName === 'flicker' && (Math.floor(scrollOffsetRef.current / 4) % 2 === 1);
+          ctx.fillStyle = bgColor;
+          ctx.fillRect(0, 0, 64, 20);
+
+          if (!isFlickerOff) {
+            let x = 64 - (scrollOffsetRef.current % totalSpan);
+            let y = 0;
+            if (animName === 'move right' || animName === 'move-right') {
+              x = (scrollOffsetRef.current % totalSpan) - imgWidth;
+            } else if (animName === 'move up' || animName === 'move-up') {
+              x = 0;
+              y = -(scrollOffsetRef.current % 30);
+            } else if (animName === 'move down' || animName === 'move-down') {
+              x = 0;
+              y = -20 + (scrollOffsetRef.current % 30);
+            } else if (animName === 'snow') {
+              x = 0;
+              y = -20 + (scrollOffsetRef.current % 30);
+            } else if (animName === 'bubble') {
+              x = 0;
+              y = -(scrollOffsetRef.current % 30);
+            }
+            ctx.drawImage(img, x, y);
+          }
+          scrollOffsetRef.current += 1;
+        };
+        drawFrame();
+        animInterval = setInterval(drawFrame, Math.max(10, 80 - animationSpeed * 5));
+      }
+    };
+
+    const cacheKey = `${textToDraw}|${textColor}|${bgColor}`;
+    if (textPreviewCache.has(cacheKey)) {
+      const cached = textPreviewCache.get(cacheKey);
+      applyImage(cached.img, cached.width);
+    } else {
+      renderLocalFallback(0);
+
+      const _API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? 'http://127.0.0.1:8001' : '';
+      axios.post(`${_API_BASE}/render-text-preview`, {
+        text: textToDraw,
+        textColor: textColor,
+        bgColor: bgColor
+      })
+      .then(r => r.data)
+      .then(data => {
+        if (!active || !data?.data_url) return;
+        const img = new Image();
+        img.onload = () => {
+          if (!active) return;
+          textPreviewCache.set(cacheKey, { img, width: data.width || 64 });
+          applyImage(img, data.width || 64);
+        };
+        img.src = data.data_url;
+      })
+      .catch(() => {
+        // Fallback already rendered
+      });
     }
 
-    ctx.textAlign = 'left';
-    const tw = ctx.measureText(textToDraw).width;
-    
-    const interval = setInterval(() => {
-       scrollOffsetRef.current += 1;
-       const x = 64 - (scrollOffsetRef.current % (64 + tw));
-       
-       ctx.fillStyle = preset.bgColor || '#000000';
-       ctx.fillRect(0, 0, 64, 20);
-       ctx.fillStyle = preset.textColor || '#ffffff';
-       ctx.fillText(textToDraw, x, 10);
-    }, Math.max(10, 80 - animationSpeed * 5));
-
-    return () => clearInterval(interval);
-  }, [preset]);
+    return () => {
+      active = false;
+      if (animInterval) clearInterval(animInterval);
+    };
+  }, [textToDraw, textColor, bgColor, isAnimating, animationSpeed]);
 
   return (
     <canvas 
@@ -684,6 +945,7 @@ const TextPresetCardPreview = ({ preset }) => {
       width={64} 
       height={20} 
       className="led-preview" 
+      style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated', position: 'absolute', inset: 0 }}
     />
   );
 };
@@ -696,7 +958,7 @@ export default function App() {
     calendar_connected: false, uptime: '—', frames: 0
   });
   const [brightness, setBrightness] = useState(15);
-  const [speed, setSpeed] = useState(13);
+  const [speed, setSpeed] = useState(8);
 
   // Drag state for Saved Presets
   const [savedDraggedIdx, setSavedDraggedIdx] = useState(null);
@@ -741,8 +1003,8 @@ export default function App() {
       const res = await axios.get(`${API_BASE}/status`);
       setStatus(res.data);
       if (res.data && res.data.connected === false) {
-        setPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
-        setLocalPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
+        setPushMessage('');
+        setLocalPushMessage('');
       }
       setApiError(false);
       setHasFetchedStatus(true);
@@ -755,7 +1017,9 @@ export default function App() {
       }
       return res.data;
     } catch (e) {
-      setApiError(true);
+      if (!e.response) {
+        setApiError(true);
+      }
       return null;
     }
   };
@@ -771,18 +1035,18 @@ export default function App() {
     if (hasFetchedStatus && !status.connected && macAddress && !autoConnectTried.current && !isConnecting && !apiError) {
       console.log("[auto-connect] Attempting to reconnect to:", macAddress);
       autoConnectTried.current = true;
-      doConnect(macAddress);
+      doConnect(macAddress, false, true);
     }
   }, [hasFetchedStatus, status.connected, macAddress, isConnecting, apiError]);
 
-  const doConnect = async (addr, isRetry = false) => {
+  const doConnect = async (addr, isRetry = false, isAuto = false) => {
     if (!addr || (isConnecting && !isRetry)) return;
     setIsConnecting(true);
-    setApiError(false);
     setConnectionFailed(false);
-    console.log(`[connect] ${isRetry ? 'Retry attempt' : 'Connecting'} to:`, addr);
+    console.log(`[connect] ${isRetry ? 'Retry attempt' : 'Connecting'} to:`, addr, isAuto ? '(auto)' : '');
     try {
-      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr }, { timeout: 35000 });
+      const timeoutMs = 60000;
+      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr }, { timeout: timeoutMs });
       const connectedAddr = resPost.data.address || addr;
       setMacAddress(connectedAddr);
       const res = await axios.get(`${API_BASE}/status`);
@@ -794,17 +1058,17 @@ export default function App() {
       }
     } catch (e) {
       console.error(`[connect] ${isRetry ? 'Retry' : 'Attempt 1'} failed:`, e.message);
-      if (!isRetry) {
-        // Silent first-failure is common — auto-retry once after a short pause
+      if (!isRetry && !isAuto) {
+        // Silent first-failure retry for manual user connection
         console.log('[connect] Auto-retrying once...');
-        await new Promise(r => setTimeout(r, 1500));
-        await doConnect(addr, true);
+        await new Promise(r => setTimeout(r, 1000));
+        await doConnect(addr, true, false);
         return;
       }
-      setApiError(true);
       setConnectionFailed(true);
+    } finally {
+      setIsConnecting(false);
     }
-    setIsConnecting(false);
   };
 
   const handleDisconnect = async () => {
@@ -815,7 +1079,7 @@ export default function App() {
     setLocalPushMessage('');
     setIsManualOverride(false);
     setLastPushedId(null);
-    try { await axios.post(`${API_BASE}/disconnect`); } catch (e) {}
+    try { await axios.post(`${API_BASE}/disconnect`, {}, { timeout: 3000 }); } catch (e) {}
   };
 
   const handleMacInput = (raw) => {
@@ -928,7 +1192,7 @@ export default function App() {
             text: '',
             textColor: '#ffffff',
             bgColor: '#000000',
-            animation: 'static',
+            animation: 'show now',
             speed: 15,
             clockStyle: 'default',
             timeFormat: '24h',
@@ -959,6 +1223,20 @@ export default function App() {
             }
           }
           dbPresets = [clockPreset];
+        }
+
+        // Migrate legacy animation names to current canonical names
+        const migrateAnimation = (anim) => {
+          if (!anim) return 'show now';
+          if (anim === 'static') return 'show now';
+          if (anim === 'move left' || anim === 'move-left') return 'continuous left shift';
+          return anim;
+        };
+        if (Array.isArray(dbPresets)) {
+          dbPresets = dbPresets.map(p => ({
+            ...p,
+            animation: migrateAnimation(p.animation)
+          }));
         }
 
         setPresets(dbPresets);
@@ -1053,19 +1331,96 @@ export default function App() {
     }
   };
 
+  const syncHardwareSlots = async () => {
+    if (!status?.connected) return;
+    try {
+      const macParam = encodeURIComponent(status.address || DEFAULT_MAC);
+      const res = await axios.get(`${API_BASE}/hardware-slots?mac=${macParam}`);
+      const hwSlots = res.data?.slots;
+      if (Array.isArray(hwSlots) && hwSlots.length > 0) {
+        setAllSavedPresets(prev => {
+          const currentList = prev[activeMac] 
+            ? [...prev[activeMac]] 
+            : Array(36).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }));
+          let updated = false;
+          hwSlots.forEach(s => {
+            const idx = s.slot_id;
+            if (idx >= 0 && idx < 12) {
+              if (s.occupied) {
+                // The sign is write-only — hardware slot state cannot be reliably read back.
+                // Only show a preset card if we have locally cached data (preset_data / preview_url).
+                const pData = s.preset_data;
+                const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
+
+                if (!pData && !previewUrl) {
+                  // No local cache — clear any stale placeholder (e.g. old "Sign Slot X") and treat as empty
+                  if (currentList[idx]?.preset !== null) {
+                    updated = true;
+                    currentList[idx] = { ...currentList[idx], preset: null };
+                  }
+                  return;
+                }
+
+                const hwPreset = pData ? {
+                  ...pData,
+                  id: `hw-slot-${idx}`,
+                  thumbnail: previewUrl || pData.thumbnail,
+                  isHardware: false
+                } : {
+                  id: `hw-slot-${idx}`,
+                  mode: 'image',
+                  thumbnail: previewUrl,
+                  isHardware: false
+                };
+                // Only update if content changed (avoid unnecessary re-renders)
+                const existing = currentList[idx]?.preset;
+                const existingKey = existing?.id + '|' + existing?.thumbnail;
+                const newKey = hwPreset.id + '|' + hwPreset.thumbnail;
+                if (existingKey !== newKey) {
+                  updated = true;
+                  currentList[idx] = { ...currentList[idx], preset: hwPreset };
+                }
+              } else if (currentList[idx]?.preset?.isHardware) {
+                // Slot no longer occupied on hardware — clear hardware-only card
+                updated = true;
+                currentList[idx] = { ...currentList[idx], preset: null };
+              }
+            }
+          });
+          return updated ? { ...prev, [activeMac]: currentList } : prev;
+        });
+      }
+    } catch (e) {
+      console.warn("[syncHardwareSlots] Error:", e);
+    }
+  };
+
+  // Window focus listener to refresh hardware slots when returning to tab
+  useEffect(() => {
+    const onFocus = () => {
+      if (status?.connected) {
+        syncHardwareSlots();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [status?.connected, activeMac]);
+
   // Auto-push / Blanking / Default logic based on the local clock
   useEffect(() => {
-    if (!status?.connected || !events) return;
+    if (!status?.connected) return;
 
     // Check for calendar event transitions to clear manual override
     try {
-      const activeEvents = events.filter(ev => isEventActive(ev, now) && ev.response_status?.toLowerCase() !== 'declined');
-      const activeEvent = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
-      const activeEventId = activeEvent ? activeEvent.id : null;
-      if (activeEventId !== lastActiveEventIdRef.current) {
-        console.log(`[auto-push] Event transition detected: ${lastActiveEventIdRef.current} -> ${activeEventId}. Clearing manual override.`);
-        lastActiveEventIdRef.current = activeEventId;
-        setIsManualOverride(false);
+      if (events) {
+        const activeEvents = events.filter(ev => isEventActive(ev, now) && ev.response_status?.toLowerCase() !== 'declined');
+        const activeEvent = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
+        const activeEventId = activeEvent ? activeEvent.id : null;
+        if (activeEventId !== lastActiveEventIdRef.current) {
+          console.log(`[auto-push] Event transition detected: ${lastActiveEventIdRef.current} -> ${activeEventId}. Clearing manual override.`);
+          lastActiveEventIdRef.current = activeEventId;
+          setIsManualOverride(false);
+        }
       }
     } catch (err) {
       console.error("[auto-push] Error during transition check:", err);
@@ -1074,9 +1429,9 @@ export default function App() {
     if (isManualOverride) return;
 
     try {
-      const activeEvents = events.filter(ev => isEventActive(ev, now) && ev.response_status?.toLowerCase() !== 'declined');
+      const activeEvents = events ? events.filter(ev => isEventActive(ev, now) && ev.response_status?.toLowerCase() !== 'declined') : [];
       const activeEvent = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
-      const defaultPreset = (presets || []).find(p => p.isDefault);
+      const defaultPreset = (presets || []).find(p => p.isDefault) || (presets && presets.length > 0 ? presets[0] : null);
       
       let targetContent = null;
       let targetId = null;
@@ -1086,7 +1441,7 @@ export default function App() {
         targetId = `event-${activeEvent.id}-${targetContent.summary}`;
       } else if (defaultPreset) {
         targetContent = { type: 'preset', data: defaultPreset };
-        targetId = `preset-${defaultPreset.id}`;
+        targetId = defaultPreset.id;
       }
 
       if (targetId !== lastPushedId) {
@@ -1109,37 +1464,49 @@ export default function App() {
     } catch (err) {
       console.error("[auto-push] Error:", err);
     }
-  }, [now, events, status.connected, isManualOverride, presets]);
+  }, [now, events, status.connected, isManualOverride, presets, lastPushedId]);
 
   // Sync on connection
   useEffect(() => {
     if (status.connected) {
       setScanOpen(false);
-      fetchEvents();
-      if (isManualOverride && lastPushedId) {
-        const lastPreset = presets?.find(p => p.id === lastPushedId);
-        if (lastPreset) {
-          console.log("[reconnect] Restoring last manually pushed preset:", lastPreset);
-          setTimeout(() => {
-            handlePush(lastPreset, false).catch(err => {
-              console.error("[reconnect] Failed to restore last preset:", err);
-            });
-          }, 800);
-        } else if (lastPushedId.startsWith('hw-slot-')) {
-          const hwSlotId = parseInt(lastPushedId.split('-')[2]);
-          console.log("[reconnect] Restoring last hardware slot:", hwSlotId);
-          setTimeout(() => {
-            axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => console.error(e));
-          }, 800);
-        } else {
-          setIsManualOverride(false);
-          setLastPushedId(null);
+      setIsManualOverride(false);
+      isManualOverrideRef.current = false;
+      syncHardwareSlots();
+      const pushDefaultOrActive = async () => {
+        let currentPresets = presets;
+        if (!currentPresets || currentPresets.length === 0) {
+          try {
+            currentPresets = await getPresetsFromDB();
+          } catch (e) {
+            currentPresets = [];
+          }
         }
-      } else {
-        setLastPushedId(null);
-      }
+        let evs = [];
+        try {
+          evs = await fetchEvents();
+        } catch (e) {}
+
+        const activeEvents = (evs || []).filter(ev => isEventActive(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined');
+        const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
+        if (active) {
+          console.log("[connect] Pushing active event on connect:", active.summary);
+          await handlePush(getEventDisplayString(active), false);
+        } else {
+          const defPreset = (currentPresets || []).find(p => p.isDefault) || (currentPresets && currentPresets.length > 0 ? currentPresets[0] : null);
+          if (defPreset) {
+            console.log("[connect] Pushing default preset on connect:", defPreset.name);
+            setLastPushedId(defPreset.id);
+            await handlePush(defPreset, false);
+          }
+        }
+      };
+      pushDefaultOrActive();
     } else {
       setPushMessage('');
+      setIsManualOverride(false);
+      isManualOverrideRef.current = false;
+      setLastPushedId(null);
     }
   }, [status.connected]);
 
@@ -1174,7 +1541,7 @@ export default function App() {
         text: payload,
         textColor: '#ffffff',
         bgColor: '#000000',
-        animation: 'static',
+        animation: 'show now',
         speed: speed,
         rotation: 0,
         spacing: 1,
@@ -1198,10 +1565,6 @@ export default function App() {
         const pushColor = data.clockStyle === 'default' ? '#ffffff' : (data.textColor || '#10B981');
         await axios.post(`${API_BASE}/clock?on=true&color=${encodeURIComponent(pushColor)}&bg_color=${encodeURIComponent(data.bgColor || '#000000')}&format=${data.timeFormat || '12h'}&show_seconds=${data.showSeconds !== false}&clock_style=${data.clockStyle || 'custom'}`);
       } else {
-        // Ensure speed state is applied for text presets
-        if (data.mode === 'text') {
-          data.speed = speed;
-        }
         await axios.post(`${API_BASE}/push-text`, data);
       }
       if (manual && !skipMessages) {
@@ -1212,7 +1575,9 @@ export default function App() {
       console.error('[push] Failed:', e);
       const detail = e.response?.data?.detail;
       const errorMsg = typeof detail === 'string' ? detail : (Array.isArray(detail) ? detail[0]?.msg : JSON.stringify(detail));
-      if (!isEvent && !skipMessages) {
+      const isDisconnectError = !status.connected || 
+        (errorMsg && (errorMsg.includes('-2147023673') || errorMsg.toLowerCase().includes('canceled') || errorMsg.toLowerCase().includes('cancelled') || errorMsg.toLowerCase().includes('disconnected') || errorMsg.toLowerCase().includes('not connected')));
+      if (!isEvent && !skipMessages && !isDisconnectError) {
         handleSetLocalPushMessage('Error: ' + (errorMsg || e.message));
       }
       throw e;
@@ -1276,6 +1641,7 @@ export default function App() {
               setPushing={setPushing}
               scanOpen={scanOpen}
               setScanOpen={setScanOpen}
+              syncHardwareSlots={syncHardwareSlots}
             />
           </div>
           <MediaView 
@@ -1317,7 +1683,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -1498,10 +1864,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       const res = await axios.post(`${API_BASE}/save-preset`, {
         slot_id: hwSlotId,
         address: status.address || DEFAULT_MAC,
-        preset: {
-          ...presetCopy,
-          speed: presetCopy.speed !== undefined ? presetCopy.speed : speed
-        }
+        preset: presetCopy
       });
       console.log('[assignPresetToSlot] API save-preset call succeeded');
 
@@ -1519,10 +1882,17 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         }
       };
       setSavedPresets(nextSaved);
+      setIsManualOverride(true);
+      setLastPushedId(`hw-slot-${globalIdx}`);
       setPushMessage(`Saved to slot ${globalIdx + 1}!`);
+      if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
     } catch (err) {
       console.error('Failed to save preset to hardware slot:', err);
-      setPushMessage(`Error: ${err.response?.data?.detail || err.message || 'Failed to save preset'}`);
+      const detail = err.response?.data?.detail || err.message || '';
+      const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
+      if (!isDisconnectError) {
+        setPushMessage(`Error: ${detail || 'Failed to save preset'}`);
+      }
     } finally {
       console.log('[assignPresetToSlot] Setting pushing=false');
       setPushing(false);
@@ -1547,7 +1917,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         setPushMessage(`Pushed slot ${globalIdx + 1} to sign!`);
       } catch (err) {
         console.error('Failed to trigger hardware preset play:', err);
-        setPushMessage(`Error: ${err.message}`);
+        const detail = err.response?.data?.detail || err.message || '';
+        const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
+        if (!isDisconnectError) {
+          setPushMessage(`Error: ${detail || err.message}`);
+        }
       } finally {
         setPushing(false);
       }
@@ -1559,7 +1933,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         await onPush(preset, true, true);
         setPushMessage(`Pushed slot ${globalIdx + 1} to sign!`);
       } catch (err) {
-        setPushMessage(`Error: ${err.message}`);
+        const detail = err.response?.data?.detail || err.message || '';
+        const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
+        if (!isDisconnectError) {
+          setPushMessage(`Error: ${detail || err.message}`);
+        }
       } finally {
         setPushing(false);
       }
@@ -1654,8 +2032,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   };
 
   const activePreset = lastPushedId ? (
-    presets.find(p => p.id === lastPushedId) || 
-    savedPresets.map(s => s.preset).filter(Boolean).find(p => p.id === lastPushedId)
+    presets.find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId) || 
+    savedPresets.map(s => s.preset).filter(Boolean).find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId) ||
+    (typeof lastPushedId === 'string' && lastPushedId.startsWith('hw-slot-') ? savedPresets[parseInt(lastPushedId.split('-')[2], 10)]?.preset : null)
   ) : null;
 
   let currentSn = '';
@@ -1699,23 +2078,17 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   }}
                   style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
                 />
+              ) : activePreset ? (
+                <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+                  <PresetCardMedia preset={activePreset} now={now} />
+                </div>
               ) : status?.preview_url ? (
                 <img
                   ref={previewRef}
                   src={`${API_BASE}${status.preview_url}?t=${previewStamp}`}
-                  alt="Live"
                   className={`${status.width && status.width > 64 ? "scrolling-preview" : "static-preview"} ${isLoaded ? 'loaded' : ''}`}
-                  style={status.width && status.width > 64 ? { '--scroll-duration': `${((64 + status.width) * Math.max(10, 80 - speed * 5)) / 1000}s` } : {}}
+                  style={status.width && status.width > 64 ? { '--scroll-duration': `${((64 + status.width) * Math.max(10, 80 - (activePreset?.speed !== undefined ? activePreset.speed : (status?.speed !== undefined ? status.speed : speed)) * 5)) / 1000}s` } : {}}
                   onLoad={() => setIsLoaded(true)}
-                />
-              ) : activePreset && (activePreset.mode === 'clock' || activePreset.id === 'clock-default') ? (
-                <ClockPresetCardPreview preset={activePreset} style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }} />
-              ) : activePreset && activePreset.thumbnail ? (
-                <img
-                  ref={previewRef}
-                  src={activePreset.thumbnail || ''}
-                  alt="Live Fallback"
-                  className="static-preview loaded"
                 />
               ) : (
                 <div style={{width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '12px'}}>
@@ -1739,17 +2112,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 disabled={!status.connected}
               />
               <span className="font-bold text-slate-500 w-6 text-[10px] text-right">{brightness}</span>
-            </div>
-
-            <div className="brightness-rail glass-panel" style={{ opacity: status.connected ? 1 : 0.2, pointerEvents: status.connected ? 'auto' : 'none', padding: '12px 16px', flex: 1 }}>
-              <Gauge className="text-emerald-400 flex-shrink-0" size={17} />
-              <input 
-                type="range" min="1" max="15" value={speed} 
-                onChange={(e) => onSpeedChange(parseInt(e.target.value))} 
-                className="h-slider" 
-                disabled={!status.connected}
-              />
-              <span className="font-bold text-slate-500 w-6 text-[10px] text-right">{speed}</span>
             </div>
           </div>
         </div>
@@ -1822,6 +2184,17 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 <><RefreshCw size={14} className="animate-spin" /> Cancel</>
               ) : isScanning ? 'Scanning...' : 'Connect'}
             </button>
+            {connectionFailed && !isConnecting && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
+                fontSize: '11px', color: '#f87171', fontWeight: 600,
+                background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.25)',
+                borderRadius: '8px', padding: '6px 10px', whiteSpace: 'nowrap'
+              }}>
+                <span>⚠</span>
+                <span>Connection failed — power cycle the sign and retry</span>
+              </div>
+            )}
           </>
         )}
 
@@ -2021,9 +2394,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               )}
             </div>
             {/* Controls and Collapse Chevron in Top Right */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
               {!isSavedCollapsed && totalSavedPages > 1 && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
                   <button
                     className="btn-styled inactive"
                     style={{ padding: '4px 8px', minWidth: 'auto', background: 'rgba(255,255,255,0.05)', borderRadius: '6px' }}
@@ -2050,10 +2423,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 </div>
               )}
 
-              <div 
-                onClick={() => setIsSavedCollapsed(!isSavedCollapsed)}
-                style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}
-              >
+              <div style={{ display: 'flex', alignItems: 'center' }}>
                 <ChevronRight 
                   size={18} 
                   className="text-slate-400 transition-transform duration-200 hover:text-white" 
@@ -2068,7 +2438,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
 
           {!isSavedCollapsed && (
             <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '24px', width: '100%' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '24px', width: '100%' }}>
                 {savedPresets.slice(savedPage * slotsPerPage, (savedPage + 1) * slotsPerPage).map((slot, localIdx) => {
                   const globalIdx = savedPage * slotsPerPage + localIdx;
                   const p = slot.preset;
@@ -2082,15 +2452,19 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         onDrop={(e) => handleDropOnSlot(e, globalIdx)}
                         onPointerDown={handlePointerDown}
                         onPointerUp={(e) => handlePointerUp(e, () => playSavedPreset(globalIdx, null))}
-                        className="preset-card relative flex flex-col items-center justify-center bg-black/30 hover:bg-black/40 transition-all cursor-pointer"
+                        className="preset-card empty-slot relative transition-all cursor-pointer"
                         style={{
-                          border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : '1px dashed rgba(255,255,255,0.1)',
-                          boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : 'none',
+                          border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : undefined,
+                          boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : undefined,
                         }}
                       >
-                        <div className="absolute top-2 left-2 text-[8px] font-bold text-slate-500 tracking-wider">
-                          SLOT {slot.slotNumber}
+                        <div className="preset-card-slot-badge">
+                          Slot {slot.slotNumber}
                         </div>
+                        <Plus size={20} className="text-slate-600 mb-1" />
+                        <p style={{ fontSize: '10px', fontWeight: 900, color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0 }}>
+                          Empty
+                        </p>
                         <div className="preset-card-overlay flex gap-2">
                           <button
                             onPointerDown={(e) => e.stopPropagation()}
@@ -2109,7 +2483,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     );
                   }
 
-                  const isClock = p.mode === 'clock' || p.id === 'clock-default';
                   return (
                     <div
                       key={slot.slotNumber}
@@ -2133,28 +2506,15 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         cursor: 'grab',
                         opacity: globalIdx === savedDraggedIdx ? 0.4 : 1,
                         transform: globalIdx === savedDraggedIdx ? 'scale(0.98)' : 'none',
-                        border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : '1px solid var(--glass-border)',
-                        boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : 'none',
+                        border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : undefined,
+                        boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : undefined,
                         userSelect: 'none'
                       }}
                     >
-                      {isClock ? (
-                        <ClockPresetCardPreview preset={p} now={now} />
-                      ) : p.mode === 'text' ? (
-                        <TextPresetCardPreview preset={p} />
-                      ) : p.pixels && p.pixels.length > 1280 ? (
-                        <AnimatedPresetCardPreview preset={p} />
-                      ) : p.pixels && p.pixels.length === 1280 ? (
-                        <PixelPresetCardPreview preset={p} />
-                      ) : p.thumbnail ? (
-                        <img src={p.thumbnail} className="led-preview" draggable={false} />
-                      ) : (
-                        <div className="preset-card-content" style={{ background: p.bgColor || '#000000' }}>
-                          <p style={{ color: p.textColor || '#fff', fontSize: 16, fontWeight: 900, transform: `rotate(${p.rotation || 0}deg)`, textAlign: 'center', lineHeight: 1 }}>
-                            {p.text || p.name || 'Untitled'}
-                          </p>
-                        </div>
-                      )}
+                      <div className="preset-card-slot-badge">
+                        Slot {slot.slotNumber}
+                      </div>
+                      <PresetCardMedia preset={p} now={now} />
 
                       <div 
                         className="preset-card-overlay flex gap-2" 
@@ -2172,10 +2532,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                             setAssigningSlotIndex(globalIdx);
                           }}
                           className="btn-styled preset-card-edit-btn"
-                          title={p ? "Update Preset" : "Assign Preset"}
+                          title="Update Preset"
                         >
-                          {p ? <RefreshCw size={14} className="mr-2" /> : <Plus size={14} className="mr-2" />} 
-                          {p ? "Update" : "Assign"}
+                          <RefreshCw size={14} className="mr-2" /> Update
                         </button>
                       </div>
                     </div>
@@ -2270,23 +2629,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                             setAssigningSlotIndex(null);
                           }}
                         >
-                          {isClock ? (
-                            <ClockPresetCardPreview preset={p} now={now} />
-                          ) : p.mode === 'text' ? (
-                            <TextPresetCardPreview preset={p} />
-                          ) : p.pixels && p.pixels.length > 1280 ? (
-                            <AnimatedPresetCardPreview preset={p} />
-                          ) : p.pixels && p.pixels.length === 1280 ? (
-                            <PixelPresetCardPreview preset={p} />
-                          ) : p.thumbnail ? (
-                            <img src={p.thumbnail} className="led-preview" draggable={false} />
-                          ) : (
-                            <div className="preset-card-content" style={{ background: p.bgColor || '#000000' }}>
-                              <p style={{ color: p.textColor || '#fff', fontSize: 16, fontWeight: 900, transform: `rotate(${p.rotation || 0}deg)`, textAlign: 'center', lineHeight: 1 }}>
-                                {p.text || p.name || 'Untitled'}
-                              </p>
-                            </div>
-                          )}
+                          <PresetCardMedia preset={p} now={now} />
                         </div>
                       );
                     })}
@@ -2858,12 +3201,13 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   // Form State for Modal
   const [editingId, setEditingId] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [animDropdownOpen, setAnimDropdownOpen] = useState(false);
   const [form, setForm] = useState({
     name: '', 
     text: '', 
     textColor: '#ffffff', 
     bgColor: '#000000', 
-    animation: 'static', 
+    animation: 'show now', 
     speed: 8, 
     rotation: 0,
     mode: 'text', // 'text', 'drawing', or 'image'
@@ -3169,13 +3513,14 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
   // Handle animation for scrolling text in preview
   useEffect(() => {
-    if (!isModalOpen || form.mode !== 'text' || form.animation !== 'move-left') {
+    const isAnim = Boolean(form.animation && form.animation !== 'show now' && form.animation !== 'static');
+    if (!isModalOpen || form.mode !== 'text' || !isAnim) {
       setScrollOffset(0);
       return;
     }
     const interval = setInterval(() => {
       setScrollOffset(prev => prev + 1);
-    }, Math.max(10, 80 - (form.speed !== undefined ? form.speed : 13) * 5)); // Higher speed = lower interval
+    }, Math.max(10, 80 - (form.speed !== undefined ? form.speed : 8) * 5)); // Higher speed = lower interval
     return () => clearInterval(interval);
   }, [isModalOpen, form.mode, form.animation, form.speed, form.text]);
 
@@ -3206,10 +3551,25 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       
       const tw = ctx.measureText(textToDraw).width;
       let x = 32 - (tw / 2); // Center statically by default
-      if (form.animation === 'move-left') {
+      let y = 10;
+      if (form.animation === 'shift left' || form.animation === 'continuous left shift' || form.animation === 'move-left') {
          x = 64 - (scrollOffset % (64 + tw));
+      } else if (form.animation === 'move right' || form.animation === 'move-right') {
+         x = (scrollOffset % (64 + tw)) - tw;
+      } else if (form.animation === 'move up' || form.animation === 'move-up') {
+         y = 10 - (scrollOffset % 30);
+      } else if (form.animation === 'move down' || form.animation === 'move-down') {
+         y = -10 + (scrollOffset % 30);
+      } else if (form.animation === 'snow') {
+         y = -10 + (scrollOffset % 30);
+      } else if (form.animation === 'bubble') {
+         y = 10 - (scrollOffset % 30);
+      } else if (form.animation === 'flicker') {
+         if (Math.floor(scrollOffset / 4) % 2 === 1) {
+           ctx.fillStyle = 'black';
+         }
       }
-      ctx.fillText(textToDraw, x, 10);
+      ctx.fillText(textToDraw, x, y);
     } else {
       const hours = previewTime.getHours();
       if (form.clockStyle === 'default') {
@@ -3447,10 +3807,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       setPresets(nextPresets);
 
       setIsModalOpen(false);
+      setAnimDropdownOpen(false);
       setEditingId(null);
       setForm({
         name: '', text: '', textColor: '#ffffff', bgColor: '#000000',
-        animation: 'move-left', speed: 8, rotation: 0,
+        animation: 'show now', speed: 8, rotation: 0,
         mode: 'text', pixels: Array(64 * 20).fill(0),
         imgSrc: null, fileType: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20,
         timeFormat: '12h',
@@ -3483,7 +3844,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
     
     const fileType = p.fileType || (p.name.includes('GIF') || (p.imgSrc && p.imgSrc.startsWith('data:image/gif')) ? 'gif' : (p.imgSrc ? 'image' : null));
-    setForm({ ...p, fileType, pixels: normalizedPixels });
+    setForm({ ...p, fileType, pixels: normalizedPixels, animation: p.animation || 'show now' });
     setIsModalOpen(true);
   };
 
@@ -3492,6 +3853,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     setPresets(presets.filter(p => p.id !== (id || editingId)));
     if (!id) {
       setIsModalOpen(false);
+      setAnimDropdownOpen(false);
       setEditingId(null);
     }
   };
@@ -3529,8 +3891,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         <div style={{ display: 'flex', alignItems: 'center' }}>
           <ChevronRight 
             size={18} 
-            className="text-slate-400 transition-transform duration-200 hover:text-white" 
-            style={{ transform: isLocalCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }} 
+            className="text-slate-400 transition-transform duration-200 hover:text-white"
+            style={{ transform: isLocalCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}
           />
         </div>
       </div>
@@ -3542,12 +3904,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
           <div style={{ 
             display: 'grid', 
-            gridTemplateColumns: 'repeat(2, 1fr)', 
+            gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', 
             gap: '24px', 
-            width: '100%',
-            pointerEvents: pushing ? 'none' : 'auto',
-            opacity: pushing ? 0.6 : 1,
-            transition: 'opacity 0.25s ease'
+            width: '100%' 
           }}>
             <div
               className="preset-card relative group overflow-hidden border-white/5 hover:border-emerald-500/30 transition-all flex flex-col items-center justify-center gap-2 bg-black"
@@ -3557,7 +3916,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 cursor: 'pointer'
               }}
               onClick={() => {
-                editingModeRef.current = 'text'; setEditingId(null); setForm({name: '', text: '', textColor: '#ffffff', bgColor: '#000000', animation: 'move-left', speed: 8, rotation: 0, mode: 'text', pixels: Array(64 * 20).fill(0), spacing: 1, views: 1, imgSrc: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20, timeFormat: '12h', showSeconds: true, clockStyle: 'custom', isDefault: false}); setIsModalOpen(true);
+                editingModeRef.current = 'text'; setEditingId(null); setForm({name: '', text: '', textColor: '#ffffff', bgColor: '#000000', animation: 'show now', speed: 8, rotation: 0, mode: 'text', pixels: Array(64 * 20).fill(0), spacing: 1, views: 1, imgSrc: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20, timeFormat: '12h', showSeconds: true, clockStyle: 'custom', isDefault: false}); setIsModalOpen(true);
               }}
             >
               <Plus className="text-emerald-400" size={24} />
@@ -3572,7 +3931,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               return (
               <div 
                 key={p.id} 
-                className="preset-card"
+                className="preset-card relative group overflow-hidden transition-all"
                 draggable={!p.isDefault}
                 onDragStart={(e) => handleDragStart(e, p.id)}
                 onDragOver={(e) => handleDragOver(e, p.id)}
@@ -3601,24 +3960,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     Default
                   </div>
                 )}
-                {isClock ? (
-                  <ClockPresetCardPreview preset={p} now={now} />
-                ) : p.mode === 'text' ? (
-                  <TextPresetCardPreview preset={p} />
-                ) : p.pixels && p.pixels.length > 1280 ? (
-                  <AnimatedPresetCardPreview preset={p} />
-                ) : p.pixels && p.pixels.length === 1280 ? (
-                  <PixelPresetCardPreview preset={p} />
-                ) : p.thumbnail ? (
-                  <img src={p.thumbnail} className="led-preview" draggable={false} />
-                ) : (
-                  <div className="preset-card-content" style={{ background: p.bgColor || '#000000' }}>
-                    <p style={{ color: p.textColor || '#fff', fontSize: 16, fontWeight: 900, transform: `rotate(${p.rotation || 0}deg)`, textAlign: 'center', lineHeight: 1 }}>
-                      {p.text || p.name || 'Untitled'}
-                    </p>
-                  </div>
-                )}
-                <div className="preset-card-overlay">
+                <PresetCardMedia preset={p} now={now} />
+                <div className="preset-card-overlay flex gap-2">
                   <button
                     onPointerDown={(e) => e.stopPropagation()}
                     onPointerUp={(e) => e.stopPropagation()}
@@ -3642,7 +3985,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
             <motion.div 
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}
-              onClick={() => setIsModalOpen(false)}
+              onClick={() => { setIsModalOpen(false); setAnimDropdownOpen(false); }}
             />
             <motion.div 
               initial={{ scale: 0.9, opacity: 0, y: 20 }}
@@ -3653,356 +3996,298 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
             >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
                 <h3 style={{ fontSize: '24px', fontWeight: 900, margin: 0 }}>{editingId ? 'Edit Preset' : 'Create Preset'}</h3>
-                <button onClick={() => setIsModalOpen(false)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }} onMouseOver={e => e.currentTarget.style.color='#fff'} onMouseOut={e => e.currentTarget.style.color='#64748b'}><X size={24} /></button>
+                <button onClick={() => { setIsModalOpen(false); setAnimDropdownOpen(false); }} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }} onMouseOver={e => e.currentTarget.style.color='#fff'} onMouseOut={e => e.currentTarget.style.color='#64748b'}><X size={24} /></button>
               </div>
 
-              <div style={{ marginBottom: '32px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <div className="bg-black/60 p-3 rounded-2xl border border-white/10 shadow-2xl relative group">
-                  <div className="overflow-x-auto overflow-y-hidden custom-scrollbar">
-                    {form.mode === 'image' ? (
-                      !form.imgSrc ? (
+              <div style={{ marginBottom: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' }}>
+                <div className="preview-stack opacity-100 scale-100" style={{ margin: '0 auto', width: '100%', maxWidth: 'var(--preview-width)' }}>
+                  {form.mode === 'image' ? (
+                    !form.imgSrc ? (
+                      <div 
+                        ref={containerRef}
+                        onClick={() => document.getElementById('img-upload').click()}
+                        onDragEnter={handleMediaDragOver}
+                        onDragOver={handleMediaDragOver}
+                        onDragLeave={handleMediaDragLeave}
+                        onDrop={handleMediaDrop}
+                        className="preview-box cursor-pointer relative group"
+                        style={{ 
+                          background: form.bgColor || '#000000', 
+                          boxSizing: 'border-box'
+                        }}
+                      >
                         <div 
-                          ref={containerRef}
-                          onClick={() => document.getElementById('img-upload').click()}
-                          onDragEnter={handleMediaDragOver}
-                          onDragOver={handleMediaDragOver}
-                          onDragLeave={handleMediaDragLeave}
-                          onDrop={handleMediaDrop}
-                          className="cursor-pointer relative group"
-                          style={{ 
-                            display: 'grid', 
-                            gridTemplateColumns: 'repeat(64, 1fr)', 
-                            gridTemplateRows: 'repeat(20, 1fr)', 
-                            gap: '1px', 
-                            background: form.bgColor || '#000000', 
-                            padding: '8px', 
+                          style={{
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            height: '100%',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            backgroundColor: 'transparent',
                             borderRadius: '8px',
-                            width: '100%', 
-                            aspectRatio: '64/20', 
-                            minWidth: '600px',
-                            border: '1px solid rgba(255,255,255,0.1)',
-                            position: 'relative',
-                            boxSizing: 'border-box'
+                            transition: 'background-color 0.2s',
+                            pointerEvents: 'none'
                           }}
                         >
-                          {Array(64 * 20).fill(0).map((_, i) => (
-                            <div 
-                              key={i}
-                              style={{ 
-                                background: 'rgba(255,255,255,0.05)',
-                                borderRadius: '1px',
-                                opacity: 0.2
-                              }}
-                            />
-                          ))}
-                          <div 
-                            style={{
-                              position: 'absolute',
-                              top: 0,
-                              left: 0,
-                              width: '100%',
-                              height: '100%',
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              backgroundColor: 'transparent',
-                              borderRadius: '8px',
-                              transition: 'background-color 0.2s',
-                              pointerEvents: 'none'
-                            }}
-                          >
-                            <ImageIcon size={48} className="text-slate-400 mb-2 transition-transform group-hover:scale-105" />
-                            <span className="text-sm font-semibold text-slate-300">Select Image/Video</span>
-                          </div>
-                          {isDraggingOver && (
-                            <div style={{
-                              position: 'absolute',
-                              inset: 0,
-                              backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                              border: '2px dashed #10B981',
-                              borderRadius: '8px',
-                              zIndex: 50,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              color: '#10B981',
-                              fontWeight: 'bold',
-                              pointerEvents: 'none',
-                              backdropFilter: 'blur(4px)'
-                            }}>
-                              <Upload size={32} className="animate-bounce mb-2" />
-                              <span className="text-sm">Drop to Upload Media</span>
-                            </div>
-                          )}
+                          <ImageIcon size={48} className="text-slate-400 mb-2 transition-transform group-hover:scale-105" />
+                          <span className="text-sm font-semibold text-slate-300">Select Image/Video</span>
                         </div>
-                      ) : (
-                        <div 
-                          ref={containerRef}
-                          onDragEnter={handleMediaDragOver}
-                          onDragOver={handleMediaDragOver}
-                          onDragLeave={handleMediaDragLeave}
-                          onDrop={handleMediaDrop}
-                          style={{
-                            position: 'relative',
-                            width: '100%',
-                            minWidth: '600px',
-                            aspectRatio: '64/20',
-                            margin: '0 auto',
-                            overflow: 'hidden',
+                        {isDraggingOver && (
+                          <div style={{
+                            position: 'absolute',
+                            inset: 0,
+                            backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                            border: '2px dashed #10B981',
                             borderRadius: '8px',
-                            border: '1px solid rgba(255, 255, 255, 0.1)',
-                            backgroundColor: form.bgColor || '#000000',
-                            userSelect: 'none',
-                            cursor: 'grab',
-                            boxSizing: 'border-box'
-                          }}
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            if (!form.imgSrc || !imageObjRef.current) return;
+                            zIndex: 50,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: '#10B981',
+                            fontWeight: 'bold',
+                            pointerEvents: 'none',
+                            backdropFilter: 'blur(4px)'
+                          }}>
+                            <Upload size={32} className="animate-bounce mb-2" />
+                            <span className="text-sm">Drop to Upload Media</span>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div 
+                        ref={containerRef}
+                        onDragEnter={handleMediaDragOver}
+                        onDragOver={handleMediaDragOver}
+                        onDragLeave={handleMediaDragLeave}
+                        onDrop={handleMediaDrop}
+                        className="preview-box"
+                        style={{
+                          backgroundColor: form.bgColor || '#000000',
+                          userSelect: 'none',
+                          cursor: 'grab',
+                          boxSizing: 'border-box'
+                        }}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          if (!form.imgSrc || !imageObjRef.current) return;
+                          
+                          const container = e.currentTarget;
+                          const scale = (container.clientWidth || 512) / 64;
+                          const startX = e.clientX;
+                          const startY = e.clientY;
+                          const initialCanvasX = form.canvasX;
+                          const initialCanvasY = form.canvasY;
+                          
+                          container.style.cursor = 'grabbing';
+                          
+                          const handleDragMove = (moveEvent) => {
+                            const dx = moveEvent.clientX - startX;
+                            const dy = moveEvent.clientY - startY;
                             
-                            const scale = containerWidth / 64;
-                            const startX = e.clientX;
-                            const startY = e.clientY;
-                            const initialCanvasX = form.canvasX;
-                            const initialCanvasY = form.canvasY;
+                            let newCanvasX = initialCanvasX + dx / scale;
+                            let newCanvasY = initialCanvasY + dy / scale;
                             
-                            const container = e.currentTarget;
-                            container.style.cursor = 'grabbing';
-                            
-                            const handleDragMove = (moveEvent) => {
-                              const dx = moveEvent.clientX - startX;
-                              const dy = moveEvent.clientY - startY;
-                              
-                              let newCanvasX = initialCanvasX + dx / scale;
-                              let newCanvasY = initialCanvasY + dy / scale;
-                              
-                              // Auto snap to viewport edges (Photoshop-like snapping)
-                              const snapThreshold = 2.0; // 2 pixels in canvas grid coordinates
-                              const imageWidth = form.dwBase * form.zoom;
-                              const imageHeight = form.dhBase * form.zoom;
+                            const snapThreshold = 2.0;
+                            const imageWidth = form.dwBase * form.zoom;
+                            const imageHeight = form.dhBase * form.zoom;
 
-                              // Snap Left Edge (canvasX = 0)
-                              if (Math.abs(newCanvasX) < snapThreshold) {
-                                newCanvasX = 0;
-                              }
-                              // Snap Right Edge (canvasX + imageWidth = 64)
-                              if (Math.abs(newCanvasX + imageWidth - 64) < snapThreshold) {
-                                newCanvasX = 64 - imageWidth;
-                              }
-                              // Snap Top Edge (canvasY = 0)
-                              if (Math.abs(newCanvasY) < snapThreshold) {
-                                newCanvasY = 0;
-                              }
-                              // Snap Bottom Edge (canvasY + imageHeight = 20)
-                              if (Math.abs(newCanvasY + imageHeight - 20) < snapThreshold) {
-                                newCanvasY = 20 - imageHeight;
-                              }
-                              
-                              const nextPixels = runCropRender(
-                                imageObjRef.current,
-                                newCanvasX,
-                                newCanvasY,
-                                form.dwBase * form.zoom,
-                                form.dhBase * form.zoom,
-                                form.bgColor || '#000000'
-                              );
-                              
-                              setForm(prev => ({
-                                ...prev,
-                                canvasX: newCanvasX,
-                                canvasY: newCanvasY,
-                                pixels: nextPixels
-                              }));
-                            };
-                            
-                            const handleDragEnd = () => {
-                              container.style.cursor = 'grab';
-                              window.removeEventListener('mousemove', handleDragMove);
-                              window.removeEventListener('mouseup', handleDragEnd);
-                            };
-                            
-                            window.addEventListener('mousemove', handleDragMove);
-                            window.addEventListener('mouseup', handleDragEnd);
-                          }}
-                          onWheel={(e) => {
-                            e.preventDefault();
-                            if (!imageObjRef.current) return;
-                            
-                            const zoomFactor = e.deltaY < 0 ? 1.05 : 0.95;
-                            const newZoom = Math.min(Math.max(form.zoom * zoomFactor, 0.1), 10.0);
-                            
-                            const oldZoom = form.zoom;
-                            const oldX = form.canvasX;
-                            const oldY = form.canvasY;
-                            
-                            const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
-                            const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                            if (Math.abs(newCanvasX) < snapThreshold) newCanvasX = 0;
+                            if (Math.abs(newCanvasX + imageWidth - 64) < snapThreshold) newCanvasX = 64 - imageWidth;
+                            if (Math.abs(newCanvasY) < snapThreshold) newCanvasY = 0;
+                            if (Math.abs(newCanvasY + imageHeight - 20) < snapThreshold) newCanvasY = 20 - imageHeight;
                             
                             const nextPixels = runCropRender(
                               imageObjRef.current,
-                              newX,
-                              newY,
-                              form.dwBase * newZoom,
-                              form.dhBase * newZoom,
+                              newCanvasX,
+                              newCanvasY,
+                              form.dwBase * form.zoom,
+                              form.dhBase * form.zoom,
                               form.bgColor || '#000000'
                             );
                             
                             setForm(prev => ({
                               ...prev,
-                              zoom: newZoom,
-                              canvasX: newX,
-                              canvasY: newY,
+                              canvasX: newCanvasX,
+                              canvasY: newCanvasY,
                               pixels: nextPixels
                             }));
-                          }}
-                        >
-                          {/* Image underlay */}
-                          {form.fileType === 'video' ? (
-                            <video 
-                              src={form.imgSrc} 
-                              autoPlay
-                              loop
-                              muted
-                              playsInline
-                              style={{ 
-                                position: 'absolute', 
-                                left: `${form.canvasX * (containerWidth / 64)}px`, 
-                                top: `${form.canvasY * (containerWidth / 64)}px`, 
-                                width: `${form.dwBase * form.zoom * (containerWidth / 64)}px`, 
-                                height: `${form.dhBase * form.zoom * (containerWidth / 64)}px`, 
-                                pointerEvents: 'none',
-                                userSelect: 'none',
-                                maxWidth: 'none',
-                                objectFit: 'fill'
-                              }} 
-                            />
-                          ) : (
-                            <img 
-                              src={form.imgSrc} 
-                              alt="Crop Preview"
-                              style={{ 
-                                position: 'absolute', 
-                                left: `${form.canvasX * (containerWidth / 64)}px`, 
-                                top: `${form.canvasY * (containerWidth / 64)}px`, 
-                                width: `${form.dwBase * form.zoom * (containerWidth / 64)}px`, 
-                                height: `${form.dhBase * form.zoom * (containerWidth / 64)}px`, 
-                                pointerEvents: 'none',
-                                userSelect: 'none',
-                                maxWidth: 'none'
-                              }} 
-                            />
-                          )}
+                          };
                           
-                          {/* Viewport Frame */}
-                          <div 
-                            style={{
-                              position: 'absolute',
-                              left: 0,
-                              top: 0,
-                              width: '100%',
-                              height: '100%',
-                              border: '1px solid rgba(255, 255, 255, 0.25)',
-                              pointerEvents: 'none',
-                              boxSizing: 'border-box'
-                            }}
-                          >
-                            <div style={{ position: 'absolute', left: '33.33%', top: 0, bottom: 0, width: 0, borderLeft: '1px dashed rgba(255, 255, 255, 0.2)' }} />
-                            <div style={{ position: 'absolute', left: '66.67%', top: 0, bottom: 0, width: 0, borderLeft: '1px dashed rgba(255, 255, 255, 0.2)' }} />
-                            <div style={{ position: 'absolute', top: '33.33%', left: 0, right: 0, height: 0, borderTop: '1px dashed rgba(255, 255, 255, 0.2)' }} />
-                            <div style={{ position: 'absolute', top: '66.67%', left: 0, right: 0, height: 0, borderTop: '1px dashed rgba(255, 255, 255, 0.2)' }} />
-                            
-                            <div style={{ position: 'absolute', top: 0, left: 0, width: '16px', height: '16px', borderTop: '4px solid var(--accent-primary)', borderLeft: '4px solid var(--accent-primary)' }} />
-                            <div style={{ position: 'absolute', top: 0, right: 0, width: '16px', height: '16px', borderTop: '4px solid var(--accent-secondary)', borderRight: '4px solid var(--accent-secondary)' }} />
-                            <div style={{ position: 'absolute', bottom: 0, left: 0, width: '16px', height: '16px', borderBottom: '4px solid var(--accent-primary)', borderLeft: '4px solid var(--accent-primary)' }} />
-                            <div style={{ position: 'absolute', bottom: 0, right: 0, width: '16px', height: '16px', borderBottom: '4px solid var(--accent-secondary)', borderRight: '4px solid var(--accent-secondary)' }} />
-                          </div>
-                          {isDraggingOver && (
-                            <div style={{
-                              position: 'absolute',
-                              inset: 0,
-                              backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                              border: '2px dashed #10B981',
-                              borderRadius: '8px',
-                              zIndex: 50,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              color: '#10B981',
-                              fontWeight: 'bold',
-                              pointerEvents: 'none',
-                              backdropFilter: 'blur(4px)'
-                            }}>
-                              <Upload size={32} className="animate-bounce mb-2" />
-                              <span className="text-sm">Drop to Upload Media</span>
-                            </div>
-                          )}
-                        </div>
-                      )
-                    ) : (
-                      <div 
-                        onMouseDown={(e) => {
-                          if (form.mode !== 'drawing') return;
-                          setUndoStack(prev => [...prev, [...form.pixels]]);
-                          setRedoStack([]);
+                          const handleDragEnd = () => {
+                            container.style.cursor = 'grab';
+                            window.removeEventListener('mousemove', handleDragMove);
+                            window.removeEventListener('mouseup', handleDragEnd);
+                          };
+                          
+                          window.addEventListener('mousemove', handleDragMove);
+                          window.addEventListener('mouseup', handleDragEnd);
                         }}
-                        style={{ 
-                          display: 'grid', 
-                          gridTemplateColumns: 'repeat(64, 1fr)', 
-                          gridTemplateRows: 'repeat(20, 1fr)', 
-                          gap: '1px', 
-                          background: form.bgColor || '#000000', 
-                          padding: '8px', 
-                          borderRadius: '8px', 
-                          width: '100%', 
-                          aspectRatio: '64/20', 
-                          minWidth: '600px',
-                          border: '1px solid rgba(255,255,255,0.1)',
-                          boxSizing: 'border-box'
+                        onWheel={(e) => {
+                          e.preventDefault();
+                          if (!imageObjRef.current) return;
+                          
+                          const zoomFactor = e.deltaY < 0 ? 1.05 : 0.95;
+                          const newZoom = Math.min(Math.max(form.zoom * zoomFactor, 0.1), 10.0);
+                          
+                          const oldZoom = form.zoom;
+                          const oldX = form.canvasX;
+                          const oldY = form.canvasY;
+                          
+                          const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                          const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                          
+                          const nextPixels = runCropRender(
+                            imageObjRef.current,
+                            newX,
+                            newY,
+                            form.dwBase * newZoom,
+                            form.dhBase * newZoom,
+                            form.bgColor || '#000000'
+                          );
+                          
+                          setForm(prev => ({
+                            ...prev,
+                            zoom: newZoom,
+                            canvasX: newX,
+                            canvasY: newY,
+                            pixels: nextPixels
+                          }));
                         }}
                       >
-                        {form.pixels.map((p, i) => {
-                          const activeColor = form.textColor || '#ffffff';
-                          return (
-                            <div 
-                              key={i} 
-                              onMouseDown={(e) => {
-                                e.preventDefault();
-                                if (form.mode !== 'drawing') return;
-                                const next = [...form.pixels];
-                                const currentColor = form.textColor || '#ffffff';
-                                if (isEraserActive) {
-                                  next[i] = 0;
-                                } else {
-                                  next[i] = next[i] === currentColor ? 0 : currentColor;
-                                }
-                                setForm({...form, pixels: next});
-                              }}
-                              onMouseEnter={(e) => {
-                                if (form.mode !== 'drawing' || e.buttons !== 1) return;
-                                const next = [...form.pixels];
-                                const currentColor = form.textColor || '#ffffff';
-                                if (isEraserActive) {
-                                  next[i] = 0;
-                                } else {
-                                  next[i] = currentColor;
-                                }
-                                setForm({...form, pixels: next});
-                              }}
-                              onDragStart={(e) => e.preventDefault()}
-                              style={{ 
-                                background: (p && p !== 0 ? (typeof p === 'string' && p.startsWith('#') ? p : activeColor) : (form.bgColor || '#000000')),
-                                cursor: 'crosshair',
-                                userSelect: 'none'
-                              }}
-                            />
-                          );
-                        })}
+                        {/* Image / Video with exact pixelated sign styling */}
+                        {form.fileType === 'video' ? (
+                          <video 
+                            src={form.imgSrc} 
+                            autoPlay
+                            loop
+                            muted
+                            playsInline
+                            style={{ 
+                              position: 'absolute', 
+                              left: `${(form.canvasX / 64) * 100}%`, 
+                              top: `${(form.canvasY / 20) * 100}%`, 
+                              width: `${((form.dwBase * form.zoom) / 64) * 100}%`, 
+                              height: `${((form.dhBase * form.zoom) / 20) * 100}%`, 
+                              pointerEvents: 'none',
+                              userSelect: 'none',
+                              maxWidth: 'none',
+                              objectFit: 'fill',
+                              imageRendering: 'pixelated'
+                            }} 
+                          />
+                        ) : (
+                          <img 
+                            src={form.imgSrc} 
+                            alt="Crop Preview"
+                            style={{ 
+                              position: 'absolute', 
+                              left: `${(form.canvasX / 64) * 100}%`, 
+                              top: `${(form.canvasY / 20) * 100}%`, 
+                              width: `${((form.dwBase * form.zoom) / 64) * 100}%`, 
+                              height: `${((form.dhBase * form.zoom) / 20) * 100}%`, 
+                              pointerEvents: 'none',
+                              userSelect: 'none',
+                              maxWidth: 'none',
+                              objectFit: 'fill',
+                              imageRendering: 'pixelated'
+                            }} 
+                          />
+                        )}
+                        {isDraggingOver && (
+                          <div style={{
+                            position: 'absolute',
+                            inset: 0,
+                            backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                            border: '2px dashed #10B981',
+                            borderRadius: '8px',
+                            zIndex: 50,
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: '#10B981',
+                            fontWeight: 'bold',
+                            pointerEvents: 'none',
+                            backdropFilter: 'blur(4px)'
+                          }}>
+                            <Upload size={32} className="animate-bounce mb-2" />
+                            <span className="text-sm">Drop to Upload Media</span>
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
+                    )
+                  ) : form.mode === 'drawing' ? (
+                    <div 
+                      onMouseDown={(e) => {
+                        if (form.mode !== 'drawing') return;
+                        setUndoStack(prev => [...prev, [...form.pixels]]);
+                        setRedoStack([]);
+                      }}
+                      className="preview-box"
+                      style={{ 
+                        display: 'grid', 
+                        gridTemplateColumns: 'repeat(64, 1fr)', 
+                        gridTemplateRows: 'repeat(20, 1fr)', 
+                        gap: '1px', 
+                        background: form.bgColor || '#000000', 
+                        padding: '4px', 
+                        width: '100%', 
+                        aspectRatio: '64/20', 
+                        boxSizing: 'border-box'
+                      }}
+                    >
+                      {form.pixels.map((p, i) => {
+                        const activeColor = form.textColor || '#ffffff';
+                        return (
+                          <div 
+                            key={i} 
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              if (form.mode !== 'drawing') return;
+                              const next = [...form.pixels];
+                              const currentColor = form.textColor || '#ffffff';
+                              if (isEraserActive) {
+                                next[i] = 0;
+                              } else {
+                                next[i] = next[i] === currentColor ? 0 : currentColor;
+                              }
+                              setForm({...form, pixels: next});
+                            }}
+                            onMouseEnter={(e) => {
+                              if (form.mode !== 'drawing' || e.buttons !== 1) return;
+                              const next = [...form.pixels];
+                              const currentColor = form.textColor || '#ffffff';
+                              if (isEraserActive) {
+                                next[i] = 0;
+                              } else {
+                                next[i] = currentColor;
+                              }
+                              setForm({...form, pixels: next});
+                            }}
+                            onDragStart={(e) => e.preventDefault()}
+                            style={{ 
+                              background: (p && p !== 0 ? (typeof p === 'string' && p.startsWith('#') ? p : activeColor) : (form.bgColor || '#000000')),
+                              cursor: 'crosshair',
+                              userSelect: 'none'
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="preview-box">
+                      {form.mode === 'clock' ? (
+                        <ClockPresetCardPreview preset={form} now={now} />
+                      ) : (
+                        <TextPresetCardPreview preset={{ ...form, name: '' }} />
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex flex-col gap-6">
@@ -4427,31 +4712,113 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     <HslColorSlider 
                       label="Text Colour" 
                       value={form.textColor || '#ffffff'} 
-                      onChange={val => setForm({...form, textColor: val})} 
+                      onChange={val => setForm(prev => ({ ...prev, textColor: val }))} 
                     />
                     <HslColorSlider 
                       label="Background Colour" 
                       value={form.bgColor || '#000000'} 
-                      onChange={val => setForm({...form, bgColor: val})} 
+                      onChange={val => setForm(prev => ({ ...prev, bgColor: val }))} 
                     />
                   </div>
                 )}
 
-                {form.mode === 'text' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '24px' }}>
-                    <div className="flex flex-col gap-2">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase ml-1">Animation</label>
-                      <select 
-                        className="input-field" 
-                        style={{ background: '#1a1a1f', color: '#fff' }}
-                        value={form.animation} 
-                        onChange={e => setForm({...form, animation: e.target.value})}
+                {(form.mode === 'text' || form.mode === 'drawing' || form.mode === 'image') && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '24px' }}>
+                    <label style={{ fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>
+                      Animation
+                    </label>
+                    <div style={{ position: 'relative', width: '255px', flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        className="input-field"
+                        style={{
+                          width: '100%',
+                          background: '#1a1a1f',
+                          color: '#fff',
+                          cursor: 'pointer',
+                          padding: '10px 14px',
+                          borderRadius: '14px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          textAlign: 'left'
+                        }}
+                        onClick={() => setAnimDropdownOpen(prev => !prev)}
                       >
-                        {['static','move-left','move-right','move-up','move-down','snow','bubble','flicker'].map(a => (
-                          <option key={a} value={a} style={{ background: '#1a1a1f', color: '#fff' }}>{a}</option>
-                        ))}
-                      </select>
+                        <span style={{ fontSize: '12px', textTransform: 'none', whiteSpace: 'nowrap' }}>{form.animation || 'show now'}</span>
+                        <ChevronDown 
+                          size={14} 
+                          className="text-slate-400 transition-transform duration-200" 
+                          style={{ transform: animDropdownOpen ? 'rotate(180deg)' : 'rotate(0deg)' }} 
+                        />
+                      </button>
+
+                      {animDropdownOpen && (
+                        <>
+                          <div 
+                            className="fixed inset-0 z-40" 
+                            onClick={() => setAnimDropdownOpen(false)} 
+                          />
+                          <div 
+                            className="glass-panel z-50"
+                            style={{
+                              position: 'absolute',
+                              bottom: 'calc(100% + 6px)',
+                              left: 0,
+                              width: '100%',
+                              background: '#1a1a1f',
+                              border: '1px solid rgba(255, 255, 255, 0.15)',
+                              borderRadius: '14px',
+                              overflow: 'hidden',
+                              boxShadow: '0 -10px 25px -5px rgba(0, 0, 0, 0.6)',
+                              maxHeight: '320px',
+                              overflowY: 'auto'
+                            }}
+                          >
+                            {['show now', 'shift left', 'move right', 'move up', 'move down', 'snow', 'bubble', 'flicker', 'continuous left shift'].map(a => {
+                              const isSelected = (form.animation || 'show now') === a;
+                              return (
+                                <div
+                                  key={a}
+                                  onClick={() => {
+                                    setForm(prev => ({ ...prev, animation: a }));
+                                    setAnimDropdownOpen(false);
+                                  }}
+                                  className="hover:bg-white/10 transition-colors"
+                                  style={{
+                                    padding: '8px 14px',
+                                    fontSize: '12px',
+                                    cursor: 'pointer',
+                                    color: isSelected ? '#34d399' : '#f1f5f9',
+                                    fontWeight: isSelected ? '600' : 'normal',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between'
+                                  }}
+                                >
+                                  <span>{a}</span>
+                                  {isSelected && <Check size={13} className="text-emerald-400" />}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
                     </div>
+
+                    {/* Speed slider — inline, only for animated text presets */}
+                    {form.mode === 'text' && form.animation && form.animation !== 'show now' && (
+                      <div className="brightness-rail glass-panel" style={{ flex: 1, padding: '8px 12px', minWidth: 0 }}>
+                        <Gauge className="text-emerald-400 flex-shrink-0" size={14} />
+                        <input
+                          type="range" min="1" max="15"
+                          value={form.speed !== undefined ? form.speed : 8}
+                          onChange={(e) => setForm(prev => ({ ...prev, speed: parseInt(e.target.value) }))}
+                          className="h-slider"
+                        />
+                        <span className="font-bold text-slate-500 w-6 text-[10px] text-right">{form.speed !== undefined ? form.speed : 8}</span>
+                      </div>
+                    )}
                   </div>
                 )}
 

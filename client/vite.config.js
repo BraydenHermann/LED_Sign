@@ -20,9 +20,11 @@ export default defineConfig({
       '/preset': 'http://127.0.0.1:8001',
       '/delete-preset': 'http://127.0.0.1:8001',
       '/push-text': 'http://127.0.0.1:8001',
+      '/render-text-preview': 'http://127.0.0.1:8001',
       '/clock': 'http://127.0.0.1:8001',
       '/static': 'http://127.0.0.1:8001',
-      '/disconnect': 'http://127.0.0.1:8001'
+      '/disconnect': 'http://127.0.0.1:8001',
+      '/hardware-slots': 'http://127.0.0.1:8001'
     }
   }
 })

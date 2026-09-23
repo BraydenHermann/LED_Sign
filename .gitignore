@@ -4,3 +4,39 @@ __pycache__/
 dist/
 .DS_Store
 *.pyc
+
+# Local binary assets & decompilations
+*.xapk
+*.apk
+*.zip
+*.mp4
+*.MP4
+*.pklg
+*.bin
+jadx/
+jadx_new/
+loy_extracted/
+loy_source/
+
+# Credentials & secrets
+server/credentials.json
+
+# Scratch scripts and temporary files
+scratch/
+all_writes.txt
+functions.txt
+8args.txt
+case32.txt
+chunk_formatted.txt
+parsed_trace*.txt
+parsed_writes.txt
+pe*.txt
+pe*.js
+chunk*.js
+fix*.js
+fix*.py
+
+# Server static generated caches
+server/static/preset_*
+server/static/current.*
+server/static/test_text_rendered.png
