@@ -772,6 +772,224 @@ const parseHexColor = (hex, def = [255, 255, 255]) => {
 
 const textPreviewCache = new Map();
 
+
+const getTextTargetPixels = (ctx, text, font, align, baseline, x, y) => {
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = 64;
+  offCanvas.height = 20;
+  const offCtx = offCanvas.getContext('2d');
+  offCtx.fillStyle = '#000000';
+  offCtx.fillRect(0, 0, 64, 20);
+  offCtx.fillStyle = '#ffffff';
+  offCtx.font = font;
+  offCtx.textAlign = align;
+  offCtx.textBaseline = baseline;
+  offCtx.fillText(text, x, y);
+  const data = offCtx.getImageData(0, 0, 64, 20).data;
+  const pts = [];
+  for (let py = 0; py < 20; py++) {
+    for (let px = 0; px < 64; px++) {
+      const i = (py * 64 + px) * 4;
+      if (data[i] > 100 || data[i+1] > 100 || data[i+2] > 100) {
+        pts.push([px, py]);
+      }
+    }
+  }
+  return pts;
+};
+
+const apply1BitThreshold = (ctx, textColor, bgColor, globalOpacity = 1.0) => {
+  const tc = parseHexColor(textColor, [255, 255, 255]);
+  const bc = parseHexColor(bgColor, [0, 0, 0]);
+  const imgData = ctx.getImageData(0, 0, 64, 20);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const isLit = (data[i] > 100 || data[i+1] > 100 || data[i+2] > 100) && data[i+3] > 100;
+    if (isLit) {
+      data[i] = Math.round(tc[0] * globalOpacity + bc[0] * (1 - globalOpacity));
+      data[i+1] = Math.round(tc[1] * globalOpacity + bc[1] * (1 - globalOpacity));
+      data[i+2] = Math.round(tc[2] * globalOpacity + bc[2] * (1 - globalOpacity));
+      data[i+3] = 255;
+    } else {
+      data[i] = bc[0];
+      data[i+1] = bc[1];
+      data[i+2] = bc[2];
+      data[i+3] = 255;
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+};
+
+const renderTextAnimation = (ctx, text, animName, offset, textColor = '#ffffff', bgColor = '#000000') => {
+  ctx.imageSmoothingEnabled = false;
+  
+  const drawBg = () => {
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, 64, 20);
+  };
+  
+  const framesPerPage = (animName === 'flicker') ? 60 : 92;
+  const pageFrame = offset % framesPerPage;
+  
+  ctx.font = 'normal 16px "Unifont", monospace, sans-serif';
+  ctx.textBaseline = 'middle';
+  const tw = Math.ceil(ctx.measureText(text).width);
+  const gap = 64; 
+  const totalW = tw + gap;
+
+  if (!animName || animName === 'show now' || animName === 'static') {
+    drawBg();
+    ctx.fillStyle = '#ffffff';
+    if (tw <= 64) {
+      ctx.textAlign = 'center';
+      ctx.fillText(text, 32, 10);
+    } else {
+      ctx.textAlign = 'left';
+      ctx.fillText(text, 0, 10);
+    }
+    apply1BitThreshold(ctx, textColor, bgColor);
+    return;
+  }
+  
+  if (animName === 'shift left' || animName === 'continuous left shift') {
+    drawBg();
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'left';
+    
+    let curX = 64 - (offset % totalW);
+    ctx.fillText(text, curX, 10);
+    if (curX + tw < 64) {
+        ctx.fillText(text, curX + totalW, 10);
+    }
+    apply1BitThreshold(ctx, textColor, bgColor);
+    return;
+  }
+
+  if (animName === 'move right' || animName === 'move-right') {
+    drawBg();
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'left';
+    let curX = (offset % totalW) - tw;
+    ctx.fillText(text, curX, 10);
+    apply1BitThreshold(ctx, textColor, bgColor);
+    return;
+  }
+  
+  const align = tw <= 64 ? 'center' : 'left';
+  const bx = tw <= 64 ? 32 : 0;
+  const pts = getTextTargetPixels(ctx, text, ctx.font, align, ctx.textBaseline, bx, 10);
+  
+  drawBg();
+  
+  if (animName === 'move up' || animName === 'move-up') {
+    drawBg();
+    ctx.fillStyle = '#ffffff';
+    let curYOffset = 0;
+    if (pageFrame < 16) {
+       const prog = pageFrame / 16.0;
+       curYOffset = Math.round(20 * (1.0 - prog));
+    } else if (pageFrame < 76) {
+       curYOffset = 0;
+    } else {
+       const prog = (pageFrame - 76) / 16.0;
+       curYOffset = Math.round(-20 * prog);
+    }
+    for (let i = 0; i < pts.length; i++) {
+      const [px, py] = pts[i];
+      const destY = py + curYOffset;
+      if (destY >= 0 && destY < 20) {
+        ctx.fillRect(px, destY, 1, 1);
+      }
+    }
+    apply1BitThreshold(ctx, textColor, bgColor);
+    return;
+  }
+  
+  if (animName === 'move down' || animName === 'move-down') {
+    drawBg();
+    ctx.fillStyle = '#ffffff';
+    let curYOffset = 0;
+    if (pageFrame < 16) {
+       const prog = pageFrame / 16.0;
+       curYOffset = Math.round(-20 * (1.0 - prog));
+    } else if (pageFrame < 76) {
+       curYOffset = 0;
+    } else {
+       const prog = (pageFrame - 76) / 16.0;
+       curYOffset = Math.round(20 * prog);
+    }
+    for (let i = 0; i < pts.length; i++) {
+      const [px, py] = pts[i];
+      const destY = py + curYOffset;
+      if (destY >= 0 && destY < 20) {
+        ctx.fillRect(px, destY, 1, 1);
+      }
+    }
+    apply1BitThreshold(ctx, textColor, bgColor);
+    return;
+  }
+
+  if (animName === 'snow') {
+    ctx.fillStyle = '#ffffff';
+    for (let i = 0; i < pts.length; i++) {
+      const [px, py] = pts[i];
+      if (pageFrame < 76) {
+        const delay = (px * 11) % 15 + (19 - py) * 2;
+        const activeFrame = pageFrame - delay;
+        if (activeFrame >= 0) {
+          const curY = Math.floor(activeFrame * 1.5);
+          ctx.fillRect(px, Math.min(py, curY), 1, 1);
+        }
+      } else {
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+    apply1BitThreshold(ctx, textColor, bgColor);
+    return;
+  }
+  
+  if (animName === 'bubble') {
+    ctx.fillStyle = '#ffffff';
+    for (let i = 0; i < pts.length; i++) {
+      const [px, py] = pts[i];
+      if (pageFrame < 76) {
+        const delay = (px * 11) % 15 + py * 2;
+        const activeFrame = pageFrame - delay;
+        if (activeFrame >= 0) {
+          const curY = 19 - Math.floor(activeFrame * 1.5);
+          ctx.fillRect(px, Math.max(py, curY), 1, 1);
+        }
+      } else {
+        ctx.fillRect(px, py, 1, 1);
+      }
+    }
+    apply1BitThreshold(ctx, textColor, bgColor);
+    return;
+  }
+
+  if (animName === 'flicker') {
+    let opacity = 1.0;
+    if (pageFrame < 30) {
+      opacity = 1.0;
+      ctx.fillStyle = '#ffffff';
+      for (let i = 0; i < pts.length; i++) {
+        const [tx, ty] = pts[i];
+        ctx.fillRect(tx, ty, 1, 1);
+      }
+    } else {
+      opacity = 0.0;
+    }
+    apply1BitThreshold(ctx, textColor, bgColor, opacity);
+    return;
+  }
+  
+  drawBg();
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = align;
+  ctx.fillText(text, bx, 10);
+  apply1BitThreshold(ctx, textColor, bgColor);
+};
+
 const TextPresetCardPreview = ({ preset }) => {
   const canvasRef = useRef(null);
   const scrollOffsetRef = useRef(0);
@@ -792,152 +1010,31 @@ const TextPresetCardPreview = ({ preset }) => {
     let active = true;
     let animInterval = null;
 
-    // Local crisp fallback renderer using 18px Arial Bold matching PIL
-    const renderLocalFallback = (offset = 0) => {
-      const offCanvas = document.createElement('canvas');
-      offCanvas.width = 64;
-      offCanvas.height = 20;
-      const offCtx = offCanvas.getContext('2d');
-      offCtx.fillStyle = '#000000';
-      offCtx.fillRect(0, 0, 64, 20);
-      offCtx.font = '16px "Unifont", monospace, sans-serif';
-      offCtx.textBaseline = 'middle';
-      offCtx.fillStyle = '#ffffff';
-
-      const tw = Math.ceil(offCtx.measureText(textToDraw).width);
-      if (!isAnimating) {
-        if (tw <= 64) {
-          offCtx.textAlign = 'center';
-          offCtx.fillText(textToDraw, 32, 10);
-        } else {
-          offCtx.textAlign = 'left';
-          offCtx.fillText(textToDraw, 0, 10);
-        }
-      } else {
-        const isFlickerOff = animName === 'flicker' && (Math.floor(offset / 4) % 2 === 1);
-        if (!isFlickerOff) {
-          offCtx.textAlign = 'left';
-          let x = 64 - (offset % (64 + tw));
-          let y = 10;
-          if (animName === 'move right' || animName === 'move-right') {
-            x = (offset % (64 + tw)) - tw;
-          } else if (animName === 'move up' || animName === 'move-up') {
-            x = tw <= 64 ? (32 - tw / 2) : 0;
-            y = 10 - (offset % 30);
-          } else if (animName === 'move down' || animName === 'move-down') {
-            x = tw <= 64 ? (32 - tw / 2) : 0;
-            y = -10 + (offset % 30);
-          } else if (animName === 'snow') {
-            x = tw <= 64 ? (32 - tw / 2) : 0;
-            y = -10 + (offset % 30);
-          } else if (animName === 'bubble') {
-            x = tw <= 64 ? (32 - tw / 2) : 0;
-            y = 10 - (offset % 30);
-          }
-          offCtx.fillText(textToDraw, x, y);
-        }
-      }
-
-      const maskData = offCtx.getImageData(0, 0, 64, 20).data;
-      const [tcR, tcG, tcB] = parseHexColor(textColor, [255, 255, 255]);
-      const [bgR, bgG, bgB] = parseHexColor(bgColor, [0, 0, 0]);
-
-      const outImg = ctx.createImageData(64, 20);
-      const outData = outImg.data;
-      for (let i = 0; i < maskData.length; i += 4) {
-        if (maskData[i] > 100) {
-          outData[i] = tcR;
-          outData[i+1] = tcG;
-          outData[i+2] = tcB;
-          outData[i+3] = 255;
-        } else {
-          outData[i] = bgR;
-          outData[i+1] = bgG;
-          outData[i+2] = bgB;
-          outData[i+3] = 255;
-        }
-      }
-      ctx.putImageData(outImg, 0, 0);
-    };
-
-    const applyImage = (img, imgWidth) => {
+    const drawFrame = () => {
       if (!active) return;
-      if (animInterval) clearInterval(animInterval);
-
-      if (!isAnimating) {
-        ctx.fillStyle = bgColor;
-        ctx.fillRect(0, 0, 64, 20);
-        ctx.drawImage(img, 0, 0);
-      } else {
-        scrollOffsetRef.current = 0;
-        const totalSpan = 64 + imgWidth;
-        const drawFrame = () => {
-          if (!active) return;
-          const isFlickerOff = animName === 'flicker' && (Math.floor(scrollOffsetRef.current / 4) % 2 === 1);
-          ctx.fillStyle = bgColor;
-          ctx.fillRect(0, 0, 64, 20);
-
-          if (!isFlickerOff) {
-            let x = 64 - (scrollOffsetRef.current % totalSpan);
-            let y = 0;
-            if (animName === 'move right' || animName === 'move-right') {
-              x = (scrollOffsetRef.current % totalSpan) - imgWidth;
-            } else if (animName === 'move up' || animName === 'move-up') {
-              x = 0;
-              y = -(scrollOffsetRef.current % 30);
-            } else if (animName === 'move down' || animName === 'move-down') {
-              x = 0;
-              y = -20 + (scrollOffsetRef.current % 30);
-            } else if (animName === 'snow') {
-              x = 0;
-              y = -20 + (scrollOffsetRef.current % 30);
-            } else if (animName === 'bubble') {
-              x = 0;
-              y = -(scrollOffsetRef.current % 30);
-            }
-            ctx.drawImage(img, x, y);
-          }
-          scrollOffsetRef.current += 1;
-        };
-        drawFrame();
-        animInterval = setInterval(drawFrame, Math.max(10, 80 - animationSpeed * 5));
-      }
+      renderTextAnimation(ctx, textToDraw, animName, scrollOffsetRef.current, textColor, bgColor);
     };
 
-    const cacheKey = `${textToDraw}|${textColor}|${bgColor}`;
-    if (textPreviewCache.has(cacheKey)) {
-      const cached = textPreviewCache.get(cacheKey);
-      applyImage(cached.img, cached.width);
+    if (isAnimating) {
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(0, 0, 64, 20);
+      
+      const speedMs = Math.max(10, 80 - animationSpeed * 5);
+      animInterval = setInterval(() => {
+        scrollOffsetRef.current++;
+        drawFrame();
+      }, speedMs);
+      
+      drawFrame();
     } else {
-      renderLocalFallback(0);
-
-      const _API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? 'http://127.0.0.1:8001' : '';
-      axios.post(`${_API_BASE}/render-text-preview`, {
-        text: textToDraw,
-        textColor: textColor,
-        bgColor: bgColor
-      })
-      .then(r => r.data)
-      .then(data => {
-        if (!active || !data?.data_url) return;
-        const img = new Image();
-        img.onload = () => {
-          if (!active) return;
-          textPreviewCache.set(cacheKey, { img, width: data.width || 64 });
-          applyImage(img, data.width || 64);
-        };
-        img.src = data.data_url;
-      })
-      .catch(() => {
-        // Fallback already rendered
-      });
+      renderTextAnimation(ctx, textToDraw, animName, 0, textColor, bgColor);
     }
 
     return () => {
       active = false;
       if (animInterval) clearInterval(animInterval);
     };
-  }, [textToDraw, textColor, bgColor, isAnimating, animationSpeed]);
+  }, [textToDraw, textColor, bgColor, animName, isAnimating, animationSpeed]);
 
   return (
     <canvas 
@@ -1830,7 +1927,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
 
     if (globalIdx < 12 && (preset.mode === 'clock' || preset.id === 'clock-default' || preset.text?.includes('|||'))) {
-      console.warn('[assignPresetToSlot] Cannot assign clock/event preset to hardware slots');
       setPushMessage('Dynamic clock and event presets cannot be saved to hardware slots.');
       return;
     }
@@ -1841,32 +1937,49 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
 
     if (globalIdx >= 12) {
-      console.log('[assignPresetToSlot] Assigning to local UI slot:', globalIdx);
+      setPushing(true);
+      setPushMessage(`Saving to App Slot ${globalIdx + 1}...`);
+      
       const nextSaved = [...savedPresets];
       nextSaved[globalIdx] = {
         ...nextSaved[globalIdx],
         preset: { ...presetCopy, id: `saved-${Date.now()}-${globalIdx}` }
       };
       setSavedPresets(nextSaved);
-      setPushMessage(`Assigned to local UI slot ${globalIdx + 1}`);
+      
+      // Also persist to localStorage so it isn't lost on refresh
+      localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
+
+      // Push it to the sign temporarily so they see it instantly!
+      try {
+        if (typeof onPush === 'function') {
+           await onPush(presetCopy, true, true);
+        } else {
+           await axios.post(`${API_BASE}/preset`, {
+             preset: presetCopy,
+             mac: status.address || DEFAULT_MAC
+           });
+        }
+        setPushMessage(`Assigned to App Slot ${globalIdx + 1}!`);
+        setIsManualOverride(true);
+        setLastPushedId(`saved-${Date.now()}-${globalIdx}`);
+      } catch (err) {
+        setPushMessage(`Assigned to App Slot ${globalIdx + 1}, but failed to preview on sign.`);
+      } finally {
+        setPushing(false);
+      }
       return;
     }
 
     setPushing(true);
     setPushMessage(`Saving to slot ${globalIdx + 1}...`);
-    console.log('[assignPresetToSlot] Setting pushing=true, sending save-preset request');
-
     try {
-      
       const hwSlotId = globalIdx;
-      console.log('[assignPresetToSlot] Mapped hwSlotId:', hwSlotId);
-
       const res = await axios.post(`${API_BASE}/save-preset`, {
         slot_id: hwSlotId,
         address: status.address || DEFAULT_MAC,
         preset: presetCopy
       });
-      console.log('[assignPresetToSlot] API save-preset call succeeded');
 
       const savedThumbnail = res.data?.preview_url 
         ? `${API_BASE}${res.data.preview_url}?t=${Date.now()}` 
@@ -1887,14 +2000,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       setPushMessage(`Saved to slot ${globalIdx + 1}!`);
       if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
     } catch (err) {
-      console.error('Failed to save preset to hardware slot:', err);
       const detail = err.response?.data?.detail || err.message || '';
       const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
       if (!isDisconnectError) {
         setPushMessage(`Error: ${detail || 'Failed to save preset'}`);
       }
     } finally {
-      console.log('[assignPresetToSlot] Setting pushing=false');
       setPushing(false);
     }
   };
@@ -2031,11 +2142,25 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     dragStartPos.current = null;
   };
 
-  const activePreset = lastPushedId ? (
-    presets.find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId) || 
-    savedPresets.map(s => s.preset).filter(Boolean).find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId) ||
-    (typeof lastPushedId === 'string' && lastPushedId.startsWith('hw-slot-') ? savedPresets[parseInt(lastPushedId.split('-')[2], 10)]?.preset : null)
-  ) : null;
+  const activePreset = (() => {
+    // 1. If we have a manual override from a recent click
+    if (lastPushedId) {
+      const p = presets.find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId) || 
+                savedPresets.map(s => s.preset).filter(Boolean).find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId);
+      if (p) return p;
+      if (typeof lastPushedId === 'string' && lastPushedId.startsWith('hw-slot-')) {
+        return savedPresets[parseInt(lastPushedId.split('-')[2], 10)]?.preset;
+      }
+    }
+    // 2. Fallback to reading the hardware display_mode status
+    if (status?.display_mode && typeof status.display_mode === 'string' && status.display_mode.startsWith('preset-')) {
+       const slotIdx = parseInt(status.display_mode.split('-')[1], 10);
+       if (!isNaN(slotIdx) && savedPresets[slotIdx]?.preset) {
+         return savedPresets[slotIdx].preset;
+       }
+    }
+    return null;
+  })();
 
   let currentSn = '';
   const connectedRecent = recents.find(r => r.address === status.address);

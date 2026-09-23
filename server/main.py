@@ -18,6 +18,16 @@ from PIL import Image, ImageDraw, ImageFont
 from loy_web_protocol import LOYWebProtocol
 from calendar_service import CalendarService
 
+
+def hex_to_rgb_global(hex_str: Optional[str], default=(0,0,0)):
+    if not hex_str: return default
+    hex_str = hex_str.lstrip('#')
+    if len(hex_str) != 6: return default
+    try:
+        return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return default
+
 def save_preview(img: Image.Image, path: str):
     """Atomically save image so uvicorn never serves a half-written file."""
     dir_ = os.path.dirname(path)
@@ -718,7 +728,7 @@ async def play_preset(id: int, mac: str = ""):
             select_pkt = protocol.build_slot_select_command(id)
             await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
             await asyncio.sleep(0.02)
-            play_pkt = protocol.build_user_slot_play_command(id, loop_mode=1)
+            play_pkt = protocol.build_user_slot_play_command(id, loop_mode=0)
             await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
 
         return {"status": "success"}
@@ -1289,6 +1299,196 @@ async def flipper_worker(title: str, times: str, textColor: str, bgColor: str):
     except Exception as e:
         print(f"[flipper] Error: {e}")
 
+def generate_text_animation_frames(text: str, anim_name: str, render_font, fg_rgb, bg_rgb, speed: int = 8):
+    pal = [bg_rgb[0], bg_rgb[1], bg_rgb[2], fg_rgb[0], fg_rgb[1], fg_rgb[2], 255, 255, 255] + [0] * 759
+    anim_clean = (anim_name or "show now").strip().lower()
+    pil_frames = []
+
+    if anim_clean in ("continuous left shift", "continuous-left-shift"):
+        temp_img = Image.new("1", (1, 1), 0)
+        temp_draw = ImageDraw.Draw(temp_img)
+        bbox = temp_draw.textbbox((0, 0), text, font=render_font)
+        tw = max(1, bbox[2] - bbox[0])
+        th = max(1, bbox[3] - bbox[1])
+        y_pos = (PANEL_H - th) // 2 - bbox[1]
+
+        gap = 64
+        span = tw + gap
+        total_frames = span
+
+        strip_w = span * (math.ceil(PANEL_W / span) + 1)
+        full_strip = Image.new('1', (strip_w, PANEL_H), 0)
+        strip_draw = ImageDraw.Draw(full_strip)
+        for i in range(math.ceil(PANEL_W / span) + 1):
+            strip_draw.text((i * span - bbox[0], y_pos), text, font=render_font, fill=1)
+
+        frame_delay_ms = max(20, min(80, int(60 - speed * 2)))
+        delay_sec = frame_delay_ms / 1000.0
+
+        for fi in range(total_frames):
+            x = -(fi % span)
+            f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+            f1.paste(full_strip, (x, 0))
+            fp = Image.new('P', (PANEL_W, PANEL_H))
+            fp.putpalette(pal)
+            fp.putdata(list(f1.get_flattened_data()))
+            pil_frames.append(fp.convert('RGB'))
+
+        return pil_frames, frame_delay_ms, delay_sec
+
+    # Page-based animations (8 characters per page)
+    chunks = [text[i:i+8] for i in range(0, len(text), 8)] if text else [""]
+    frame_delay_ms = 50
+    delay_sec = 0.05
+
+    for page_text in chunks:
+        temp_img = Image.new("1", (1, 1), 0)
+        temp_draw = ImageDraw.Draw(temp_img)
+        bbox = temp_draw.textbbox((0, 0), page_text, font=render_font)
+        tw = max(1, bbox[2] - bbox[0])
+        th = max(1, bbox[3] - bbox[1])
+        x_center = (PANEL_W - tw) // 2 - bbox[0]
+        y_center = (PANEL_H - th) // 2 - bbox[1]
+
+        text_strip = Image.new('1', (tw, PANEL_H), 0)
+        strip_draw = ImageDraw.Draw(text_strip)
+        strip_draw.text((-bbox[0], y_center), page_text, font=render_font, fill=1)
+
+        if anim_clean in ("shift left", "move-left"):
+            for fi in range(92):
+                f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                if fi < 16:
+                    prog = fi / 16.0
+                    cur_x = int(round(PANEL_W * (1.0 - prog) + x_center * prog))
+                elif fi < 76:
+                    cur_x = x_center
+                else:
+                    prog = (fi - 76) / 16.0
+                    cur_x = int(round(x_center * (1.0 - prog) + (-tw) * prog))
+                f1.paste(text_strip, (cur_x, 0))
+                fp = Image.new('P', (PANEL_W, PANEL_H))
+                fp.putpalette(pal)
+                fp.putdata(list(f1.get_flattened_data()))
+                pil_frames.append(fp.convert('RGB'))
+
+        elif anim_clean in ("move right", "move-right"):
+            for fi in range(92):
+                f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                if fi < 16:
+                    prog = fi / 16.0
+                    cur_x = int(round((-tw) * (1.0 - prog) + x_center * prog))
+                elif fi < 76:
+                    cur_x = x_center
+                else:
+                    prog = (fi - 76) / 16.0
+                    cur_x = int(round(x_center * (1.0 - prog) + PANEL_W * prog))
+                f1.paste(text_strip, (cur_x, 0))
+                fp = Image.new('P', (PANEL_W, PANEL_H))
+                fp.putpalette(pal)
+                fp.putdata(list(f1.get_flattened_data()))
+                pil_frames.append(fp.convert('RGB'))
+
+        elif anim_clean in ("move up", "move-up"):
+            for fi in range(92):
+                f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                if fi < 16:
+                    prog = fi / 16.0
+                    cur_y = int(round(PANEL_H * (1.0 - prog) + y_center * prog))
+                elif fi < 76:
+                    cur_y = y_center
+                else:
+                    prog = (fi - 76) / 16.0
+                    cur_y = int(round(y_center * (1.0 - prog) + (-th) * prog))
+                f1.paste(text_strip, (x_center, cur_y - y_center))
+                fp = Image.new('P', (PANEL_W, PANEL_H))
+                fp.putpalette(pal)
+                fp.putdata(list(f1.get_flattened_data()))
+                pil_frames.append(fp.convert('RGB'))
+
+        elif anim_clean in ("move down", "move-down"):
+            for fi in range(92):
+                f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                if fi < 16:
+                    prog = fi / 16.0
+                    cur_y = int(round((-th) * (1.0 - prog) + y_center * prog))
+                elif fi < 76:
+                    cur_y = y_center
+                else:
+                    prog = (fi - 76) / 16.0
+                    cur_y = int(round(y_center * (1.0 - prog) + PANEL_H * prog))
+                f1.paste(text_strip, (x_center, cur_y - y_center))
+                fp = Image.new('P', (PANEL_W, PANEL_H))
+                fp.putpalette(pal)
+                fp.putdata(list(f1.get_flattened_data()))
+                pil_frames.append(fp.convert('RGB'))
+
+        elif anim_clean == "snow":
+            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and text_strip.getpixel((px - x_center, py))]
+            target_by_col = {}
+            for px, py in target_pts:
+                target_by_col.setdefault(px, []).append(py)
+
+            for fi in range(92):
+                fp = Image.new('P', (PANEL_W, PANEL_H), 0)
+                fp.putpalette(pal)
+                if fi < 76:
+                    for px, py_list in target_by_col.items():
+                        col_delay = (px * 23 + 7) % 11
+                        progress = fi - col_delay
+                        if progress >= 0:
+                            y_lead = progress
+                            for py in py_list:
+                                if py <= y_lead:
+                                    fp.putpixel((px, py), 1)
+                            if 0 <= y_lead < PANEL_H:
+                                fp.putpixel((px, y_lead), 2)
+                pil_frames.append(fp.convert('RGB'))
+
+        elif anim_clean == "bubble":
+            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and text_strip.getpixel((px - x_center, py))]
+            target_by_col = {}
+            for px, py in target_pts:
+                target_by_col.setdefault(px, []).append(py)
+
+            for fi in range(92):
+                fp = Image.new('P', (PANEL_W, PANEL_H), 0)
+                fp.putpalette(pal)
+                if fi < 76:
+                    for px, py_list in target_by_col.items():
+                        col_delay = (px * 17 + 5) % 11
+                        progress = fi - col_delay
+                        if progress >= 0:
+                            y_lead = 19 - progress
+                            for py in py_list:
+                                if py >= y_lead:
+                                    fp.putpixel((px, py), 1)
+                            if 0 <= y_lead < PANEL_H:
+                                fp.putpixel((px, y_lead), 2)
+                pil_frames.append(fp.convert('RGB'))
+
+        elif anim_clean == "flicker":
+            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and text_strip.getpixel((px - x_center, py))]
+            import random
+            random.seed(42)
+            for fi in range(60):
+                f1 = Image.new('RGB', (PANEL_W, PANEL_H), tuple(bg_rgb))
+                if fi < 30:
+                    for (px, py) in target_pts:
+                        f1.putpixel((px, py), tuple(fg_rgb))
+                pil_frames.append(f1)
+
+        else:
+            # Show now / static paged hold
+            for fi in range(60):
+                f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                f1.paste(text_strip, (x_center, 0))
+                fp = Image.new('P', (PANEL_W, PANEL_H))
+                fp.putpalette(pal)
+                fp.putdata(list(f1.get_flattened_data()))
+                pil_frames.append(fp.convert('RGB'))
+
+    return pil_frames, frame_delay_ms, delay_sec
+
 @app.post("/push-text")
 async def push_text(req: PushTextRequest):
     global connected_client, connection_ready, frames_sent, active_scroller_task, current_display_mode, current_width, current_speed
@@ -1586,34 +1786,14 @@ async def push_text(req: PushTextRequest):
             anim_clean = (req.animation or "continuous left shift").strip().lower()
 
             # 1. Update web dashboard / live preview GIF
-            step = 1
-            total_dist = PANEL_W + tw
-            num_anim_frames = max(1, total_dist // step)
-
-            scroll_interval_ms = max(10, 80 - speed * 5)
-            frame_delay_ms = max(20, scroll_interval_ms * step)
-            delay_sec = frame_delay_ms / 1000.0
-
+            fg_rgb = hex_to_rgb_global(req.textColor or "#FFFFFF", (255, 255, 255))
+            bg_rgb = hex_to_rgb_global(req.bgColor or "#000000", (0, 0, 0))
+            pil_frames, frame_delay_ms, delay_sec = generate_text_animation_frames(
+                text, anim_clean, render_font, fg_rgb, bg_rgb, speed
+            )
             anim_frames_pixels = []
-            for fi in range(num_anim_frames):
-                if anim_clean in ("move right", "move-right"):
-                    x_offset = -tw + fi * step - bbox[0]
-                    y_offset = y
-                elif anim_clean in ("move up", "move-up"):
-                    x_offset = (PANEL_W - tw) // 2 - bbox[0] if tw <= PANEL_W else -bbox[0]
-                    y_offset = PANEL_H - fi * step - bbox[1]
-                elif anim_clean in ("move down", "move-down"):
-                    x_offset = (PANEL_W - tw) // 2 - bbox[0] if tw <= PANEL_W else -bbox[0]
-                    y_offset = -th + fi * step - bbox[1]
-                else:
-                    x_offset = PANEL_W - fi * step - bbox[0]
-                    y_offset = y
-
-                frame_L = Image.new('L', (PANEL_W, PANEL_H), 0)
-                f_draw = ImageDraw.Draw(frame_L)
-                f_draw.text((x_offset, y_offset), text, font=render_font, fill=255)
-
-                f_pixels = [req.textColor if p > 128 else None for p in frame_L.getdata()]
+            for pf in pil_frames:
+                f_pixels = [req.textColor if (p[0] > 100 or p[1] > 100 or p[2] > 100) else None for p in list(pf.getdata())]
                 anim_frames_pixels.append(f_pixels)
 
             gif_path = os.path.join(STATIC_DIR, "current.gif")
@@ -1718,35 +1898,14 @@ async def render_text_preview(req: RenderTextPreviewRequest):
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return {"status": "success", "data_url": f"data:image/png;base64,{b64}", "width": w}
 
-def draw_custom_time(draw, time_str_full, font, color, y_offset, PANEL_W, show_colon=True):
-    parts = time_str_full.split(':')
-    hour_str = parts[0]
-    rest = parts[1].split(' ')
-    min_str = rest[0]
-    am_str = ' ' + rest[1] if len(rest) > 1 else ''
-    
-    hw = draw.textbbox((0, 0), hour_str, font=font)[2]
-    mw = draw.textbbox((0, 0), min_str, font=font)[2]
-    aw = draw.textbbox((0, 0), am_str, font=font)[2] if am_str else 0
-    
-    gap = 1
-    cw = 2
-    total_w = hw + gap + cw + gap + mw + aw
-    start_x = (PANEL_W - total_w) // 2
-    
-    draw.text((start_x, y_offset), hour_str, font=font, fill=color)
-    
-    cx = start_x + hw + gap
-    if show_colon:
-        draw.rectangle([cx, y_offset + 4, cx+1, y_offset + 5], fill=color)
-        draw.rectangle([cx, y_offset + 8, cx+1, y_offset + 9], fill=color)
-    
-    mx = cx + cw + gap
-    draw.text((mx, y_offset), min_str, font=font, fill=color)
-    
-    if am_str:
-        ax = mx + mw
-        draw.text((ax, y_offset), am_str, font=font, fill=color)
+def draw_custom_time(draw, time_str, font, color, y_offset, PANEL_W, show_colon=True):
+    display_str = time_str if show_colon else time_str.replace(':', ' ')
+    bbox = draw.textbbox((0, 0), display_str, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = max(0, (PANEL_W - tw) // 2 - bbox[0])
+    y = max(0, (PANEL_H - th) // 2 - bbox[1])
+    draw.text((x, y), display_str, font=font, fill=color)
 
 FONT_5x14 = {
     '0': [
@@ -1942,6 +2101,57 @@ def draw_default_clock(draw, now, font, color, y_offset, PANEL_W, show_colon=Tru
     draw_digit(min_str[0], start_x + 20)
     draw_digit(min_str[1], start_x + 26)
 
+def render_clock_frame(now, format, clock_style, color, bg_color, show_seconds):
+    bg_hex = (bg_color or "#000000").lstrip('#')
+    bg_rgb = tuple(int(bg_hex[i:i+2], 16) for i in (0, 2, 4)) if len(bg_hex) >= 6 else (0, 0, 0)
+    c_hex = (color or "#10B981").lstrip('#')
+    c_rgb = tuple(int(c_hex[i:i+2], 16) for i in (0, 2, 4)) if len(c_hex) >= 6 else (0, 255, 0)
+    pal = [bg_rgb[0], bg_rgb[1], bg_rgb[2], c_rgb[0], c_rgb[1], c_rgb[2]] + [0] * 762
+
+    frame_1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+    draw_1 = ImageDraw.Draw(frame_1)
+
+    if clock_style == "default":
+        try:
+            font = ImageFont.truetype("courbd.ttf", 14)
+        except Exception:
+            font = ImageFont.load_default()
+        time_str = now.strftime("%H:%M")
+        bbox = draw_1.textbbox((0, 0), time_str, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        y_offset = (PANEL_H - th) // 2 - bbox[1]
+        draw_default_clock(draw_1, now, font, 1, y_offset, PANEL_W, now.second % 2 == 0)
+        sec_val = now.second
+        if sec_val > 0:
+            draw_1.line([(2, 0), (2 + sec_val, 0)], fill=1, width=1)
+    else:
+        if format == "24h":
+            time_str = now.strftime("%H:%M")
+        else:
+            time_str = now.strftime("%I:%M %p").lstrip("0")
+
+        unifont_path = os.path.join(os.path.dirname(__file__), "unifont.otf")
+        try:
+            if os.path.exists(unifont_path):
+                font = ImageFont.truetype(unifont_path, 16)
+            else:
+                font = ImageFont.truetype("arialbd.ttf", 16)
+        except Exception:
+            font = ImageFont.load_default()
+
+        sec_val = now.second
+        show_col = (sec_val % 2 == 0)
+        draw_custom_time(draw_1, time_str, font, 1, 0, PANEL_W, show_col)
+        if show_seconds and sec_val > 0:
+            draw_1.line([(2, 0), (2 + sec_val, 0)], fill=1, width=1)
+
+    bitmap = list(frame_1.get_flattened_data())
+    fp = Image.new('P', (PANEL_W, PANEL_H))
+    fp.putpalette(pal)
+    fp.putdata(bitmap)
+    preview_img = fp.convert('RGB')
+    return preview_img, bitmap
+
 async def clock_preview_worker(color: str, format: str = "12h", bg_color: str = "#000000", show_seconds: bool = False, clock_style: str = "custom"):
     global current_display_mode, frames_sent, current_width, connected_client, connection_ready
     try:
@@ -1950,7 +2160,6 @@ async def clock_preview_worker(color: str, format: str = "12h", bg_color: str = 
         if clock_style == "default":
             color = "#ffffff"
 
-        
         # Ensure built-in clock is off when streaming custom clock
         if clock_style == "custom" and connected_client and connected_client.is_connected and connection_ready:
             await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
@@ -1961,59 +2170,7 @@ async def clock_preview_worker(color: str, format: str = "12h", bg_color: str = 
 
         while current_display_mode == "clock":
             now = datetime.datetime.now()
-            if format == "24h":
-                time_str = now.strftime("%H:%M")
-            else:
-                time_str = now.strftime("%I:%M %p").lstrip("0")
-                
-            preview_img = Image.new("RGB", (PANEL_W, PANEL_H), bg_color)
-            draw = ImageDraw.Draw(preview_img)
-            
-            try:
-                font = ImageFont.truetype("arial.ttf", 14)
-                sec_font = ImageFont.truetype("arial.ttf", 9)
-            except Exception:
-                font = ImageFont.load_default()
-                sec_font = ImageFont.load_default()
-                
-            if clock_style == "default":
-                try:
-                    font = ImageFont.truetype("courbd.ttf", 14)
-                except Exception:
-                    pass
-                time_str = now.strftime("%H:%M")
-                bbox = draw.textbbox((0, 0), time_str, font=font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                y_offset = (PANEL_H - th) // 2 - bbox[1]
-                
-                draw_default_clock(draw, now, font, color, y_offset, PANEL_W, now.second % 2 == 0)
-                sec_val = now.second
-                if sec_val > 0:
-                    draw.line([(2, 0), (2 + sec_val, 0)], fill=color, width=1)
-            else:
-                bbox = draw.textbbox((0, 0), time_str, font=font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                if show_seconds:
-                    sec_val = now.second
-                    y_offset = (PANEL_H - th) // 2 - bbox[1]
-                    draw_custom_time(draw, time_str, font, color, y_offset, PANEL_W, sec_val % 2 == 0)
-                    if sec_val > 0:
-                        draw.line([(2, 0), (2 + sec_val, 0)], fill=color, width=1)
-                else:
-                    y_offset = (PANEL_H - th) // 2 - bbox[1]
-                    draw_custom_time(draw, time_str, font, color, y_offset, PANEL_W, now.second % 2 == 0)
-
-            bg_hex = (bg_color or "#000000").lstrip('#')
-            bg_rgb = tuple(int(bg_hex[i:i+2], 16) for i in (0, 2, 4)) if len(bg_hex) >= 6 else (0,0,0)
-            c_hex = (color or "#10B981").lstrip('#')
-            c_rgb = tuple(int(c_hex[i:i+2], 16) for i in (0, 2, 4)) if len(c_hex) >= 6 else (0,255,0)
-            
-            bitmap = [0 if preview_img.getpixel((x, y)) == bg_rgb else 1 for y in range(PANEL_H) for x in range(PANEL_W)]
-            
-            for y in range(PANEL_H):
-                for x in range(PANEL_W):
-                    preview_img.putpixel((x, y), c_rgb if bitmap[y*PANEL_W + x] else bg_rgb)
-            
+            preview_img, bitmap = render_clock_frame(now, format, clock_style, color, bg_color, show_seconds)
             save_preview(preview_img, os.path.join(STATIC_DIR, "current.png"))
             current_width = PANEL_W
             frames_sent += 1
@@ -2099,54 +2256,7 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
             current_clock_style = clock_style or "custom"
             
             now = datetime.datetime.now()
-            if format == "24h":
-                time_str = now.strftime("%H:%M")
-            else:
-                time_str = now.strftime("%I:%M %p").lstrip("0")
-            img = Image.new("RGB", (PANEL_W, PANEL_H), bg_color or "#000000")
-            draw = ImageDraw.Draw(img)
-            try:
-                font = ImageFont.truetype("arial.ttf", 14)
-            except Exception:
-                font = ImageFont.load_default()
-            if clock_style == "default":
-                try:
-                    font = ImageFont.truetype("courbd.ttf", 14)
-                except Exception:
-                    pass
-                time_str = now.strftime("%H:%M")
-                bbox = draw.textbbox((0, 0), time_str, font=font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                y_offset = (PANEL_H - th) // 2 - bbox[1]
-                
-                draw_default_clock(draw, now, font, color, y_offset, PANEL_W, now.second % 2 == 0)
-                sec_val = now.second
-                if sec_val > 0:
-                    draw.line([(2, 0), (2 + sec_val, 0)], fill=color, width=1)
-            else:
-                bbox = draw.textbbox((0, 0), time_str, font=font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                if show_seconds:
-                    sec_val = now.second
-                    y_offset = (PANEL_H - th) // 2 - bbox[1]
-                    draw_custom_time(draw, time_str, font, color, y_offset, PANEL_W, sec_val % 2 == 0)
-                    if sec_val > 0:
-                        draw.line([(2, 0), (2 + sec_val, 0)], fill=color, width=1)
-                else:
-                    y_offset = (PANEL_H - th) // 2 - bbox[1]
-                    draw_custom_time(draw, time_str, font, color, y_offset, PANEL_W, now.second % 2 == 0)
-                
-            bg_hex = (bg_color or "#000000").lstrip('#')
-            bg_rgb = tuple(int(bg_hex[i:i+2], 16) for i in (0, 2, 4)) if len(bg_hex) >= 6 else (0,0,0)
-            c_hex = (color or "#10B981").lstrip('#')
-            c_rgb = tuple(int(c_hex[i:i+2], 16) for i in (0, 2, 4)) if len(c_hex) >= 6 else (0,255,0)
-            
-            bitmap = [0 if img.getpixel((x, y)) == bg_rgb else 1 for y in range(PANEL_H) for x in range(PANEL_W)]
-            
-            for y in range(PANEL_H):
-                for x in range(PANEL_W):
-                    img.putpixel((x, y), c_rgb if bitmap[y*PANEL_W + x] else bg_rgb)
-            
+            img, bitmap = render_clock_frame(now, format, clock_style, color, bg_color, show_seconds)
             save_preview(img, os.path.join(STATIC_DIR, "current.png"))
             
             if clock_style == "custom" and connected_client and connected_client.is_connected and connection_ready:
@@ -2164,7 +2274,6 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
                 
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
             
-            save_preview(img, os.path.join(STATIC_DIR, "current.png"))
             current_display_mode = "clock"
             current_width = PANEL_W
             frames_sent += 1
@@ -2302,12 +2411,10 @@ async def save_preset(req: SavePresetRequest):
 
             anim_clean = (preset.animation or "show now").strip().lower()
             is_anim_text = anim_clean not in ('static', 'show now')
-            is_anim = is_anim_text
+            is_anim = is_anim_text or len(text) > 8
             
             speed = preset.speed if preset.speed is not None else current_speed
             speed = max(1, min(15, speed))
-            frame_delay_ms = max(20, min(100, int(80 - speed * 4)))
-            delay_sec = frame_delay_ms / 1000.0
 
             def hex_to_rgb(hex_str: Optional[str], default=(0, 0, 0)):
                 if not hex_str: return default
@@ -2317,64 +2424,15 @@ async def save_preset(req: SavePresetRequest):
 
             bg_rgb = hex_to_rgb(preset.bgColor or "#000000", (0, 0, 0))
             fg_rgb = hex_to_rgb(preset.textColor or "#FFFFFF", (255, 255, 255))
-            pal = [bg_rgb[0], bg_rgb[1], bg_rgb[2], fg_rgb[0], fg_rgb[1], fg_rgb[2]] + [0] * 762
+            pal = [bg_rgb[0], bg_rgb[1], bg_rgb[2], fg_rgb[0], fg_rgb[1], fg_rgb[2], 255, 255, 255] + [0] * 759
 
-            if is_anim_text:
-                # Text with continuous left shift or directional animations:
-                # Step size = 1 for fluid, silky-smooth scrolling without jitter or eye strain
-                step = 1
-                
-                # Render the entire text string ONCE onto a crisp 1-bit strip
-                # This guarantees that glyph shapes are rock-solid and do not distort or shimmer
-                text_strip = Image.new('1', (tw, PANEL_H), 0)
-                strip_draw = ImageDraw.Draw(text_strip)
-                strip_draw.text((-bbox[0], y), text, font=render_font, fill=1)
-
-                if anim_clean in ("move right", "move-right"):
-                    total_frames = PANEL_W + tw
-                    for fi in range(total_frames):
-                        x_pos = -tw + fi * step
-                        f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
-                        f1.paste(text_strip, (x_pos, 0))
-                        fp = Image.new('P', (PANEL_W, PANEL_H))
-                        fp.putpalette(pal)
-                        fp.putdata(list(f1.get_flattened_data()))
-                        pil_frames.append(fp.convert('RGB'))
-                elif anim_clean in ("move up", "move-up"):
-                    x_static = (PANEL_W - tw) // 2 if tw <= PANEL_W else 0
-                    total_frames = PANEL_H + th
-                    for fi in range(total_frames):
-                        y_pos = PANEL_H - fi * step
-                        f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
-                        f1.paste(text_strip, (x_static, y_pos - y))
-                        fp = Image.new('P', (PANEL_W, PANEL_H))
-                        fp.putpalette(pal)
-                        fp.putdata(list(f1.get_flattened_data()))
-                        pil_frames.append(fp.convert('RGB'))
-                elif anim_clean in ("move down", "move-down"):
-                    x_static = (PANEL_W - tw) // 2 if tw <= PANEL_W else 0
-                    total_frames = PANEL_H + th
-                    for fi in range(total_frames):
-                        y_pos = -th + fi * step
-                        f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
-                        f1.paste(text_strip, (x_static, y_pos - y))
-                        fp = Image.new('P', (PANEL_W, PANEL_H))
-                        fp.putpalette(pal)
-                        fp.putdata(list(f1.get_flattened_data()))
-                        pil_frames.append(fp.convert('RGB'))
-                else:
-                    # Default: continuous left shift / shift left
-                    total_frames = PANEL_W + tw
-                    for fi in range(total_frames):
-                        x_pos = PANEL_W - fi * step
-                        f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
-                        f1.paste(text_strip, (x_pos, 0))
-                        fp = Image.new('P', (PANEL_W, PANEL_H))
-                        fp.putpalette(pal)
-                        fp.putdata(list(f1.get_flattened_data()))
-                        pil_frames.append(fp.convert('RGB'))
+            if is_anim:
+                pil_frames, frame_delay_ms, delay_sec = generate_text_animation_frames(
+                    text, anim_clean, render_font, fg_rgb, bg_rgb, speed
+                )
             else:
-                # Static text (Show Now)
+                frame_delay_ms = 100
+                delay_sec = 0.1
                 x = (PANEL_W - tw) // 2 - bbox[0] if (tw <= PANEL_W) else -bbox[0]
                 text_img = Image.new('1', (PANEL_W, PANEL_H), 0)
                 draw = ImageDraw.Draw(text_img)
@@ -2466,12 +2524,8 @@ async def save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    # Select and play the newly saved user slot in continuous single mode
-                    select_pkt = protocol.build_slot_select_command(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
-                    await asyncio.sleep(0.05)
-
-                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
+                    # Select and play the newly saved user slot once
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
 
@@ -2521,12 +2575,8 @@ async def save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    # Select and play the newly saved user slot in continuous single mode
-                    select_pkt = protocol.build_slot_select_command(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
-                    await asyncio.sleep(0.05)
-
-                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
+                    # Select and play the newly saved user slot once
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
 
