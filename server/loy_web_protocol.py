@@ -454,12 +454,12 @@ class LOYWebProtocol(BaseProtocol):
         payload = bytes([0x36, 0x02, 0x00, slot_id])
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x06)
 
-    def build_user_slot_play_command(self, slot_id: int, loop_mode: int = 0x00):
+    def build_user_slot_play_command(self, slot_id: int, loop_mode: int = 0x01):
         """CMD=0xC1 sub=0x02: Select and play a saved slot from flash memory.
-        Uses a playlist of length 1 (just the target slot) to enforce single mode.
+        Uses single mode (loop_mode=0x01) with the target slot to play continuously without playlist cycling.
         If slot_id == 0xFF, it stops the player (used by stop_slot_playback_command).
         """
-        val = bytes([loop_mode, 0x00, slot_id])
+        val = bytes([loop_mode, slot_id])
         payload = bytes([0x36, len(val)]) + val
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
 

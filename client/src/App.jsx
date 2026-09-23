@@ -800,7 +800,7 @@ const TextPresetCardPreview = ({ preset }) => {
       const offCtx = offCanvas.getContext('2d');
       offCtx.fillStyle = '#000000';
       offCtx.fillRect(0, 0, 64, 20);
-      offCtx.font = '18px Arial, sans-serif';
+      offCtx.font = '16px "Unifont", monospace, sans-serif';
       offCtx.textBaseline = 'middle';
       offCtx.fillStyle = '#ffffff';
 

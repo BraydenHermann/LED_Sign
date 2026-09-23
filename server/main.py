@@ -714,11 +714,11 @@ async def play_preset(id: int, mac: str = ""):
         frames_sent += 1
 
         if connected_client and connected_client.is_connected and connection_ready:
-            # Tell sign to display this specific saved slot in single mode
+            # Tell sign to display this specific saved slot in continuous single mode
             select_pkt = protocol.build_slot_select_command(id)
             await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
             await asyncio.sleep(0.02)
-            play_pkt = protocol.build_user_slot_play_command(id, loop_mode=0)
+            play_pkt = protocol.build_user_slot_play_command(id, loop_mode=1)
             await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
 
         return {"status": "success"}
@@ -1492,13 +1492,20 @@ async def push_text(req: PushTextRequest):
 
 
         # Standard text rendering
+        unifont_path = os.path.join(os.path.dirname(__file__), "unifont.otf")
         try:
-            render_font = ImageFont.truetype("arialbd.ttf", 18)
+            if os.path.exists(unifont_path):
+                render_font = ImageFont.truetype(unifont_path, 16)
+            else:
+                render_font = ImageFont.truetype("arialbd.ttf", 16)
         except Exception:
             try:
-                render_font = ImageFont.truetype("arial.ttf", 18)
+                render_font = ImageFont.truetype("arialbd.ttf", 16)
             except Exception:
-                render_font = ImageFont.load_default()
+                try:
+                    render_font = ImageFont.truetype("arial.ttf", 16)
+                except Exception:
+                    render_font = ImageFont.load_default()
             
         # Measure text using a temporary canvas to get width and height
         temp_img = Image.new("L", (1, 1), 0)
@@ -1579,7 +1586,7 @@ async def push_text(req: PushTextRequest):
             anim_clean = (req.animation or "continuous left shift").strip().lower()
 
             # 1. Update web dashboard / live preview GIF
-            step = 2
+            step = 1
             total_dist = PANEL_W + tw
             num_anim_frames = max(1, total_dist // step)
 
@@ -1675,15 +1682,22 @@ async def render_text_preview(req: RenderTextPreviewRequest):
     import base64
     from io import BytesIO
     text = req.text or ""
+    unifont_path = os.path.join(os.path.dirname(__file__), "unifont.otf")
     try:
-        render_font = ImageFont.truetype("arialbd.ttf", 18)
+        if os.path.exists(unifont_path):
+            render_font = ImageFont.truetype(unifont_path, 16)
+        else:
+            render_font = ImageFont.truetype("arialbd.ttf", 16)
     except Exception:
         try:
-            render_font = ImageFont.truetype("arial.ttf", 18)
+            render_font = ImageFont.truetype("arialbd.ttf", 16)
         except Exception:
-            render_font = ImageFont.load_default()
+            try:
+                render_font = ImageFont.truetype("arial.ttf", 16)
+            except Exception:
+                render_font = ImageFont.load_default()
 
-    temp_img = Image.new("L", (1, 1), 0)
+    temp_img = Image.new("1", (1, 1), 0)
     temp_draw = ImageDraw.Draw(temp_img)
     bbox = temp_draw.textbbox((0, 0), text, font=render_font)
     tw = max(1, bbox[2] - bbox[0])
@@ -1692,12 +1706,12 @@ async def render_text_preview(req: RenderTextPreviewRequest):
     x = (PANEL_W - tw) // 2 - bbox[0] if (tw <= PANEL_W) else -bbox[0]
     y = (PANEL_H - th) // 2 - bbox[1]
 
-    text_img_L = Image.new('L', (w, PANEL_H), 0)
-    draw = ImageDraw.Draw(text_img_L)
-    draw.text((x, y), text, font=render_font, fill=255)
+    text_img = Image.new('1', (w, PANEL_H), 0)
+    draw = ImageDraw.Draw(text_img)
+    draw.text((x, y), text, font=render_font, fill=1)
 
     preview_img = Image.new("RGB", (w, PANEL_H), req.bgColor or "#000000")
-    preview_img.paste(Image.new("RGB", (w, PANEL_H), req.textColor or "#FFFFFF"), (0, 0), mask=text_img_L)
+    preview_img.paste(Image.new("RGB", (w, PANEL_H), req.textColor or "#FFFFFF"), (0, 0), mask=text_img)
 
     buf = BytesIO()
     preview_img.save(buf, format="PNG")
@@ -2264,20 +2278,26 @@ async def save_preset(req: SavePresetRequest):
         else:
             # Text preset
             text = preset.text or ""
+            unifont_path = os.path.join(os.path.dirname(__file__), "unifont.otf")
             try:
-                render_font = ImageFont.truetype("arialbd.ttf", 18)
+                if os.path.exists(unifont_path):
+                    render_font = ImageFont.truetype(unifont_path, 16)
+                else:
+                    render_font = ImageFont.truetype("arialbd.ttf", 16)
             except Exception:
                 try:
-                    render_font = ImageFont.truetype("arial.ttf", 18)
+                    render_font = ImageFont.truetype("arialbd.ttf", 16)
                 except Exception:
-                    render_font = ImageFont.load_default()
-            temp_img = Image.new("L", (1, 1), 0)
+                    try:
+                        render_font = ImageFont.truetype("arial.ttf", 16)
+                    except Exception:
+                        render_font = ImageFont.load_default()
+
+            temp_img = Image.new("1", (1, 1), 0)
             temp_draw = ImageDraw.Draw(temp_img)
             bbox = temp_draw.textbbox((0, 0), text, font=render_font)
-            tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
-            if tw <= 0 or th <= 0:
-                raise Exception("Nothing to render")
+            tw = max(1, bbox[2] - bbox[0])
+            th = max(1, bbox[3] - bbox[1])
             y = (PANEL_H - th) // 2 - bbox[1]
 
             anim_clean = (preset.animation or "show now").strip().lower()
@@ -2286,35 +2306,84 @@ async def save_preset(req: SavePresetRequest):
             
             speed = preset.speed if preset.speed is not None else current_speed
             speed = max(1, min(15, speed))
-            frame_delay_ms = max(20, min(500, int((0.4 - (speed * 0.025)) * 1000)))
+            frame_delay_ms = max(20, min(100, int(80 - speed * 4)))
             delay_sec = frame_delay_ms / 1000.0
 
+            def hex_to_rgb(hex_str: Optional[str], default=(0, 0, 0)):
+                if not hex_str: return default
+                hex_str = hex_str.lstrip('#')
+                if len(hex_str) != 6: return default
+                return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+
+            bg_rgb = hex_to_rgb(preset.bgColor or "#000000", (0, 0, 0))
+            fg_rgb = hex_to_rgb(preset.textColor or "#FFFFFF", (255, 255, 255))
+            pal = [bg_rgb[0], bg_rgb[1], bg_rgb[2], fg_rgb[0], fg_rgb[1], fg_rgb[2]] + [0] * 762
+
             if is_anim_text:
-                # Text with continuous left shift: render scrolling 64x20 frames
-                step = 2
-                total_dist = PANEL_W + tw
-                num_anim_frames = max(1, total_dist // step)
-                bg_color = preset.bgColor or "#000000"
-                text_color = preset.textColor or "#FFFFFF"
+                # Text with continuous left shift or directional animations:
+                # Step size = 1 for fluid, silky-smooth scrolling without jitter or eye strain
+                step = 1
                 
-                for fi in range(num_anim_frames):
-                    x_offset = PANEL_W - fi * step - bbox[0]
-                    frame_L = Image.new('L', (PANEL_W, PANEL_H), 0)
-                    f_draw = ImageDraw.Draw(frame_L)
-                    f_draw.text((x_offset, y), text, font=render_font, fill=255)
-                    
-                    frame_rgb = Image.new("RGB", (PANEL_W, PANEL_H), bg_color)
-                    frame_rgb.paste(Image.new("RGB", (PANEL_W, PANEL_H), text_color), (0, 0), mask=frame_L)
-                    pil_frames.append(frame_rgb)
+                # Render the entire text string ONCE onto a crisp 1-bit strip
+                # This guarantees that glyph shapes are rock-solid and do not distort or shimmer
+                text_strip = Image.new('1', (tw, PANEL_H), 0)
+                strip_draw = ImageDraw.Draw(text_strip)
+                strip_draw.text((-bbox[0], y), text, font=render_font, fill=1)
+
+                if anim_clean in ("move right", "move-right"):
+                    total_frames = PANEL_W + tw
+                    for fi in range(total_frames):
+                        x_pos = -tw + fi * step
+                        f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                        f1.paste(text_strip, (x_pos, 0))
+                        fp = Image.new('P', (PANEL_W, PANEL_H))
+                        fp.putpalette(pal)
+                        fp.putdata(list(f1.get_flattened_data()))
+                        pil_frames.append(fp.convert('RGB'))
+                elif anim_clean in ("move up", "move-up"):
+                    x_static = (PANEL_W - tw) // 2 if tw <= PANEL_W else 0
+                    total_frames = PANEL_H + th
+                    for fi in range(total_frames):
+                        y_pos = PANEL_H - fi * step
+                        f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                        f1.paste(text_strip, (x_static, y_pos - y))
+                        fp = Image.new('P', (PANEL_W, PANEL_H))
+                        fp.putpalette(pal)
+                        fp.putdata(list(f1.get_flattened_data()))
+                        pil_frames.append(fp.convert('RGB'))
+                elif anim_clean in ("move down", "move-down"):
+                    x_static = (PANEL_W - tw) // 2 if tw <= PANEL_W else 0
+                    total_frames = PANEL_H + th
+                    for fi in range(total_frames):
+                        y_pos = -th + fi * step
+                        f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                        f1.paste(text_strip, (x_static, y_pos - y))
+                        fp = Image.new('P', (PANEL_W, PANEL_H))
+                        fp.putpalette(pal)
+                        fp.putdata(list(f1.get_flattened_data()))
+                        pil_frames.append(fp.convert('RGB'))
+                else:
+                    # Default: continuous left shift / shift left
+                    total_frames = PANEL_W + tw
+                    for fi in range(total_frames):
+                        x_pos = PANEL_W - fi * step
+                        f1 = Image.new('1', (PANEL_W, PANEL_H), 0)
+                        f1.paste(text_strip, (x_pos, 0))
+                        fp = Image.new('P', (PANEL_W, PANEL_H))
+                        fp.putpalette(pal)
+                        fp.putdata(list(f1.get_flattened_data()))
+                        pil_frames.append(fp.convert('RGB'))
             else:
+                # Static text (Show Now)
                 x = (PANEL_W - tw) // 2 - bbox[0] if (tw <= PANEL_W) else -bbox[0]
-                text_img_L = Image.new('L', (PANEL_W, PANEL_H), 0)
-                draw = ImageDraw.Draw(text_img_L)
-                draw.text((x, y), text, font=render_font, fill=255)
+                text_img = Image.new('1', (PANEL_W, PANEL_H), 0)
+                draw = ImageDraw.Draw(text_img)
+                draw.text((x, y), text, font=render_font, fill=1)
                 
-                full_rgb = Image.new("RGB", (PANEL_W, PANEL_H), preset.bgColor or "#000000")
-                full_rgb.paste(Image.new("RGB", (PANEL_W, PANEL_H), preset.textColor or "#FFFFFF"), (0, 0), mask=text_img_L)
-                pil_frames.append(full_rgb)
+                fp = Image.new('P', (PANEL_W, PANEL_H))
+                fp.putpalette(pal)
+                fp.putdata(list(text_img.get_flattened_data()))
+                pil_frames.append(fp.convert('RGB'))
             
         if not pil_frames:
             raise Exception("Failed to render frames for preset")
@@ -2397,8 +2466,12 @@ async def save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    # Select and play the newly saved user slot once
-                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
+                    # Select and play the newly saved user slot in continuous single mode
+                    select_pkt = protocol.build_slot_select_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                    await asyncio.sleep(0.05)
+
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
 
@@ -2448,7 +2521,12 @@ async def save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
+                    # Select and play the newly saved user slot in continuous single mode
+                    select_pkt = protocol.build_slot_select_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                    await asyncio.sleep(0.05)
+
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
 
