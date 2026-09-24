@@ -7,7 +7,7 @@ import {
   Activity, Upload, Clock, ExternalLink, Link2Off, Link2,
   FileSearch, Search, RefreshCw, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
-  Trash2, Pipette, Save, Send
+  Trash2, Pipette, Save, Send, Star
 } from 'lucide-react';
 
 const API_BASE = '';
@@ -153,23 +153,44 @@ function getEventDisplayString(ev) {
   if (!ev) return 'IN A MEETING';
   const summary = ev.summary || 'Untitled Event';
   try {
-    const startD = new Date(ev.start_iso);
     const endD = new Date(ev.end_iso);
     const timeFmt = new Intl.DateTimeFormat(undefined, { 
       hour: 'numeric', 
       minute: '2-digit', 
       hour12: true 
     });
+    const rawEndTimeStr = timeFmt.format(endD).toLowerCase();
+    // Remove am/pm from the sign end time so more characters are available for event titles
+    const endTimeStr = rawEndTimeStr.replace(/\s*(am|pm)/gi, '').trim();
+
+    // The sign scrolls continuously — cap the display string at 25 chars.
+    // If the title fits: "(title) - (end time)"
+    // If truncated:      "(title)... (end time)"  — no " - " to save chars
+    const maxLen = 25;
+    const suffixFull = ` - ${endTimeStr}`;      // e.g. " - 12:45"
+    const suffixShort = `... ${endTimeStr}`;     // e.g. "... 12:45"
+
+    let signText;
+    if (summary.length + suffixFull.length <= maxLen) {
+      // Title fits with full suffix
+      signText = `${summary}${suffixFull}`;
+    } else {
+      // Need to truncate — use the shorter suffix (no " - ")
+      const maxTitleLen = maxLen - suffixShort.length;
+      const truncTitle = summary.slice(0, Math.max(0, maxTitleLen)).trimEnd();
+      signText = `${truncTitle}${suffixShort}`;
+    }
+
+    // Internal pipe-delimited format used by handlePush: "display ||| start - end"
+    const startD = new Date(ev.start_iso);
     const startTimeStr = timeFmt.format(startD).toLowerCase();
-    const endTimeStr = timeFmt.format(endD).toLowerCase();
-    
-    const result = `${summary} ||| ${startTimeStr} - ${endTimeStr}`;
-    return result;
+    return `${signText} ||| ${startTimeStr} - ${rawEndTimeStr}`;
   } catch (e) {
     console.error("[calendar] Failed to format end time:", e);
     return summary;
   }
 }
+
 
 const drawCustomTimeCanvas = (ctx, hours, minutes, timeFormat, textColor, showColon = true) => {
   let hourStr = '';
@@ -823,8 +844,7 @@ const apply1BitThreshold = (ctx, textColor, bgColor, globalOpacity = 1.0) => {
 const renderTextAnimation = (ctx, text, animName, offset, textColor = '#ffffff', bgColor = '#000000') => {
   ctx.imageSmoothingEnabled = false;
   
-  // EXACT PIXEL FONT MATCH
-  ctx.font = 'normal 16px "Unifont", monospace, sans-serif';
+  ctx.font = '18px Arial, sans-serif';
   ctx.textBaseline = 'middle';
   
   const drawBg = () => {
@@ -1203,10 +1223,18 @@ export default function App() {
   const [allSavedPresets, setAllSavedPresets] = useState({});
 
   const activeMac = status.address?.toUpperCase() || DEFAULT_MAC;
-  const savedPresets = (allSavedPresets[activeMac] || Array(12).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }))).slice(0, 12);
+  const savedPresets = (Array.isArray(allSavedPresets[activeMac]) ? allSavedPresets[activeMac] : Array(12).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }))).slice(0, 12);
 
   const setSavedPresets = (nextSaved) => {
-    setAllSavedPresets(prev => ({ ...prev, [activeMac]: nextSaved }));
+    if (typeof nextSaved === 'function') {
+      setAllSavedPresets(prev => {
+        const currentList = prev[activeMac] || Array(12).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }));
+        const result = nextSaved(currentList);
+        return { ...prev, [activeMac]: result };
+      });
+    } else {
+      setAllSavedPresets(prev => ({ ...prev, [activeMac]: nextSaved }));
+    }
   };
 
   // Load presets from IndexedDB (with migration from localStorage) on mount
@@ -1329,6 +1357,30 @@ export default function App() {
     if (dbLoaded) {
       savePresetsToDB(presets).catch(err => console.error("Failed to save presets to IndexedDB:", err));
     }
+  }, [presets, dbLoaded]);
+
+  // Keep reserved default slot (slot 2 / index 1) in saved presets synced with default local preset
+  useEffect(() => {
+    if (!dbLoaded) return;
+    const def = (presets || []).find(p => p.isDefault);
+    if (!def) return;
+    setSavedPresets(prev => {
+      const currentList = prev || [];
+      const slot2 = currentList[1]?.preset;
+      if (slot2 && (slot2.id === def.id || slot2.id === 'hw-slot-1') && slot2.name === def.name && slot2.mode === def.mode && slot2.text === def.text && slot2.imgSrc === def.imgSrc) {
+        return prev;
+      }
+      const next = [...currentList];
+      next[1] = {
+        slotNumber: 2,
+        preset: {
+          ...def,
+          id: 'hw-slot-1',
+          thumbnail: slot2?.thumbnail || def.thumbnail
+        }
+      };
+      return next;
+    });
   }, [presets, dbLoaded]);
 
   // Save savedPresets to IndexedDB whenever they change
@@ -1506,33 +1558,30 @@ export default function App() {
     try {
       const activeEvents = events ? events.filter(ev => isEventActive(ev, now) && ev.response_status?.toLowerCase() !== 'declined') : [];
       const activeEvent = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
-      const defaultPreset = (presets || []).find(p => p.isDefault) || (presets && presets.length > 0 ? presets[0] : null);
-      
+
       let targetContent = null;
       let targetId = null;
 
       if (activeEvent) {
         targetContent = { type: 'event', data: activeEvent, summary: getEventDisplayString(activeEvent) };
         targetId = `event-${activeEvent.id}-${targetContent.summary}`;
-      } else if (defaultPreset) {
-        targetContent = { type: 'preset', data: defaultPreset };
-        targetId = defaultPreset.id;
+      } else {
+        // No active event — target hardware slot 1 (the reserved default slot)
+        targetContent = { type: 'hw-default' };
+        targetId = 'hw-slot-1';
       }
 
       if (targetId !== lastPushedId) {
-        if (targetContent) {
-          if (targetContent.type === 'event') {
-            handlePush(targetContent.summary, false);
-          } else {
-            // Push default preset
-            handlePush(targetContent.data, false);
-          }
+        if (targetContent.type === 'event') {
+          handlePush(targetContent.summary, false);
         } else {
-          // No event, no default -> clear
-          if (lastPushedId) {
-            console.log("[auto-push] No active event or default, clearing sign...");
-            axios.post(`${API_BASE}/clear`).catch(() => {});
-          }
+          // Play hardware slot 1 — the reserved default
+          console.log("[auto-push] Event ended, playing hardware default slot (slot 1)");
+          setLastPushedId('hw-slot-1');
+          axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => {
+            console.warn("[auto-push] No default saved to slot 1 yet:", e);
+          });
+          return; // setLastPushedId already called above
         }
         setLastPushedId(targetId);
       }
@@ -1549,14 +1598,6 @@ export default function App() {
       isManualOverrideRef.current = false;
       syncHardwareSlots();
       const pushDefaultOrActive = async () => {
-        let currentPresets = presets;
-        if (!currentPresets || currentPresets.length === 0) {
-          try {
-            currentPresets = await getPresetsFromDB();
-          } catch (e) {
-            currentPresets = [];
-          }
-        }
         let evs = [];
         try {
           evs = await fetchEvents();
@@ -1568,11 +1609,13 @@ export default function App() {
           console.log("[connect] Pushing active event on connect:", active.summary);
           await handlePush(getEventDisplayString(active), false);
         } else {
-          const defPreset = (currentPresets || []).find(p => p.isDefault) || (currentPresets && currentPresets.length > 0 ? currentPresets[0] : null);
-          if (defPreset) {
-            console.log("[connect] Pushing default preset on connect:", defPreset.name);
-            setLastPushedId(defPreset.id);
-            await handlePush(defPreset, false);
+          // Play hardware slot 1 (0-indexed) — the reserved default slot
+          console.log("[connect] Playing hardware default slot (slot 1)");
+          setLastPushedId('hw-slot-1');
+          try {
+            await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+          } catch (e) {
+            console.warn("[connect] No default saved to slot 1 yet:", e);
           }
         }
       };
@@ -1597,7 +1640,11 @@ export default function App() {
     setPushing(true);
     if (!skipMessages) {
       if (manual) {
-        handleSetLocalPushMessage('Pushing to sign...');
+        if (typeof payload === 'string') {
+          setPushMessage('Saving to Slot 1...');
+        } else {
+          handleSetLocalPushMessage('Pushing to sign...');
+        }
       } else {
         setPushMessage('');
         setLocalPushMessage('');
@@ -1611,12 +1658,14 @@ export default function App() {
     if (typeof payload === 'string') {
       pushName = 'Event';
       isEvent = true;
+      // Extract just the display portion (before the "|||" separator)
+      const signText = payload.includes('|||') ? payload.split('|||')[0].trim() : payload;
       data = {
-        name: payload.split('|||')[0].trim(),
-        text: payload,
+        name: signText,
+        text: signText,
         textColor: '#ffffff',
         bgColor: '#000000',
-        animation: 'show now',
+        animation: 'continuous left shift',
         speed: speed,
         rotation: 0,
         spacing: 1,
@@ -1639,11 +1688,41 @@ export default function App() {
       if (data.mode === 'clock') {
         const pushColor = data.clockStyle === 'default' ? '#ffffff' : (data.textColor || '#10B981');
         await axios.post(`${API_BASE}/clock?on=true&color=${encodeURIComponent(pushColor)}&bg_color=${encodeURIComponent(data.bgColor || '#000000')}&format=${data.timeFormat || '12h'}&show_seconds=${data.showSeconds !== false}&clock_style=${data.clockStyle || 'custom'}`);
+        if (manual && !skipMessages) {
+          handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        }
+      } else if (isEvent) {
+        if (status.connected) {
+          setPushMessage('Saving to Slot 1...');
+          const eventPresetCopy = { ...data };
+          delete eventPresetCopy.pixels;
+          const saveRes = await axios.post(`${API_BASE}/save-preset`, {
+            slot_id: 0,
+            address: status.address || DEFAULT_MAC,
+            preset: eventPresetCopy
+          });
+          const savedThumb = saveRes.data?.preview_url
+            ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}`
+            : null;
+          setPushMessage('Saved to Slot 1!');
+          // Update local saved presets cache for slot 0
+          setSavedPresets(prev => {
+            const next = [...prev];
+            next[0] = {
+              slotNumber: 1,
+              preset: { ...eventPresetCopy, id: 'hw-slot-0', thumbnail: savedThumb || eventPresetCopy.thumbnail }
+            };
+            return next;
+          });
+          setLastPushedId('hw-slot-0');
+        } else {
+          setPushMessage('Error: Sign not connected');
+        }
       } else {
         await axios.post(`${API_BASE}/push-text`, data);
-      }
-      if (manual && !skipMessages) {
-        handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        if (manual && !skipMessages) {
+          handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        }
       }
       fetchStatus();
     } catch (e) {
@@ -1660,6 +1739,7 @@ export default function App() {
       setPushing(false);
     }
   };
+
 
   const handlePushManual = (name, status) => {
     setIsManualOverride(true);
@@ -1730,6 +1810,9 @@ export default function App() {
             now={now}
             pushMessage={localPushMessage}
             pushing={pushing}
+            savedPresets={savedPresets}
+            setSavedPresets={setSavedPresets}
+            syncHardwareSlots={syncHardwareSlots}
           />
         </div>
         <div className="right-column">
@@ -1904,6 +1987,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       return;
     }
 
+    // Slots 0 and 1 are reserved (Calendar and Default) — block manual assignment
+    if (globalIdx === 0 || globalIdx === 1) {
+      setPushMessage(`Slot ${globalIdx + 1} is reserved and cannot be manually assigned.`);
+      return;
+    }
+
     if (globalIdx < 12 && (preset.mode === 'clock' || preset.id === 'clock-default' || preset.text?.includes('|||'))) {
       setPushMessage('Dynamic clock and event presets cannot be saved to hardware slots.');
       return;
@@ -1990,6 +2079,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
 
   const playSavedPreset = async (globalIdx, preset) => {
     if (globalIdx >= 12 && !preset) return; // Only local UI slots require a valid preset for pushing
+
+    // For hardware slots (0-11), don't play if we have no local data (slot was cleared)
+    if (globalIdx < 12 && !preset) return;
 
     if (preset) {
       setLastPushedId(preset.id);
@@ -2515,43 +2607,69 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 {savedPresets.slice(savedPage * slotsPerPage, (savedPage + 1) * slotsPerPage).map((slot, localIdx) => {
                   const globalIdx = savedPage * slotsPerPage + localIdx;
                   const p = slot.preset;
-                  
+
+                  // Slots 0 and 1 are reserved (Calendar and Default respectively)
+                  const isReservedCalendar = globalIdx === 0;
+                  const isReservedDefault = globalIdx === 1;
+                  const isReserved = isReservedCalendar || isReservedDefault;
+                  const reservedColor = isReservedCalendar ? '#38bdf8' : '#10b981';
+
                   if (!p) {
                     return (
                       <div
                         key={slot.slotNumber}
-                        onDragOver={(e) => { e.preventDefault(); setSavedDragOverIdx(globalIdx); }}
-                        onDragLeave={() => setSavedDragOverIdx(null)}
-                        onDrop={(e) => handleDropOnSlot(e, globalIdx)}
+                        onDragOver={!isReserved ? (e) => { e.preventDefault(); setSavedDragOverIdx(globalIdx); } : undefined}
+                        onDragLeave={!isReserved ? () => setSavedDragOverIdx(null) : undefined}
+                        onDrop={!isReserved ? (e) => handleDropOnSlot(e, globalIdx) : undefined}
                         onPointerDown={handlePointerDown}
                         onPointerUp={(e) => handlePointerUp(e, () => playSavedPreset(globalIdx, null))}
                         className="preset-card empty-slot relative transition-all cursor-pointer"
                         style={{
-                          border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : undefined,
+                          border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : (isReserved ? `1px solid ${reservedColor}22` : undefined),
                           boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : undefined,
+                          opacity: isReserved ? 0.7 : 1,
                         }}
                       >
-                        <div className="preset-card-slot-badge">
-                          Slot {slot.slotNumber}
-                        </div>
-                        <Plus size={20} className="text-slate-600 mb-1" />
-                        <p style={{ fontSize: '10px', fontWeight: 900, color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0 }}>
-                          Empty
-                        </p>
-                        <div className="preset-card-overlay flex gap-2">
-                          <button
-                            onPointerDown={(e) => e.stopPropagation()}
-                            onPointerUp={(e) => e.stopPropagation()}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setAssigningSlotIndex(globalIdx);
-                            }}
-                            className="btn-styled preset-card-edit-btn"
-                            title="Assign Preset"
-                          >
-                            <Plus size={14} className="mr-2" /> Assign
-                          </button>
-                        </div>
+                        {isReserved ? (
+                          <>
+                            <div style={{ fontSize: 22, marginBottom: 4, display: 'flex', justifyContent: 'center' }}>
+                              {isReservedCalendar ? '📅' : <Star size={22} fill="#facc15" color="#facc15" />}
+                            </div>
+                            <p style={{ fontSize: '10px', fontWeight: 900, color: reservedColor, textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                              {isReservedCalendar ? '📅 Calendar' : (
+                                <>
+                                  <Star size={10} fill="#facc15" color="#facc15" /> Default
+                                </>
+                              )}
+                            </p>
+                            <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.25)', marginTop: 4, textAlign: 'center' }}>
+                              {isReservedCalendar ? 'Auto-updated by calendar' : 'Set via "Use as Default"'}
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <Plus size={20} className="text-slate-600 mb-1" />
+                            <p style={{ fontSize: '10px', fontWeight: 900, color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0 }}>
+                              Empty
+                            </p>
+                          </>
+                        )}
+                        {!isReserved && (
+                          <div className="preset-card-overlay flex gap-2">
+                            <button
+                              onPointerDown={(e) => e.stopPropagation()}
+                              onPointerUp={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setAssigningSlotIndex(globalIdx);
+                              }}
+                              className="btn-styled preset-card-edit-btn"
+                              title="Assign Preset"
+                            >
+                              <Plus size={14} className="mr-2" /> Assign
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   }
@@ -2562,31 +2680,49 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                       className="preset-card relative group overflow-hidden transition-all"
                       onPointerDown={handlePointerDown}
                       onPointerUp={(e) => handlePointerUp(e, () => playSavedPreset(globalIdx, p))}
-                      draggable={true}
-                      onDragStart={(e) => {
+                      draggable={!isReserved}
+                      onDragStart={!isReserved ? (e) => {
                         e.dataTransfer.setData('text/plain', `saved-slot:${globalIdx}`);
                         e.dataTransfer.effectAllowed = 'move';
                         setSavedDraggedIdx(globalIdx);
-                      }}
-                      onDragEnd={() => {
+                      } : undefined}
+                      onDragEnd={!isReserved ? () => {
                         setSavedDraggedIdx(null);
                         setSavedDragOverIdx(null);
-                      }}
-                      onDragOver={(e) => { e.preventDefault(); setSavedDragOverIdx(globalIdx); }}
-                      onDragLeave={() => setSavedDragOverIdx(null)}
-                      onDrop={(e) => handleDropOnSlot(e, globalIdx)}
+                      } : undefined}
+                      onDragOver={!isReserved ? (e) => { e.preventDefault(); setSavedDragOverIdx(globalIdx); } : undefined}
+                      onDragLeave={!isReserved ? () => setSavedDragOverIdx(null) : undefined}
+                      onDrop={!isReserved ? (e) => handleDropOnSlot(e, globalIdx) : undefined}
                       style={{
-                        cursor: 'grab',
+                        cursor: isReserved ? 'pointer' : 'grab',
                         opacity: globalIdx === savedDraggedIdx ? 0.4 : 1,
                         transform: globalIdx === savedDraggedIdx ? 'scale(0.98)' : 'none',
-                        border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : undefined,
-                        boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : undefined,
+                        border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : (isReserved ? `1px solid ${reservedColor}44` : undefined),
+                        boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : (isReserved ? `0 0 12px ${reservedColor}22` : undefined),
                         userSelect: 'none'
                       }}
                     >
-                      <div className="preset-card-slot-badge">
-                        Slot {slot.slotNumber}
-                      </div>
+                      {isReserved && (
+                        <div
+                          className="preset-card-badge"
+                          style={isReservedCalendar ? {
+                            background: 'rgba(56,189,248,0.15)',
+                            color: '#38bdf8',
+                            border: '1px solid rgba(56,189,248,0.25)'
+                          } : undefined}
+                        >
+                          {isReservedCalendar ? (
+                            <>
+                              <span>📅</span> Calendar
+                            </>
+                          ) : (
+                            <>
+                              <Star size={10} fill="#facc15" color="#facc15" />
+                              Default
+                            </>
+                          )}
+                        </div>
+                      )}
                       <PresetCardMedia preset={p} now={now} />
 
                       <div 
@@ -2597,18 +2733,20 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                           handlePointerUp(e, () => playSavedPreset(globalIdx, p));
                         }}
                       >
-                        <button
-                          onPointerDown={(e) => e.stopPropagation()}
-                          onPointerUp={(e) => e.stopPropagation()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setAssigningSlotIndex(globalIdx);
-                          }}
-                          className="btn-styled preset-card-edit-btn"
-                          title="Update Preset"
-                        >
-                          <RefreshCw size={14} className="mr-2" /> Update
-                        </button>
+                        {!isReserved && (
+                          <button
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onPointerUp={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAssigningSlotIndex(globalIdx);
+                            }}
+                            className="btn-styled preset-card-edit-btn"
+                            title="Update Preset"
+                          >
+                            <RefreshCw size={14} className="mr-2" /> Update
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -2635,10 +2773,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 >
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px', flexWrap: 'nowrap' }}>
                     <h3 style={{ fontSize: '20px', fontWeight: 900, margin: 0, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      Assign Local Preset to Slot {savedPresets[assigningSlotIndex]?.slotNumber}
+                      {assigningSlotIndex === 0 ? '📅 Calendar Slot (Reserved)' :
+                       assigningSlotIndex === 1 ? '⭐ Default Slot (Reserved)' :
+                       `Assign Local Preset to Slot ${savedPresets[assigningSlotIndex]?.slotNumber}`}
                     </h3>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0, flexWrap: 'nowrap' }}>
-                      {savedPresets[assigningSlotIndex]?.preset && (
+                      {savedPresets[assigningSlotIndex]?.preset && assigningSlotIndex >= 2 && (
                         <button
                           onClick={async () => {
                             
@@ -3182,7 +3322,7 @@ function HslColorSlider({ label, value, onChange }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, pushing }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, pushing, savedPresets, setSavedPresets, syncHardwareSlots }) {
   const [isLocalCollapsed, setIsLocalCollapsed] = useState(!!status.connected);
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
@@ -3862,6 +4002,53 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       }
       setPresets(nextPresets);
 
+      // If marked as default, keep saved preset slot 2 in sync and push to hardware if connected
+      if (form.isDefault) {
+        const defaultPresetCopy = { ...presetData };
+        if (defaultPresetCopy.mode === 'text') {
+          delete defaultPresetCopy.pixels;
+        }
+        delete defaultPresetCopy.thumbnail;
+
+        // Immediately sync slot 2 in savedPresets state
+        setSavedPresets(prev => {
+          const next = [...prev];
+          next[1] = {
+            slotNumber: 2,
+            preset: { ...savedPreset, id: 'hw-slot-1' }
+          };
+          return next;
+        });
+
+        if (status?.connected) {
+          try {
+            setPushMessage('Saving default to Slot 2...');
+            const saveRes = await axios.post(`${API_BASE}/save-preset`, {
+              slot_id: 1,
+              address: status.address || DEFAULT_MAC,
+              preset: defaultPresetCopy
+            });
+            console.log('[preset-save] Saved default preset to hardware slot 1');
+            const savedThumb = saveRes.data?.preview_url 
+              ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}` 
+              : (presetData.thumbnail || null);
+            setPushMessage('Saved to Slot 2!');
+            setSavedPresets(prev => {
+              const next = [...prev];
+              next[1] = {
+                slotNumber: 2,
+                preset: { ...defaultPresetCopy, id: 'hw-slot-1', thumbnail: savedThumb }
+              };
+              return next;
+            });
+            syncHardwareSlots();
+          } catch (saveErr) {
+            console.warn('[preset-save] Failed to save default to hw slot 1:', saveErr);
+            setPushMessage('');
+          }
+        }
+      }
+
       setIsModalOpen(false);
       setAnimDropdownOpen(false);
       setEditingId(null);
@@ -4011,6 +4198,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               >
                 {p.isDefault && (
                   <div className="preset-card-badge">
+                    <Star size={10} fill="#facc15" color="#facc15" />
                     Default
                   </div>
                 )}

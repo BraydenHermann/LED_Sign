@@ -268,7 +268,7 @@ img.scrolling-preview {
   position: absolute;
   top: 8px;
   right: 8px;
-  z-index: 10;
+  z-index: 25;
   padding: 2px 6px;
   border-radius: 4px;
   background: rgba(16, 185, 129, 0.2);
@@ -279,6 +279,9 @@ img.scrolling-preview {
   letter-spacing: 0.05em;
   border: 1px solid rgba(16, 185, 129, 0.2);
   pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .preset-card-slot-badge {

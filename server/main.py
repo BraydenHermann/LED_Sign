@@ -2596,6 +2596,9 @@ async def save_preset(req: SavePresetRequest):
                     # Select and play the newly saved user slot once
                     if connected_client and connected_client.is_connected and connection_ready:
                         await stop_all_playback(blank=False)
+                    select_pkt = protocol.build_slot_select_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                    await asyncio.sleep(0.02)
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
@@ -2649,6 +2652,9 @@ async def save_preset(req: SavePresetRequest):
                     # Select and play the newly saved user slot once
                     if connected_client and connected_client.is_connected and connection_ready:
                         await stop_all_playback(blank=False)
+                    select_pkt = protocol.build_slot_select_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                    await asyncio.sleep(0.02)
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
@@ -2708,4 +2714,4 @@ async def delete_preset(slot_id: int, mac: str = ""):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
