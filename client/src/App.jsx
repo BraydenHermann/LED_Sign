@@ -823,171 +823,149 @@ const apply1BitThreshold = (ctx, textColor, bgColor, globalOpacity = 1.0) => {
 const renderTextAnimation = (ctx, text, animName, offset, textColor = '#ffffff', bgColor = '#000000') => {
   ctx.imageSmoothingEnabled = false;
   
+  // EXACT PIXEL FONT MATCH
+  ctx.font = 'normal 16px "Unifont", monospace, sans-serif';
+  ctx.textBaseline = 'middle';
+  
   const drawBg = () => {
     ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, 64, 20);
   };
   
-  const framesPerPage = (animName === 'flicker') ? 60 : 92;
-  const pageFrame = offset % framesPerPage;
+  const tw = ctx.measureText(text).width;
+  const totalW = 64 + tw;
   
-  ctx.font = 'normal 16px "Unifont", monospace, sans-serif';
-  ctx.textBaseline = 'middle';
-  const tw = Math.ceil(ctx.measureText(text).width);
-  const gap = 64; 
-  const totalW = tw + gap;
-
-  if (!animName || animName === 'show now' || animName === 'static') {
-    drawBg();
-    ctx.fillStyle = '#ffffff';
-    if (tw <= 64) {
-      ctx.textAlign = 'center';
-      ctx.fillText(text, 32, 10);
-    } else {
-      ctx.textAlign = 'left';
-      ctx.fillText(text, 0, 10);
-    }
-    apply1BitThreshold(ctx, textColor, bgColor);
-    return;
-  }
+  // GLOBALLY SYNCED 20FPS CLOCK (50ms per frame)
+  const globalFrame = Math.floor(performance.now() / 50);
   
-  if (animName === 'shift left' || animName === 'continuous left shift') {
+  if (animName === 'continuous left shift') {
     drawBg();
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'left';
+    let curX = 64 - (globalFrame % totalW);
+    ctx.fillText(text, curX, 10);
+    if (curX + tw < 64) ctx.fillText(text, curX + totalW, 10);
+    apply1BitThreshold(ctx, textColor, bgColor);
+    return;
+  }
+
+  if (animName === 'shift left' || animName === 'move-left' || animName === 'move right' || animName === 'move-right' || animName === 'move up' || animName === 'move-up' || animName === 'move down' || animName === 'move-down') {
+    drawBg();
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
     
-    let curX = 64 - (offset % totalW);
-    ctx.fillText(text, curX, 10);
-    if (curX + tw < 64) {
-        ctx.fillText(text, curX + totalW, 10);
+    const pages = Math.max(1, Math.ceil(text.length / 8));
+    const framesPerPage = 92;
+    const cycleFrame = globalFrame % framesPerPage;
+    const pageIdx = Math.floor(globalFrame / framesPerPage) % pages;
+    const currentChunk = text.substring(pageIdx * 8, (pageIdx + 1) * 8);
+    const chunkTw = ctx.measureText(currentChunk).width;
+    
+    let prog = 0;
+    if (cycleFrame < 16) prog = cycleFrame / 16.0;
+    else if (cycleFrame < 76) prog = 1.0;
+    else prog = 1.0 + ((cycleFrame - 76) / 16.0);
+    
+    let curX = 32;
+    let curY = 10;
+    
+    if (animName === 'shift left' || animName === 'move-left') {
+       if (prog <= 1.0) curX = 64 + (chunkTw/2) - ((64 + chunkTw/2 - 32) * prog);
+       else curX = 32 - ((32 + chunkTw/2 + 64) * (prog - 1.0));
+    } else if (animName === 'move right' || animName === 'move-right') {
+       if (prog <= 1.0) curX = -(chunkTw/2) + ((32 + chunkTw/2) * prog);
+       else curX = 32 + ((64 + chunkTw/2 - 32) * (prog - 1.0));
+    } else if (animName === 'move up' || animName === 'move-up') {
+       if (prog <= 1.0) curY = 30 - (20 * prog);
+       else curY = 10 - (20 * (prog - 1.0));
+    } else if (animName === 'move down' || animName === 'move-down') {
+       if (prog <= 1.0) curY = -10 + (20 * prog);
+       else curY = 10 + (20 * (prog - 1.0));
     }
+    
+    ctx.fillText(currentChunk, Math.round(curX), Math.round(curY));
     apply1BitThreshold(ctx, textColor, bgColor);
     return;
   }
 
-  if (animName === 'move right' || animName === 'move-right') {
+  if (animName === 'snow' || animName === 'bubble') {
     drawBg();
-    ctx.fillStyle = '#ffffff';
-    ctx.textAlign = 'left';
-    let curX = (offset % totalW) - tw;
-    ctx.fillText(text, curX, 10);
+    const align = tw <= 64 ? 'center' : 'left';
+    const bx = tw <= 64 ? 32 : 0;
+    const pts = getTextTargetPixels(ctx, text, ctx.font, align, ctx.textBaseline, bx, 10);
+
+    ctx.fillStyle = textColor;
+    const framesPerPage = 92;
+    const pageFrame = offset % framesPerPage;
+
+    if (animName === 'snow') {
+        for (let i = 0; i < pts.length; i++) {
+          const [px, py] = pts[i];
+          const delay = (px * 23 + 7) % 11;
+          const progress = pageFrame - delay;
+          if (progress >= py) ctx.fillRect(px, py, 1, 1);
+        }
+        ctx.fillStyle = '#ffffff';
+        const colsWithText = new Set();
+        pts.forEach(([px, py]) => colsWithText.add(px));
+        colsWithText.forEach(px => {
+          const delay = (px * 23 + 7) % 11;
+          const progress = pageFrame - delay;
+          if (progress >= 0 && progress < 20) ctx.fillRect(px, progress, 1, 1);
+        });
+    } else {
+        for (let i = 0; i < pts.length; i++) {
+          const [px, py] = pts[i];
+          const delay = (px * 17 + 5) % 11;
+          const progress = pageFrame - delay;
+          const curY = 19 - progress;
+          if (py >= curY) ctx.fillRect(px, py, 1, 1);
+        }
+        ctx.fillStyle = '#ffffff';
+        const colsWithText = new Set();
+        pts.forEach(([px, py]) => colsWithText.add(px));
+        colsWithText.forEach(px => {
+          const delay = (px * 17 + 5) % 11;
+          const progress = pageFrame - delay;
+          if (progress >= 0) {
+            const curY = 19 - progress;
+            if (curY >= 0 && curY < 20) ctx.fillRect(px, curY, 1, 1);
+          }
+        });
+    }
+
     apply1BitThreshold(ctx, textColor, bgColor);
     return;
   }
-  
+
   const align = tw <= 64 ? 'center' : 'left';
   const bx = tw <= 64 ? 32 : 0;
-  const pts = getTextTargetPixels(ctx, text, ctx.font, align, ctx.textBaseline, bx, 10);
   
-  drawBg();
-  
-  if (animName === 'move up' || animName === 'move-up') {
-    drawBg();
-    ctx.fillStyle = '#ffffff';
-    let curYOffset = 0;
-    if (pageFrame < 16) {
-       const prog = pageFrame / 16.0;
-       curYOffset = Math.round(20 * (1.0 - prog));
-    } else if (pageFrame < 76) {
-       curYOffset = 0;
-    } else {
-       const prog = (pageFrame - 76) / 16.0;
-       curYOffset = Math.round(-20 * prog);
-    }
-    for (let i = 0; i < pts.length; i++) {
-      const [px, py] = pts[i];
-      const destY = py + curYOffset;
-      if (destY >= 0 && destY < 20) {
-        ctx.fillRect(px, destY, 1, 1);
-      }
-    }
-    apply1BitThreshold(ctx, textColor, bgColor);
-    return;
-  }
-  
-  if (animName === 'move down' || animName === 'move-down') {
-    drawBg();
-    ctx.fillStyle = '#ffffff';
-    let curYOffset = 0;
-    if (pageFrame < 16) {
-       const prog = pageFrame / 16.0;
-       curYOffset = Math.round(-20 * (1.0 - prog));
-    } else if (pageFrame < 76) {
-       curYOffset = 0;
-    } else {
-       const prog = (pageFrame - 76) / 16.0;
-       curYOffset = Math.round(20 * prog);
-    }
-    for (let i = 0; i < pts.length; i++) {
-      const [px, py] = pts[i];
-      const destY = py + curYOffset;
-      if (destY >= 0 && destY < 20) {
-        ctx.fillRect(px, destY, 1, 1);
-      }
-    }
-    apply1BitThreshold(ctx, textColor, bgColor);
-    return;
-  }
 
-  if (animName === 'snow') {
-    ctx.fillStyle = '#ffffff';
-    for (let i = 0; i < pts.length; i++) {
-      const [px, py] = pts[i];
-      if (pageFrame < 76) {
-        const delay = (px * 11) % 15 + (19 - py) * 2;
-        const activeFrame = pageFrame - delay;
-        if (activeFrame >= 0) {
-          const curY = Math.floor(activeFrame * 1.5);
-          ctx.fillRect(px, Math.min(py, curY), 1, 1);
-        }
-      } else {
-        ctx.fillRect(px, py, 1, 1);
-      }
-    }
-    apply1BitThreshold(ctx, textColor, bgColor);
-    return;
-  }
-  
-  if (animName === 'bubble') {
-    ctx.fillStyle = '#ffffff';
-    for (let i = 0; i < pts.length; i++) {
-      const [px, py] = pts[i];
-      if (pageFrame < 76) {
-        const delay = (px * 11) % 15 + py * 2;
-        const activeFrame = pageFrame - delay;
-        if (activeFrame >= 0) {
-          const curY = 19 - Math.floor(activeFrame * 1.5);
-          ctx.fillRect(px, Math.max(py, curY), 1, 1);
-        }
-      } else {
-        ctx.fillRect(px, py, 1, 1);
-      }
-    }
-    apply1BitThreshold(ctx, textColor, bgColor);
-    return;
-  }
 
   if (animName === 'flicker') {
-    let opacity = 1.0;
+    const framesPerPage = 60;
+    const pageFrame = offset % framesPerPage;
+    const opacity = (pageFrame < 30) ? 1.0 : 0.0;
+    
+    drawBg();
+    ctx.fillStyle = '#ffffff';
     if (pageFrame < 30) {
-      opacity = 1.0;
-      ctx.fillStyle = '#ffffff';
+      const pts = getTextTargetPixels(ctx, text, ctx.font, align, ctx.textBaseline, bx, 10);
       for (let i = 0; i < pts.length; i++) {
         const [tx, ty] = pts[i];
         ctx.fillRect(tx, ty, 1, 1);
       }
-    } else {
-      opacity = 0.0;
     }
     apply1BitThreshold(ctx, textColor, bgColor, opacity);
     return;
   }
-  
-  drawBg();
+
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = align;
   ctx.fillText(text, bx, 10);
   apply1BitThreshold(ctx, textColor, bgColor);
+  return;
 };
 
 const TextPresetCardPreview = ({ preset }) => {
@@ -1225,7 +1203,7 @@ export default function App() {
   const [allSavedPresets, setAllSavedPresets] = useState({});
 
   const activeMac = status.address?.toUpperCase() || DEFAULT_MAC;
-  const savedPresets = allSavedPresets[activeMac] || Array(36).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }));
+  const savedPresets = (allSavedPresets[activeMac] || Array(12).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }))).slice(0, 12);
 
   const setSavedPresets = (nextSaved) => {
     setAllSavedPresets(prev => ({ ...prev, [activeMac]: nextSaved }));
@@ -2520,46 +2498,16 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             </div>
             {/* Controls and Collapse Chevron in Top Right */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-              {!isSavedCollapsed && totalSavedPages > 1 && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
-                  <button
-                    className="btn-styled inactive"
-                    style={{ padding: '4px 8px', minWidth: 'auto', background: 'rgba(255,255,255,0.05)', borderRadius: '6px' }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSavedPage(p => Math.max(0, p - 1));
-                    }}
-                    disabled={savedPage === 0}
-                  >
-                    <ChevronLeft size={12} />
-                  </button>
-                  <span className="text-[10px] font-bold text-slate-400">{savedPage + 1} / {totalSavedPages}</span>
-                  <button
-                    className="btn-styled inactive"
-                    style={{ padding: '4px 8px', minWidth: 'auto', background: 'rgba(255,255,255,0.05)', borderRadius: '6px' }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSavedPage(p => Math.min(totalSavedPages - 1, p + 1));
-                    }}
-                    disabled={savedPage >= totalSavedPages - 1}
-                  >
-                    <ChevronRight size={12} />
-                  </button>
-                </div>
-              )}
-
               <div style={{ display: 'flex', alignItems: 'center' }}>
                 <ChevronRight 
                   size={18} 
                   className="text-slate-400 transition-transform duration-200 hover:text-white" 
-                  style={{ transform: isSavedCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }} 
+                  style={{ transform: isSavedCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }} 
                 />
               </div>
             </div>
           </div>
-          <p className="text-slate-400 text-sm w-full mb-8" style={{ maxWidth: 1100 }}>
-            Saved hardware preset slots on your LED sign
-          </p>
+          
 
           {!isSavedCollapsed && (
             <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
@@ -3348,7 +3296,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     dhBase: 20,
     timeFormat: '12h',
     showSeconds: true,
-    clockStyle: 'custom',
+    clockStyle: 'default',
     isDefault: false
   });
 
@@ -3669,32 +3617,15 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
     let textToDraw = '';
     if (form.mode === 'text') {
-      textToDraw = form.text || '';
-      ctx.font = '18px Arial, sans-serif';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
+      const textColor = form.textColor || '#ffffff';
+      const bgColor = form.bgColor || '#000000';
+      const animName = form.animation || 'show now';
       
-      const tw = ctx.measureText(textToDraw).width;
-      let x = 32 - (tw / 2); // Center statically by default
-      let y = 10;
-      if (form.animation === 'shift left' || form.animation === 'continuous left shift' || form.animation === 'move-left') {
-         x = 64 - (scrollOffset % (64 + tw));
-      } else if (form.animation === 'move right' || form.animation === 'move-right') {
-         x = (scrollOffset % (64 + tw)) - tw;
-      } else if (form.animation === 'move up' || form.animation === 'move-up') {
-         y = 10 - (scrollOffset % 30);
-      } else if (form.animation === 'move down' || form.animation === 'move-down') {
-         y = -10 + (scrollOffset % 30);
-      } else if (form.animation === 'snow') {
-         y = -10 + (scrollOffset % 30);
-      } else if (form.animation === 'bubble') {
-         y = 10 - (scrollOffset % 30);
-      } else if (form.animation === 'flicker') {
-         if (Math.floor(scrollOffset / 4) % 2 === 1) {
-           ctx.fillStyle = 'black';
-         }
-      }
-      ctx.fillText(textToDraw, x, y);
+      // Because renderTextAnimation now uses performance.now() globally for 3-phase and sweeps,
+      // we can just call it and it will inherently stay in sync with the rest of the UI!
+      // But for flicker, continuous left shift, etc, we pass the local scrollOffset.
+      renderTextAnimation(ctx, form.text || '', animName, scrollOffset, textColor, bgColor);
+      
     } else {
       const hours = previewTime.getHours();
       if (form.clockStyle === 'default') {
@@ -3941,7 +3872,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         imgSrc: null, fileType: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20,
         timeFormat: '12h',
         showSeconds: true,
-        clockStyle: 'custom',
+        clockStyle: 'default',
         isDefault: false
       });
 
@@ -4017,13 +3948,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           <ChevronRight 
             size={18} 
             className="text-slate-400 transition-transform duration-200 hover:text-white"
-            style={{ transform: isLocalCollapsed ? 'rotate(0deg)' : 'rotate(90deg)' }}
+            style={{ transform: isLocalCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}
           />
         </div>
       </div>
-      <p className="text-slate-400 text-sm w-full mb-8" style={{ maxWidth: 1100 }}>
-        Presets and custom animations for your LED sign
-      </p>
+      
  
       {!isLocalCollapsed && (
         <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
@@ -4041,7 +3970,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 cursor: 'pointer'
               }}
               onClick={() => {
-                editingModeRef.current = 'text'; setEditingId(null); setForm({name: '', text: '', textColor: '#ffffff', bgColor: '#000000', animation: 'show now', speed: 8, rotation: 0, mode: 'text', pixels: Array(64 * 20).fill(0), spacing: 1, views: 1, imgSrc: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20, timeFormat: '12h', showSeconds: true, clockStyle: 'custom', isDefault: false}); setIsModalOpen(true);
+                editingModeRef.current = 'text'; setEditingId(null); setForm({name: '', text: '', textColor: '#ffffff', bgColor: '#000000', animation: 'show now', speed: 8, rotation: 0, mode: 'text', pixels: Array(64 * 20).fill(0), spacing: 1, views: 1, imgSrc: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20, timeFormat: '12h', showSeconds: true, clockStyle: 'default', isDefault: false}); setIsModalOpen(true);
               }}
             >
               <Plus className="text-emerald-400" size={24} />
@@ -4643,180 +4572,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         </button>
                       </div>
                     </div>
-                  ) : form.mode === 'clock' ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', marginTop: '8px', padding: '16px', background: 'rgba(255,255,255,0.02)', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                      {/* Style Toggle */}
+                  ) : form.mode === 'clock' ? null : (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        <span style={{ fontSize: '12px', fontWeight: 500, color: '#94a3b8', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Clock Style</span>
-                        <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-                          <button 
-                            type="button"
-                            onClick={() => setForm(prev => ({ ...prev, clockStyle: 'default' }))}
-                            className={`btn-styled text-[10px] px-4 py-2 rounded-full transition-all ${form.clockStyle === 'default' ? '' : 'inactive'}`}
-                            style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
-                          >
-                            Default
-                          </button>
-                          <button 
-                            type="button"
-                            onClick={() => setForm(prev => ({ ...prev, clockStyle: 'custom' }))}
-                            className={`btn-styled text-[10px] px-4 py-2 rounded-full transition-all ${form.clockStyle !== 'default' ? '' : 'inactive'}`}
-                            style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
-                          >
-                            Custom
-                          </button>
-                        </div>
-                      </div>
-
-                      {form.clockStyle !== 'default' && (
-                        <>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
-                            <HslColorSlider 
-                              label="Clock Colour" 
-                              value={form.textColor || '#10B981'} 
-                              onChange={val => setForm(prev => ({ ...prev, textColor: val }))} 
-                            />
-                            <HslColorSlider 
-                              label="Background Colour" 
-                              value={form.bgColor || '#000000'} 
-                              onChange={val => setForm(prev => ({ ...prev, bgColor: val }))} 
-                            />
-                          </div>
-
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', width: '100%' }}>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                              <span style={{ fontSize: '12px', fontWeight: 500, color: '#94a3b8', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Time Format</span>
-                              <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-                                <button 
-                                  type="button"
-                                  onClick={() => setForm(prev => ({ ...prev, timeFormat: '12h' }))}
-                                  className={`btn-styled text-[10px] px-4 py-2 rounded-full transition-all ${form.timeFormat !== '12h' ? 'inactive' : ''}`}
-                                  style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
-                                >
-                                  12-HOUR
-                                </button>
-                                <button 
-                                  type="button"
-                                  onClick={() => setForm(prev => ({ ...prev, timeFormat: '24h' }))}
-                                  className={`btn-styled text-[10px] px-4 py-2 rounded-full transition-all ${form.timeFormat !== '24h' ? 'inactive' : ''}`}
-                                  style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
-                                >
-                                  24-HOUR
-                                </button>
-                              </div>
-                            </div>
-
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                              <span style={{ fontSize: '12px', fontWeight: 500, color: '#94a3b8', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Show Seconds</span>
-                              <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-                                <button 
-                                  type="button"
-                                  onClick={() => setForm(prev => ({ ...prev, showSeconds: true }))}
-                                  className={`btn-styled text-[10px] px-4 py-2 rounded-full transition-all ${form.showSeconds === false ? 'inactive' : ''}`}
-                                  style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
-                                >
-                                  ON
-                                </button>
-                                <button 
-                                  type="button"
-                                  onClick={() => setForm(prev => ({ ...prev, showSeconds: false }))}
-                                  className={`btn-styled text-[10px] px-4 py-2 rounded-full transition-all ${form.showSeconds !== false ? 'inactive' : ''}`}
-                                  style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
-                                >
-                                  OFF
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  ) : form.mode === 'image' ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', width: '100%' }}>
-                      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '16px', width: '100%' }}>
-                        <input 
-                          type="file" 
-                          id="img-upload" 
-                          hidden 
-                          accept="image/*,video/*"
-                          onChange={e => handleMediaFile(e.target.files?.[0])}
-                        />
-                        {form.imgSrc && (
-                          <>
-                            <div className="brightness-rail glass-panel" style={{ padding: '12px 16px', flex: 1, width: 'auto', display: 'flex', alignItems: 'center', gap: '14px' }}>
-                              <Search className="text-emerald-400 flex-shrink-0" size={17} />
-                              <input 
-                                type="range" min="0.1" max="10.0" step="0.05" 
-                                value={form.zoom || 1} 
-                                onChange={e => {
-                                  const newZoom = parseFloat(e.target.value);
-                                  if (!imageObjRef.current) return;
-                                  const oldZoom = form.zoom || 1.0;
-                                  const oldX = form.canvasX || 0;
-                                  const oldY = form.canvasY || 0;
-                                  
-                                  const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
-                                  const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
-                                  
-                                  const nextPixels = runCropRender(
-                                    imageObjRef.current,
-                                    newX,
-                                    newY,
-                                    form.dwBase * newZoom,
-                                    form.dhBase * newZoom,
-                                    form.bgColor || '#000000'
-                                  );
-                                  
-                                  setForm(prev => ({
-                                    ...prev,
-                                    zoom: newZoom,
-                                    canvasX: newX,
-                                    canvasY: newY,
-                                    pixels: nextPixels
-                                  }));
-                                }}
-                                className="h-slider"
-                              />
-                              <span className="font-bold text-slate-500 w-12 text-[10px] text-right">{(form.zoom || 1).toFixed(1)}x</span>
-                            </div>
-                            <button
-                              onClick={() => {
-                                if (imageObjRef.current && typeof imageObjRef.current.pause === 'function') {
-                                  imageObjRef.current.pause();
-                                }
-                                imageObjRef.current = null;
-                                setForm(prev => ({
-                                  ...prev,
-                                  imgSrc: '',
-                                  fileType: null,
-                                  pixels: Array(64 * 20).fill(0),
-                                  zoom: 1.0,
-                                  canvasX: 0,
-                                  canvasY: 0,
-                                  bgColor: '#000000'
-                                }));
-                              }}
-                              className="btn-styled text-[10px] px-4 py-2 bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25"
-                              style={{ padding: '12px 16px', borderRadius: '18px', display: 'inline-flex', alignItems: 'center', gap: '8px', whiteSpace: 'nowrap', flexShrink: 0 }}
-                            >
-                              <Trash2 size={14} /> Remove Image
-                            </button>
-                          </>
-                        )}
-                      </div>
-                      {form.imgSrc && (
-                        <div style={{ marginTop: '8px' }}>
-                          <HslColorSlider 
-                            label="Background Colour" 
-                            value={form.bgColor || '#000000'} 
-                            onChange={val => setForm(prev => ({ ...prev, bgColor: val }))} 
-                          />
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      <label className="text-[10px] font-bold text-slate-500 uppercase ml-1">Display Text (Max 25 chars)</label>
+                        <label className="text-[10px] font-bold text-slate-500 uppercase ml-1">Display Text (Max 25 chars)</label>
                       <input 
                         className="input-field w-full" 
                         value={form.text} 

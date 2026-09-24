@@ -134,7 +134,7 @@ current_clock_style: str = "default"
 
 # Hardware Slots State
 # Hardware Slots State
-hardware_slots_state = {i: {"slot_id": i, "occupied": False, "key": ""} for i in range(12)}
+hardware_slots_state = {i: {"slot_id": i, "occupied": False, "key": ""} for i in range(60)}
 notification_buffer = bytearray()
 
 def notification_handler(sender, data: bytearray):
@@ -179,7 +179,7 @@ def notification_handler(sender, data: bytearray):
                     s_id = entries[i]
                     s_key = entries[i+1:i+21]
                     is_occ = any(b != 0 for b in s_key)
-                    if 0 <= s_id < 12:
+                    if 0 <= s_id < 60:
                         hardware_slots_state[s_id] = {
                             "slot_id": s_id,
                             "occupied": is_occ,
@@ -425,13 +425,9 @@ async def connect(req: ConnectRequest):
         client = None
         print(f"[connect] Discovering LED sign (requested: {req.address})...")
         device = None
+        # Temporarily disabled find_device_by_address because it crashes WinRT handles
         if req.address:
-            try:
-                device = await BleakScanner.find_device_by_address(req.address, timeout=8.0)
-                if device:
-                    print(f"[connect] Found exact requested MAC via find_device: {device.name} ({device.address})")
-            except Exception as fe:
-                print(f"[connect] find_device_by_address fallback: {fe}")
+            pass
 
         if not device:
             devices_dict = await BleakScanner.discover(timeout=7.0, return_adv=True)
@@ -538,10 +534,10 @@ async def connect(req: ConnectRequest):
         # Stop any hardware clock and halt boot playlist immediately upon connection
         await stop_all_playback(blank=False)
         try:
-            # Query hardware slot inventory
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 10), response=True)
-            await asyncio.sleep(0.05)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(10, 2), response=True)
+            # Query hardware slot inventory (up to 60 slots)
+            for i in range(0, 60, 10):
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(i, 10), response=True)
+                await asyncio.sleep(0.05)
         except Exception as se:
             print(f"[connect] Warning initializing slots: {se}")
         
@@ -965,30 +961,35 @@ def quantize_frames(frames_pixels: List[List[Any]], bg_color_hex: str) -> List[L
 
 def save_gif_preview(frames_pixels: List[List[Any]], bg_color_hex: str, delay_sec: float, path: str):
     """Slices the stitched pixels, creates PIL images, and atomically saves as animated GIF."""
-    def hex_to_rgb(hex_str: Optional[str]):
-        if not hex_str:
-            return (0, 0, 0)
-        hex_str = hex_str.lstrip('#')
-        if len(hex_str) != 6:
-            return (255, 255, 255)
-        return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+    if not frames_pixels:
+        return
+    if hasattr(frames_pixels[0], "save"):
+        pil_frames = frames_pixels
+    else:
+        def hex_to_rgb(hex_str: Optional[str]):
+            if not hex_str:
+                return (0, 0, 0)
+            hex_str = hex_str.lstrip('#')
+            if len(hex_str) != 6:
+                return (255, 255, 255)
+            return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+            
+        bg_rgb = hex_to_rgb(bg_color_hex)
+        pil_frames = []
         
-    bg_rgb = hex_to_rgb(bg_color_hex)
-    pil_frames = []
-    
-    for f_pixels in frames_pixels:
-        frame_rgbs = []
-        for p in f_pixels:
-            if p is None or p == 0 or p == "0" or p == "#000000" or p is False:
-                frame_rgbs.append(bg_rgb)
-            elif isinstance(p, str) and p.startswith("#"):
-                frame_rgbs.append(hex_to_rgb(p))
-            else:
-                frame_rgbs.append((255, 255, 255) if p else bg_rgb)
-                
-        img = Image.new("RGB", (64, 20))
-        img.putdata(frame_rgbs)
-        pil_frames.append(img)
+        for f_pixels in frames_pixels:
+            frame_rgbs = []
+            for p in f_pixels:
+                if p is None or p == 0 or p == "0" or p == "#000000" or p is False:
+                    frame_rgbs.append(bg_rgb)
+                elif isinstance(p, str) and p.startswith("#"):
+                    frame_rgbs.append(hex_to_rgb(p))
+                else:
+                    frame_rgbs.append((255, 255, 255) if p else bg_rgb)
+                    
+            img = Image.new("RGB", (64, 20))
+            img.putdata(frame_rgbs)
+            pil_frames.append(img)
         
     if not pil_frames:
         return
@@ -1423,51 +1424,60 @@ def generate_text_animation_frames(text: str, anim_name: str, render_font, fg_rg
                 pil_frames.append(fp.convert('RGB'))
 
         elif anim_clean == "snow":
-            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and text_strip.getpixel((px - x_center, py))]
-            target_by_col = {}
-            for px, py in target_pts:
-                target_by_col.setdefault(px, []).append(py)
-
+            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and py < text_strip.height and text_strip.getpixel((px - x_center, py))]
+            cols_with_text = set(px for (px, py) in target_pts)
+            
             for fi in range(92):
                 fp = Image.new('P', (PANEL_W, PANEL_H), 0)
                 fp.putpalette(pal)
-                if fi < 76:
-                    for px, py_list in target_by_col.items():
-                        col_delay = (px * 23 + 7) % 11
-                        progress = fi - col_delay
-                        if progress >= 0:
-                            y_lead = progress
-                            for py in py_list:
-                                if py <= y_lead:
-                                    fp.putpixel((px, py), 1)
-                            if 0 <= y_lead < PANEL_H:
-                                fp.putpixel((px, y_lead), 2)
+                
+                # Draw the sweep particles ONLY on columns with text
+                for px in cols_with_text:
+                    col_delay = (px * 23 + 7) % 11
+                    progress = fi - col_delay
+                    if progress >= 0:
+                        y_lead = progress
+                        if 0 <= y_lead < PANEL_H:
+                            fp.putpixel((px, y_lead), 2)
+                            
+                # Draw the revealed text
+                for (px, py) in target_pts:
+                    col_delay = (px * 23 + 7) % 11
+                    progress = fi - col_delay
+                    if progress >= py:
+                        fp.putpixel((px, py), 1)
+                        
                 pil_frames.append(fp.convert('RGB'))
 
         elif anim_clean == "bubble":
-            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and text_strip.getpixel((px - x_center, py))]
-            target_by_col = {}
-            for px, py in target_pts:
-                target_by_col.setdefault(px, []).append(py)
-
+            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and py < text_strip.height and text_strip.getpixel((px - x_center, py))]
+            cols_with_text = set(px for (px, py) in target_pts)
+            
             for fi in range(92):
                 fp = Image.new('P', (PANEL_W, PANEL_H), 0)
                 fp.putpalette(pal)
-                if fi < 76:
-                    for px, py_list in target_by_col.items():
-                        col_delay = (px * 17 + 5) % 11
-                        progress = fi - col_delay
-                        if progress >= 0:
-                            y_lead = 19 - progress
-                            for py in py_list:
-                                if py >= y_lead:
-                                    fp.putpixel((px, py), 1)
-                            if 0 <= y_lead < PANEL_H:
-                                fp.putpixel((px, y_lead), 2)
+                
+                # Draw the sweep particles ONLY on columns with text
+                for px in cols_with_text:
+                    col_delay = (px * 17 + 5) % 11
+                    progress = fi - col_delay
+                    if progress >= 0:
+                        y_lead = 19 - progress
+                        if 0 <= y_lead < PANEL_H:
+                            fp.putpixel((px, y_lead), 2)
+                            
+                # Draw the revealed text
+                for (px, py) in target_pts:
+                    col_delay = (px * 17 + 5) % 11
+                    progress = fi - col_delay
+                    y_lead = 19 - progress
+                    if py >= y_lead:
+                        fp.putpixel((px, py), 1)
+                        
                 pil_frames.append(fp.convert('RGB'))
 
         elif anim_clean == "flicker":
-            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and text_strip.getpixel((px - x_center, py))]
+            target_pts = [(px, py) for py in range(PANEL_H) for px in range(PANEL_W) if (0 <= px - x_center < tw) and py < text_strip.height and text_strip.getpixel((px - x_center, py))]
             import random
             random.seed(42)
             for fi in range(60):
@@ -1507,7 +1517,69 @@ async def push_text(req: PushTextRequest):
         pass
 
     try:
-        if req.pixels is not None:
+        if req.mode == "text" or (req.pixels is None and req.text):
+            unifont_path = os.path.join(os.path.dirname(__file__), "unifont.otf")
+            try:
+                if os.path.exists(unifont_path):
+                    render_font = ImageFont.truetype(unifont_path, 16)
+                else:
+                    render_font = ImageFont.truetype("arialbd.ttf", 16)
+            except Exception:
+                try:
+                    render_font = ImageFont.truetype("arialbd.ttf", 16)
+                except Exception:
+                    try:
+                        render_font = ImageFont.truetype("arial.ttf", 16)
+                    except Exception:
+                        render_font = ImageFont.load_default()
+
+            fg_rgb = hex_to_rgb_global(req.textColor or "#FFFFFF", (255, 255, 255))
+            bg_rgb = hex_to_rgb_global(req.bgColor or "#000000", (0, 0, 0))
+            anim_clean = (req.animation or "show now").strip().lower()
+            speed = req.speed if req.speed is not None else current_speed
+            
+            is_anim = anim_clean not in ("static", "show now")
+            if is_anim:
+                frames, frame_delay_ms, delay_sec = generate_text_animation_frames(
+                    req.text or "", anim_clean, render_font, fg_rgb, bg_rgb, speed
+                )
+            else:
+                frames, frame_delay_ms, delay_sec = generate_text_animation_frames(
+                    req.text or "", "static", render_font, fg_rgb, bg_rgb, speed
+                )
+                
+            gif_path = os.path.join(STATIC_DIR, "current.gif")
+            save_gif_preview(frames, req.bgColor or "#000000", delay_sec, gif_path)
+            
+            png_path = os.path.join(STATIC_DIR, "current.png")
+            if os.path.exists(png_path):
+                try: os.remove(png_path)
+                except: pass
+                
+            current_width = 64
+            current_display_mode = "animation" if is_anim else "static"
+            frames_sent += 1
+            
+            if connected_client and connected_client.is_connected and connection_ready:
+                await stop_all_playback(blank=True)
+                anim_frames_pixels = []
+                for pf in frames:
+                    f_pixels = []
+                    for p in list(pf.getdata()):
+                        if p == (255, 255, 255):
+                            f_pixels.append("#ffffff")
+                        elif p[0] > 50 or p[1] > 50 or p[2] > 50:
+                            f_pixels.append(req.textColor)
+                        else:
+                            f_pixels.append(None)
+                    anim_frames_pixels.append(f_pixels)
+                    
+                active_scroller_task = asyncio.create_task(
+                    animation_worker(anim_frames_pixels, req.bgColor, speed, frame_duration_ms=frame_delay_ms)
+                )
+            return {"status": "success"}
+            
+        elif req.pixels is not None:
             is_anim = req.fileType in ("gif", "video") or (len(req.pixels) > 1280)
             if is_anim:
                 num_frames = len(req.pixels) // 1280
@@ -2311,9 +2383,6 @@ async def save_preset(req: SavePresetRequest):
     
     if preset.mode == 'clock':
         raise HTTPException(status_code=400, detail="Clocks cannot be saved to hardware slots.")
-        
-    if connected_client and connected_client.is_connected and connection_ready:
-        await stop_all_playback(blank=True)
 
     try:
         # Step 1: Render the preset content to standard GIF bytes
@@ -2525,6 +2594,8 @@ async def save_preset(req: SavePresetRequest):
                         raise Exception("BLE disconnected after commit")
 
                     # Select and play the newly saved user slot once
+                    if connected_client and connected_client.is_connected and connection_ready:
+                        await stop_all_playback(blank=False)
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
@@ -2576,6 +2647,8 @@ async def save_preset(req: SavePresetRequest):
                         raise Exception("BLE disconnected after commit")
 
                     # Select and play the newly saved user slot once
+                    if connected_client and connected_client.is_connected and connection_ready:
+                        await stop_all_playback(blank=False)
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
