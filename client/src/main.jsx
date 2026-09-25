@@ -9,6 +9,11 @@ link.href = 'https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&di
 link.rel = 'stylesheet';
 document.head.appendChild(link);
 
+// Explicitly preload and register Unifont into document.fonts
+if (typeof document !== 'undefined' && document.fonts) {
+  document.fonts.load('16px "Unifont"');
+}
+
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);

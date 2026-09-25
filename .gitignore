@@ -20,9 +20,15 @@ loy_source/
 
 # Credentials & secrets
 server/credentials.json
+server/token.json
 
 # Scratch scripts and temporary files
 scratch/
+/*.py
+/*.js
+/*.png
+/*.gif
+/*.txt
 all_writes.txt
 functions.txt
 8args.txt

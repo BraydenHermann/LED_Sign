@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 
 const API_BASE = '';
-const DEFAULT_MAC = 'FF:24:10:29:44:9B';
+const DEFAULT_MAC = 'FF:24:10:29:03:1C';
 const SCAN_PAGE_SIZE = 6;
 const PANEL_W = 64;
 const PANEL_H = 20;
@@ -160,25 +160,25 @@ function getEventDisplayString(ev) {
       hour12: true 
     });
     const rawEndTimeStr = timeFmt.format(endD).toLowerCase();
-    // Remove am/pm from the sign end time so more characters are available for event titles
-    const endTimeStr = rawEndTimeStr.replace(/\s*(am|pm)/gi, '').trim();
+    const shortEndTimeStr = rawEndTimeStr.replace(/\s*(am|pm)/gi, '').trim();
 
-    // The sign scrolls continuously — cap the display string at 25 chars.
-    // If the title fits: "(title) - (end time)"
-    // If truncated:      "(title)... (end time)"  — no " - " to save chars
     const maxLen = 25;
-    const suffixFull = ` - ${endTimeStr}`;      // e.g. " - 12:45"
-    const suffixShort = `... ${endTimeStr}`;     // e.g. "... 12:45"
+    const withAmPm = `${summary} - ${rawEndTimeStr}`;
+    const withShort = `${summary} - ${shortEndTimeStr}`;
 
     let signText;
-    if (summary.length + suffixFull.length <= maxLen) {
-      // Title fits with full suffix
-      signText = `${summary}${suffixFull}`;
+    if (withAmPm.length <= maxLen) {
+      // If the event title and end time fit within the 25 character limit, include the am/pm labels
+      signText = withAmPm;
+    } else if (withShort.length <= maxLen) {
+      // Otherwise, do not include it
+      signText = withShort;
     } else {
-      // Need to truncate — use the shorter suffix (no " - ")
-      const maxTitleLen = maxLen - suffixShort.length;
+      // Need to truncate title — do not include am/pm to save characters
+      const suffix = `... ${shortEndTimeStr}`;
+      const maxTitleLen = maxLen - suffix.length;
       const truncTitle = summary.slice(0, Math.max(0, maxTitleLen)).trimEnd();
-      signText = `${truncTitle}${suffixShort}`;
+      signText = `${truncTitle}${suffix}`;
     }
 
     // Internal pipe-delimited format used by handlePush: "display ||| start - end"
@@ -794,6 +794,31 @@ const parseHexColor = (hex, def = [255, 255, 255]) => {
 const textPreviewCache = new Map();
 
 
+const useFontReady = () => {
+  const [ready, setReady] = useState(() => {
+    if (typeof document === 'undefined' || !document.fonts) return true;
+    return document.fonts.check ? document.fonts.check('16px "Unifont"') : true;
+  });
+
+  useEffect(() => {
+    if (ready) return;
+    if (typeof document !== 'undefined' && document.fonts) {
+      let isMounted = true;
+      Promise.all([
+        document.fonts.ready,
+        document.fonts.load('16px "Unifont"')
+      ]).then(() => {
+        if (isMounted) setReady(true);
+      }).catch(() => {
+        if (isMounted) setReady(true);
+      });
+      return () => { isMounted = false; };
+    }
+  }, [ready]);
+
+  return ready;
+};
+
 const getTextTargetPixels = (ctx, text, font, align, baseline, x, y) => {
   const offCanvas = document.createElement('canvas');
   offCanvas.width = 64;
@@ -811,7 +836,7 @@ const getTextTargetPixels = (ctx, text, font, align, baseline, x, y) => {
   for (let py = 0; py < 20; py++) {
     for (let px = 0; px < 64; px++) {
       const i = (py * 64 + px) * 4;
-      if (data[i] > 100 || data[i+1] > 100 || data[i+2] > 100) {
+      if (data[i] > 140 || data[i+1] > 140 || data[i+2] > 140) {
         pts.push([px, py]);
       }
     }
@@ -825,7 +850,7 @@ const apply1BitThreshold = (ctx, textColor, bgColor, globalOpacity = 1.0) => {
   const imgData = ctx.getImageData(0, 0, 64, 20);
   const data = imgData.data;
   for (let i = 0; i < data.length; i += 4) {
-    const isLit = (data[i] > 100 || data[i+1] > 100 || data[i+2] > 100) && data[i+3] > 100;
+    const isLit = (data[i] > 140 || data[i+1] > 140 || data[i+2] > 140) && data[i+3] > 140;
     if (isLit) {
       data[i] = Math.round(tc[0] * globalOpacity + bc[0] * (1 - globalOpacity));
       data[i+1] = Math.round(tc[1] * globalOpacity + bc[1] * (1 - globalOpacity));
@@ -844,7 +869,7 @@ const apply1BitThreshold = (ctx, textColor, bgColor, globalOpacity = 1.0) => {
 const renderTextAnimation = (ctx, text, animName, offset, textColor = '#ffffff', bgColor = '#000000') => {
   ctx.imageSmoothingEnabled = false;
   
-  ctx.font = '18px Arial, sans-serif';
+  ctx.font = 'normal 16px "Unifont", monospace, sans-serif';
   ctx.textBaseline = 'middle';
   
   const drawBg = () => {
@@ -981,6 +1006,7 @@ const renderTextAnimation = (ctx, text, animName, offset, textColor = '#ffffff',
     return;
   }
 
+  drawBg();
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = align;
   ctx.fillText(text, bx, 10);
@@ -989,6 +1015,7 @@ const renderTextAnimation = (ctx, text, animName, offset, textColor = '#ffffff',
 };
 
 const TextPresetCardPreview = ({ preset }) => {
+  const fontReady = useFontReady();
   const canvasRef = useRef(null);
   const scrollOffsetRef = useRef(0);
 
@@ -1032,7 +1059,7 @@ const TextPresetCardPreview = ({ preset }) => {
       active = false;
       if (animInterval) clearInterval(animInterval);
     };
-  }, [textToDraw, textColor, bgColor, animName, isAnimating, animationSpeed]);
+  }, [textToDraw, textColor, bgColor, animName, isAnimating, animationSpeed, fontReady]);
 
   return (
     <canvas 
@@ -1045,8 +1072,59 @@ const TextPresetCardPreview = ({ preset }) => {
   );
 };
 
+export const normalizeSavedPresets = (list) => {
+  if (!Array.isArray(list)) {
+    return Array(12).fill(null).map((_, i) => ({ slotNumber: i + 1, hwSlotId: i, preset: null }));
+  }
+  const normalized = list.slice(0, 12).map((item, idx) => {
+    let hwId = item?.hwSlotId;
+    if (hwId === undefined || hwId === null) {
+      if (item?.preset?.hwSlotId !== undefined && item?.preset?.hwSlotId !== null) {
+        hwId = item.preset.hwSlotId;
+      } else if (item?.preset?.slot_id !== undefined && item?.preset?.slot_id !== null) {
+        hwId = item.preset.slot_id;
+      } else if (typeof item?.preset?.id === 'string' && item.preset.id.startsWith('hw-slot-')) {
+        const parsed = parseInt(item.preset.id.split('-')[2], 10);
+        if (!isNaN(parsed)) hwId = parsed;
+      } else if (item?.slotNumber !== undefined && item?.slotNumber !== null) {
+        hwId = item.slotNumber - 1;
+      } else {
+        hwId = idx;
+      }
+    }
+    const preset = item?.preset ? {
+      ...item.preset,
+      hwSlotId: hwId,
+      id: item.preset.id || `hw-slot-${hwId}`
+    } : null;
+    return {
+      slotNumber: item?.slotNumber || (idx + 1),
+      hwSlotId: hwId,
+      preset
+    };
+  });
+
+  while (normalized.length < 12) {
+    const nextIdx = normalized.length;
+    const usedIds = new Set(normalized.map(s => s.hwSlotId));
+    let freeHwId = nextIdx;
+    for (let h = 0; h < 12; h++) {
+      if (!usedIds.has(h)) {
+        freeHwId = h;
+        break;
+      }
+    }
+    normalized.push({
+      slotNumber: nextIdx + 1,
+      hwSlotId: freeHwId,
+      preset: null
+    });
+  }
+  return normalized;
+};
 
 export default function App() {
+  const fontReady = useFontReady();
   const [activeTab, setActiveTab] = useState('dashboard');
   const [status, setStatus] = useState({
     connected: false, address: null, preview_url: null,
@@ -1060,7 +1138,13 @@ export default function App() {
   const [savedDragOverIdx, setSavedDragOverIdx] = useState(null);
   
   const [power, setPower] = useState(false);
-  const [macAddress, setMacAddress] = useState(localStorage.getItem('loy_mac') || '');
+  const [macAddress, setMacAddress] = useState(() => {
+    const saved = localStorage.getItem('loy_mac') || '';
+    if (saved && !saved.startsWith('FF:24:10:29:')) {
+      return DEFAULT_MAC;
+    }
+    return saved || DEFAULT_MAC;
+  });
   const [isConnecting, setIsConnecting] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
   const [apiError, setApiError] = useState(false);
@@ -1070,14 +1154,35 @@ export default function App() {
   const [pushing, setPushing] = useState(false);
   const autoConnectTried = useRef(false);
 
+  const pushMsgTimer = useRef(null);
   const handleSetPushMessage = (msg) => {
     setPushMessage(msg);
-    if (msg) setLocalPushMessage('');
+    if (msg) {
+      setLocalPushMessage('');
+    }
+    if (pushMsgTimer.current) clearTimeout(pushMsgTimer.current);
+    if (msg && !msg.endsWith('...') && !msg.toLowerCase().includes('error')) {
+      pushMsgTimer.current = setTimeout(() => {
+        setPushMessage('');
+      }, 4000);
+    }
   };
 
   const handleSetLocalPushMessage = (msg) => {
     setLocalPushMessage(msg);
-    if (msg) setPushMessage('');
+    if (msg) {
+      setPushMessage('');
+    }
+    if (pushMsgTimer.current) clearTimeout(pushMsgTimer.current);
+    if (msg && !msg.endsWith('...') && !msg.toLowerCase().includes('error')) {
+      pushMsgTimer.current = setTimeout(() => {
+        setLocalPushMessage('');
+      }, 4000);
+    }
+  };
+
+  const setUnifiedPushMessage = (msg) => {
+    handleSetLocalPushMessage(msg);
   };
 
   useEffect(() => {
@@ -1087,7 +1192,11 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => { localStorage.setItem('loy_mac', macAddress); }, [macAddress]);
+  useEffect(() => {
+    if (macAddress && macAddress.startsWith('FF:24:10:29:')) {
+      localStorage.setItem('loy_mac', macAddress);
+    }
+  }, [macAddress]);
 
   const [previewStamp, setPreviewStamp] = useState(Date.now());
   const lastPreviewTs = useRef(0);
@@ -1098,8 +1207,8 @@ export default function App() {
       const res = await axios.get(`${API_BASE}/status`);
       setStatus(res.data);
       if (res.data && res.data.connected === false) {
-        setPushMessage('');
-        setLocalPushMessage('');
+        setPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
+        setLocalPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
       }
       setApiError(false);
       setHasFetchedStatus(true);
@@ -1142,14 +1251,19 @@ export default function App() {
     try {
       const timeoutMs = 60000;
       const resPost = await axios.post(`${API_BASE}/connect`, { address: addr }, { timeout: timeoutMs });
-      const connectedAddr = resPost.data.address || addr;
-      setMacAddress(connectedAddr);
+      const connectedAddr = resPost.data?.address || addr;
+      if (connectedAddr && connectedAddr.toUpperCase().startsWith('FF:24:10:29:')) {
+        setMacAddress(connectedAddr);
+      }
       const res = await axios.get(`${API_BASE}/status`);
       setStatus(res.data);
       if (res.data.connected) {
         setScanOpen(false);
+        setConnectionFailed(false);
         if (res.data.power !== undefined) setPower(res.data.power);
         else setPower(true);
+      } else {
+        throw new Error("Server reported sign not connected");
       }
     } catch (e) {
       console.error(`[connect] ${isRetry ? 'Retry' : 'Attempt 1'} failed:`, e.message);
@@ -1223,19 +1337,38 @@ export default function App() {
   const [allSavedPresets, setAllSavedPresets] = useState({});
 
   const activeMac = status.address?.toUpperCase() || DEFAULT_MAC;
-  const savedPresets = (Array.isArray(allSavedPresets[activeMac]) ? allSavedPresets[activeMac] : Array(12).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }))).slice(0, 12);
+  const savedPresets = (() => {
+    const direct = allSavedPresets[activeMac];
+    if (Array.isArray(direct) && direct.some(s => s?.preset)) {
+      return normalizeSavedPresets(direct);
+    }
+    // Fallback: check any other MAC key in allSavedPresets that has saved presets
+    for (const key of Object.keys(allSavedPresets)) {
+      const candidate = allSavedPresets[key];
+      if (Array.isArray(candidate) && candidate.some(s => s?.preset)) {
+        return normalizeSavedPresets(candidate);
+      }
+    }
+    return normalizeSavedPresets(direct);
+  })();
 
   const setSavedPresets = (nextSaved) => {
     if (typeof nextSaved === 'function') {
       setAllSavedPresets(prev => {
-        const currentList = prev[activeMac] || Array(12).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }));
-        const result = nextSaved(currentList);
-        return { ...prev, [activeMac]: result };
+        const currentList = normalizeSavedPresets(prev[activeMac] || prev[DEFAULT_MAC]);
+        const result = normalizeSavedPresets(nextSaved(currentList));
+        return { ...prev, [activeMac]: result, [DEFAULT_MAC]: result, 'FF:24:10:29:03:1C': result, 'FF:24:10:29:44:9B': result };
       });
     } else {
-      setAllSavedPresets(prev => ({ ...prev, [activeMac]: nextSaved }));
+      const normalized = normalizeSavedPresets(nextSaved);
+      setAllSavedPresets(prev => ({ ...prev, [activeMac]: normalized, [DEFAULT_MAC]: normalized, 'FF:24:10:29:03:1C': normalized, 'FF:24:10:29:44:9B': normalized }));
     }
   };
+
+  const savedPresetsRef = useRef(savedPresets);
+  useEffect(() => {
+    savedPresetsRef.current = savedPresets;
+  }, [savedPresets]);
 
   // Load presets from IndexedDB (with migration from localStorage) on mount
   useEffect(() => {
@@ -1261,7 +1394,7 @@ export default function App() {
         
         // Migration from array to object
         if (Array.isArray(dbSavedPresets)) {
-          dbSavedPresets = { [DEFAULT_MAC]: dbSavedPresets };
+          dbSavedPresets = { [DEFAULT_MAC]: dbSavedPresets, 'FF:24:10:29:03:1C': dbSavedPresets, 'FF:24:10:29:44:9B': dbSavedPresets };
         } else if (!dbSavedPresets) {
           dbSavedPresets = {};
         }
@@ -1271,7 +1404,7 @@ export default function App() {
           try {
             const parsed = JSON.parse(savedLocal2);
             if (Array.isArray(parsed) && parsed.length > 0) {
-              dbSavedPresets = { ...dbSavedPresets, [DEFAULT_MAC]: parsed };
+              dbSavedPresets = { ...dbSavedPresets, [DEFAULT_MAC]: parsed, 'FF:24:10:29:03:1C': parsed, 'FF:24:10:29:44:9B': parsed };
             } else if (typeof parsed === 'object') {
               dbSavedPresets = { ...dbSavedPresets, ...parsed };
             }
@@ -1280,8 +1413,25 @@ export default function App() {
             console.error("Migration parse failed:", e);
           }
         }
+
+        const savedLegacy = localStorage.getItem('savedPresets');
+        if (savedLegacy) {
+          try {
+            const parsed = JSON.parse(savedLegacy);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              dbSavedPresets = { ...dbSavedPresets, [DEFAULT_MAC]: parsed, 'FF:24:10:29:03:1C': parsed, 'FF:24:10:29:44:9B': parsed };
+            }
+          } catch (e) {}
+        }
+
         if (dbSavedPresets && Object.keys(dbSavedPresets).length > 0) {
-           setAllSavedPresets(dbSavedPresets);
+          const populatedKey = Object.keys(dbSavedPresets).find(k => Array.isArray(dbSavedPresets[k]) && dbSavedPresets[k].some(s => s?.preset));
+          if (populatedKey) {
+            dbSavedPresets['FF:24:10:29:03:1C'] = dbSavedPresets['FF:24:10:29:03:1C'] || dbSavedPresets[populatedKey];
+            dbSavedPresets['FF:24:10:29:44:9B'] = dbSavedPresets['FF:24:10:29:44:9B'] || dbSavedPresets[populatedKey];
+            dbSavedPresets[DEFAULT_MAC] = dbSavedPresets[DEFAULT_MAC] || dbSavedPresets[populatedKey];
+          }
+          setAllSavedPresets(dbSavedPresets);
         }
 
         // Initialize default presets if empty
@@ -1373,9 +1523,11 @@ export default function App() {
       const next = [...currentList];
       next[1] = {
         slotNumber: 2,
+        hwSlotId: 1,
         preset: {
           ...def,
           id: 'hw-slot-1',
+          hwSlotId: 1,
           thumbnail: slot2?.thumbnail || def.thumbnail
         }
       };
@@ -1466,13 +1618,76 @@ export default function App() {
       const hwSlots = res.data?.slots;
       if (Array.isArray(hwSlots) && hwSlots.length > 0) {
         setAllSavedPresets(prev => {
-          const currentList = prev[activeMac] 
-            ? [...prev[activeMac]] 
-            : Array(36).fill(null).map((_, i) => ({ slotNumber: i + 1, preset: null }));
+          const rawList = prev[activeMac];
+          const currentList = normalizeSavedPresets(rawList);
           let updated = false;
           hwSlots.forEach(s => {
             const idx = s.slot_id;
             if (idx >= 0 && idx < 12) {
+              if (idx === 1) {
+                // Slot 2 is reserved for the Default Preset. Never clear it to null!
+                const defPreset = (presets || []).find(p => p.isDefault);
+                const pData = s.preset_data || defPreset;
+                const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : (defPreset?.thumbnail || null);
+                if (pData || previewUrl) {
+                  const hwPreset = {
+                    ...(pData || defPreset || {}),
+                    id: 'hw-slot-1',
+                    hwSlotId: 1,
+                    thumbnail: previewUrl || pData?.thumbnail || defPreset?.thumbnail,
+                    isHardware: false
+                  };
+                  const existing = currentList[1]?.preset;
+                  const existingKey = existing?.id + '|' + existing?.thumbnail;
+                  const newKey = hwPreset.id + '|' + hwPreset.thumbnail;
+                  if (existingKey !== newKey) {
+                    updated = true;
+                    currentList[1] = { slotNumber: 2, hwSlotId: 1, preset: hwPreset };
+                  }
+                }
+                return;
+              }
+
+              if (idx === 0) {
+                // Slot 1 is reserved for the Calendar. Preserve existing preset if server cache is empty.
+                const pData = s.preset_data;
+                const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
+                if (!pData && !previewUrl && currentList[0]?.preset) {
+                  return;
+                }
+                if (pData || previewUrl) {
+                  const hwPreset = {
+                    ...(pData || {}),
+                    id: 'hw-slot-0',
+                    hwSlotId: 0,
+                    thumbnail: previewUrl || pData?.thumbnail,
+                    isHardware: false
+                  };
+                  const existing = currentList[0]?.preset;
+                  const existingKey = existing?.id + '|' + existing?.thumbnail;
+                  const newKey = hwPreset.id + '|' + hwPreset.thumbnail;
+                  if (existingKey !== newKey) {
+                    updated = true;
+                    currentList[0] = { slotNumber: 1, hwSlotId: 0, preset: hwPreset };
+                  }
+                }
+                return;
+              }
+
+              // Match by hwSlotId to preserve custom user card order
+              let targetSlotIndex = currentList.findIndex(item =>
+                item?.hwSlotId === idx ||
+                item?.preset?.hwSlotId === idx ||
+                item?.preset?.id === `hw-slot-${idx}`
+              );
+              if (targetSlotIndex === -1 && idx < currentList.length) {
+                targetSlotIndex = idx;
+              }
+
+              if (currentList[targetSlotIndex]?.preset?.mode === 'clock') {
+                return;
+              }
+
               if (s.occupied) {
                 // The sign is write-only — hardware slot state cannot be reliably read back.
                 // Only show a preset card if we have locally cached data (preset_data / preview_url).
@@ -1480,10 +1695,10 @@ export default function App() {
                 const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
 
                 if (!pData && !previewUrl) {
-                  // No local cache — clear any stale placeholder (e.g. old "Sign Slot X") and treat as empty
-                  if (currentList[idx]?.preset !== null) {
+                  // Only clear stale generic placeholder (e.g. old "Sign Slot X")
+                  if (currentList[targetSlotIndex]?.preset?.name?.startsWith('Sign Slot ')) {
                     updated = true;
-                    currentList[idx] = { ...currentList[idx], preset: null };
+                    currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], preset: null };
                   }
                   return;
                 }
@@ -1491,26 +1706,28 @@ export default function App() {
                 const hwPreset = pData ? {
                   ...pData,
                   id: `hw-slot-${idx}`,
+                  hwSlotId: idx,
                   thumbnail: previewUrl || pData.thumbnail,
                   isHardware: false
                 } : {
                   id: `hw-slot-${idx}`,
+                  hwSlotId: idx,
                   mode: 'image',
                   thumbnail: previewUrl,
                   isHardware: false
                 };
                 // Only update if content changed (avoid unnecessary re-renders)
-                const existing = currentList[idx]?.preset;
+                const existing = currentList[targetSlotIndex]?.preset;
                 const existingKey = existing?.id + '|' + existing?.thumbnail;
                 const newKey = hwPreset.id + '|' + hwPreset.thumbnail;
                 if (existingKey !== newKey) {
                   updated = true;
-                  currentList[idx] = { ...currentList[idx], preset: hwPreset };
+                  currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], hwSlotId: idx, preset: hwPreset };
                 }
-              } else if (currentList[idx]?.preset?.isHardware) {
-                // Slot no longer occupied on hardware — clear hardware-only card
+              } else if (idx >= 2 && currentList[targetSlotIndex]?.preset) {
+                // Slot no longer occupied on hardware — clear card
                 updated = true;
-                currentList[idx] = { ...currentList[idx], preset: null };
+                currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], preset: null };
               }
             }
           });
@@ -1573,6 +1790,16 @@ export default function App() {
 
       if (targetId !== lastPushedId) {
         if (targetContent.type === 'event') {
+          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
+          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
+          if (currentSlot1Text && currentSlot1Text === targetContent.summary.trim()) {
+            console.log("[auto-push] Slot 1 already has active event text, playing slot 0 directly:", targetContent.summary);
+            setLastPushedId(targetId);
+            if (lastPushedId !== 'hw-slot-0') {
+              axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(() => {});
+            }
+            return;
+          }
           handlePush(targetContent.summary, false);
         } else {
           // Play hardware slot 1 — the reserved default
@@ -1606,8 +1833,19 @@ export default function App() {
         const activeEvents = (evs || []).filter(ev => isEventActive(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined');
         const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
         if (active) {
-          console.log("[connect] Pushing active event on connect:", active.summary);
-          await handlePush(getEventDisplayString(active), false);
+          const activeStr = getEventDisplayString(active);
+          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
+          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
+          if (currentSlot1Text && currentSlot1Text === activeStr.trim()) {
+            console.log("[connect] Slot 1 already contains active event text, playing slot 0 directly:", activeStr);
+            setLastPushedId('hw-slot-0');
+            try {
+              await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+            } catch (e) {}
+          } else {
+            console.log("[connect] Pushing active event on connect:", active.summary);
+            await handlePush(activeStr, false);
+          }
         } else {
           // Play hardware slot 1 (0-indexed) — the reserved default slot
           console.log("[connect] Playing hardware default slot (slot 1)");
@@ -1621,7 +1859,7 @@ export default function App() {
       };
       pushDefaultOrActive();
     } else {
-      setPushMessage('');
+      setPushMessage(prev => prev && prev.toLowerCase().includes('error') ? prev : '');
       setIsManualOverride(false);
       isManualOverrideRef.current = false;
       setLastPushedId(null);
@@ -1638,18 +1876,6 @@ export default function App() {
   const handlePush = async (payload, manual = false, skipMessages = false) => {
     if (manual) setIsManualOverride(true);
     setPushing(true);
-    if (!skipMessages) {
-      if (manual) {
-        if (typeof payload === 'string') {
-          setPushMessage('Saving to Slot 1...');
-        } else {
-          handleSetLocalPushMessage('Pushing to sign...');
-        }
-      } else {
-        setPushMessage('');
-        setLocalPushMessage('');
-      }
-    }
     
     let data;
     let pushName = '';
@@ -1684,6 +1910,25 @@ export default function App() {
       }
     }
 
+    if (!skipMessages) {
+      if (manual) {
+        if (isEvent) {
+          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
+          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
+          const targetEventText = (data.text || data.name || pushName || '').trim();
+          if (currentSlot1Text && currentSlot1Text === targetEventText) {
+            handleSetPushMessage('Playing from Slot 1...');
+          } else {
+            handleSetPushMessage('Saving event to Slot 1...');
+          }
+        } else {
+          handleSetLocalPushMessage(`Pushing "${pushName}" to sign...`);
+        }
+      } else {
+        handleSetLocalPushMessage('');
+      }
+    }
+
     try {
       if (data.mode === 'clock') {
         const pushColor = data.clockStyle === 'default' ? '#ffffff' : (data.textColor || '#10B981');
@@ -1691,32 +1936,61 @@ export default function App() {
         if (manual && !skipMessages) {
           handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
         }
+      } else if (data.isDefault && status?.connected) {
+        // Default preset: play saved default preset (hardware slot 1) directly from hardware
+        setLastPushedId('hw-slot-1');
+        await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+        if (manual && !skipMessages) {
+          handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        }
       } else if (isEvent) {
         if (status.connected) {
-          setPushMessage('Saving to Slot 1...');
           const eventPresetCopy = { ...data };
           delete eventPresetCopy.pixels;
-          const saveRes = await axios.post(`${API_BASE}/save-preset`, {
-            slot_id: 0,
-            address: status.address || DEFAULT_MAC,
-            preset: eventPresetCopy
-          });
-          const savedThumb = saveRes.data?.preview_url
-            ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}`
-            : null;
-          setPushMessage('Saved to Slot 1!');
-          // Update local saved presets cache for slot 0
-          setSavedPresets(prev => {
-            const next = [...prev];
-            next[0] = {
-              slotNumber: 1,
-              preset: { ...eventPresetCopy, id: 'hw-slot-0', thumbnail: savedThumb || eventPresetCopy.thumbnail }
-            };
-            return next;
-          });
-          setLastPushedId('hw-slot-0');
+
+          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
+          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
+          const targetEventText = (eventPresetCopy.text || eventPresetCopy.name || '').trim();
+
+          if (currentSlot1Text && currentSlot1Text === targetEventText) {
+            console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
+            setLastPushedId('hw-slot-0');
+            await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+            if (manual && !skipMessages) {
+              handleSetPushMessage('Playing from Slot 1');
+            }
+            fetchStatus();
+            return;
+          }
+
+          handleSetPushMessage('Saving event to Slot 1...');
+
+          try {
+            const saveRes = await axios.post(`${API_BASE}/save-preset`, {
+              slot_id: 0,
+              address: status.address || DEFAULT_MAC,
+              preset: eventPresetCopy
+            });
+            const savedThumb = saveRes.data?.preview_url
+              ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}`
+              : null;
+            // Update local saved presets cache for slot 0
+            setSavedPresets(prev => {
+              const next = [...prev];
+              next[0] = {
+                slotNumber: 1,
+                preset: { ...eventPresetCopy, id: 'hw-slot-0', thumbnail: savedThumb || eventPresetCopy.thumbnail }
+              };
+              return next;
+            });
+            setLastPushedId('hw-slot-0');
+            handleSetPushMessage('Saved to Slot 1!');
+          } catch (saveErr) {
+            console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
+            handleSetPushMessage('Error saving to Slot 1');
+          }
         } else {
-          setPushMessage('Error: Sign not connected');
+          handleSetPushMessage('Error: Sign not connected');
         }
       } else {
         await axios.post(`${API_BASE}/push-text`, data);
@@ -1743,7 +2017,7 @@ export default function App() {
 
   const handlePushManual = (name, status) => {
     setIsManualOverride(true);
-    handlePush(name, status);
+    handlePush(name, true);
   };
 
   return (
@@ -1797,6 +2071,7 @@ export default function App() {
               scanOpen={scanOpen}
               setScanOpen={setScanOpen}
               syncHardwareSlots={syncHardwareSlots}
+              fetchStatus={fetchStatus}
             />
           </div>
           <MediaView 
@@ -1809,10 +2084,15 @@ export default function App() {
             onPushSuccess={fetchStatus}
             now={now}
             pushMessage={localPushMessage}
+            setPushMessage={handleSetPushMessage}
+            setLocalPushMessage={handleSetLocalPushMessage}
+            setUnifiedPushMessage={setUnifiedPushMessage}
             pushing={pushing}
+            setPushing={setPushing}
             savedPresets={savedPresets}
             setSavedPresets={setSavedPresets}
             syncHardwareSlots={syncHardwareSlots}
+            setLastPushedId={setLastPushedId}
           />
         </div>
         <div className="right-column">
@@ -1823,7 +2103,7 @@ export default function App() {
             fetchEvents={fetchEvents}
             now={now}
             onPush={handlePush}
-            pushMessage={pushMessage}
+            pushMessage={pushMessage || localPushMessage}
             pushing={pushing}
           />
         </div>
@@ -1841,7 +2121,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -1849,7 +2129,13 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   }, [status.preview_url, previewStamp]);
 
   const [scanResults, setScanResults] = useState([]);
-  const [recents, setRecents] = useState(JSON.parse(localStorage.getItem('loy_recents') || '[]'));
+  const [recents, setRecents] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('loy_recents') || '[]');
+      if (Array.isArray(saved) && saved.length > 0) return saved;
+    } catch {}
+    return [{ address: DEFAULT_MAC, name: 'YS524B150258' }];
+  });
   const [scanTab, setScanTab] = useState('all');
   const [isScanning, setIsScanning] = useState(false);
   const [scanSearch, setScanSearch] = useState('');
@@ -1925,9 +2211,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     setRecents(prev => {
       const existing = prev.find(d => d.address === addr);
       // If the new name is just the MAC address or undefined, and we already have a real name, keep the real name
-      let finalName = name || addr;
+      let finalName = name || (addr === DEFAULT_MAC ? 'YS524B150258' : addr);
       if (existing && existing.name && !isMacAddress(existing.name) && (!name || name === addr)) {
         finalName = existing.name;
+      }
+      if (isMacAddress(finalName) && addr === DEFAULT_MAC) {
+        finalName = 'YS524B150258';
       }
       // Don't create a new entry if we only have the MAC and no existing record
       if (!existing && isMacAddress(finalName)) return prev;
@@ -1967,8 +2256,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
   }, [status.connected, status.address]);
 
-  // For recents, filter out any MAC-only entries (corrupt/nameless records)
-  const recentsFiltered = recents.filter(d => d.name && !isMacAddress(d.name));
+  // For recents, filter out any nameless records while retaining known signs
+  const recentsFiltered = recents.map(d => ({
+    ...d,
+    name: (isMacAddress(d.name) && d.address === DEFAULT_MAC) ? 'YS524B150258' : d.name
+  })).filter(d => d.name && (!isMacAddress(d.name) || d.address === DEFAULT_MAC));
   const devicesToFilter = scanTab === 'recents' ? recentsFiltered : scanResults;
   const filteredDevices = devicesToFilter.filter(d =>
     d.name?.toLowerCase().includes(scanSearch.toLowerCase()) ||
@@ -1993,8 +2285,41 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       return;
     }
 
-    if (globalIdx < 12 && (preset.mode === 'clock' || preset.id === 'clock-default' || preset.text?.includes('|||'))) {
-      setPushMessage('Dynamic clock and event presets cannot be saved to hardware slots.');
+    if (preset.text?.includes('|||')) {
+      setPushMessage('Event presets cannot be saved to slots.');
+      return;
+    }
+
+    if (preset.mode === 'clock' || preset.id === 'clock-default') {
+      const slotObj = savedPresets[globalIdx];
+      const hwSlotId = slotObj?.hwSlotId !== undefined 
+        ? slotObj.hwSlotId 
+        : (slotObj?.slotNumber ? slotObj.slotNumber - 1 : globalIdx);
+
+      const nextSaved = [...savedPresets];
+      nextSaved[globalIdx] = {
+        ...nextSaved[globalIdx],
+        hwSlotId: hwSlotId,
+        preset: {
+          ...preset,
+          id: preset.id || `saved-clock-${globalIdx}`,
+          mode: 'clock',
+          hwSlotId: hwSlotId
+        }
+      };
+      setSavedPresets(nextSaved);
+      localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
+      setIsManualOverride(true);
+      setLastPushedId(preset.id || `saved-clock-${globalIdx}`);
+      setPushMessage(`Assigned Clock to Slot ${globalIdx + 1}!`);
+
+      try {
+        if (typeof onPush === 'function') {
+          await onPush(preset, true, true);
+        }
+      } catch (err) {
+        console.warn('Failed to push clock on assign:', err);
+      }
       return;
     }
 
@@ -2041,7 +2366,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     setPushing(true);
     setPushMessage(`Saving to slot ${globalIdx + 1}...`);
     try {
-      const hwSlotId = globalIdx;
+      const slotObj = savedPresets[globalIdx];
+      const hwSlotId = slotObj?.hwSlotId !== undefined 
+        ? slotObj.hwSlotId 
+        : (slotObj?.slotNumber ? slotObj.slotNumber - 1 : globalIdx);
+
       const res = await axios.post(`${API_BASE}/save-preset`, {
         slot_id: hwSlotId,
         address: status.address || DEFAULT_MAC,
@@ -2055,15 +2384,18 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       const nextSaved = [...savedPresets];
       nextSaved[globalIdx] = {
         ...nextSaved[globalIdx],
+        hwSlotId: hwSlotId,
         preset: { 
           ...presetCopy, 
           id: `saved-${Date.now()}-${globalIdx}`,
+          hwSlotId: hwSlotId,
           thumbnail: savedThumbnail
         }
       };
       setSavedPresets(nextSaved);
+      localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
       setIsManualOverride(true);
-      setLastPushedId(`hw-slot-${globalIdx}`);
+      setLastPushedId(`hw-slot-${hwSlotId}`);
       setPushMessage(`Saved to slot ${globalIdx + 1}!`);
       if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
     } catch (err) {
@@ -2078,50 +2410,57 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   };
 
   const playSavedPreset = async (globalIdx, preset) => {
-    if (globalIdx >= 12 && !preset) return; // Only local UI slots require a valid preset for pushing
+    if (!preset) return; // Do nothing when clicking empty slots!
 
-    // For hardware slots (0-11), don't play if we have no local data (slot was cleared)
-    if (globalIdx < 12 && !preset) return;
-
-    if (preset) {
-      setLastPushedId(preset.id);
-    }
-
-    if (globalIdx < 12) {
-      const hwSlotId = globalIdx;
+    if (preset.mode === 'clock' || preset.id === 'clock-default') {
+      setLastPushedId(preset.id || `saved-clock-${globalIdx}`);
       setPushing(true);
-      setPushMessage(`Pushing slot ${globalIdx + 1} to sign...`);
-      setIsManualOverride(true);
-      setLastPushedId(`hw-slot-${hwSlotId}`);
-      try {
-        await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
-        setPushMessage(`Pushed slot ${globalIdx + 1} to sign!`);
-      } catch (err) {
-        console.error('Failed to trigger hardware preset play:', err);
-        const detail = err.response?.data?.detail || err.message || '';
-        const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
-        if (!isDisconnectError) {
-          setPushMessage(`Error: ${detail || err.message}`);
-        }
-      } finally {
-        setPushing(false);
-      }
-    } else {
-      setPushing(true);
-      setPushMessage(`Pushing slot ${globalIdx + 1} to sign...`);
+      setPushMessage(`Pushing Clock to sign...`);
       setIsManualOverride(true);
       try {
         await onPush(preset, true, true);
-        setPushMessage(`Pushed slot ${globalIdx + 1} to sign!`);
+        setPushMessage(`Pushed Clock to sign!`);
       } catch (err) {
-        const detail = err.response?.data?.detail || err.message || '';
-        const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
-        if (!isDisconnectError) {
-          setPushMessage(`Error: ${detail || err.message}`);
-        }
+        console.error('Failed to trigger clock play:', err);
+        setPushMessage(`Error: ${err.message}`);
       } finally {
         setPushing(false);
       }
+      return;
+    }
+
+    const slotObj = savedPresets[globalIdx];
+    const hwSlotId = preset.hwSlotId !== undefined 
+      ? preset.hwSlotId 
+      : (slotObj?.hwSlotId !== undefined 
+        ? slotObj.hwSlotId 
+        : (preset.id && typeof preset.id === 'string' && preset.id.startsWith('hw-slot-') 
+          ? parseInt(preset.id.split('-')[2], 10) 
+          : globalIdx));
+
+    setLastPushedId(`hw-slot-${hwSlotId}`);
+    setPushing(true);
+    setPushMessage(preset.name ? `Pushing "${preset.name}" to sign...` : `Pushing slot ${globalIdx + 1} to sign...`);
+    setIsManualOverride(true);
+
+    try {
+      if (hwSlotId < 12) {
+        // Notify server to switch active hardware preset slot and update live preview
+        await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+        setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
+      } else {
+        await onPush(preset, true, true);
+        setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
+      }
+    } catch (err) {
+      console.error('Failed to trigger hardware preset play:', err);
+      const detail = err.response?.data?.detail || err.message || '';
+      const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
+      if (!isDisconnectError) {
+        setPushMessage(`Error: ${detail || err.message}`);
+      }
+    } finally {
+      setPushing(false);
     }
   };
 
@@ -2137,30 +2476,17 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       const sourceGlobalIndex = parseInt(dragData.split(':')[1], 10);
       if (isNaN(sourceGlobalIndex) || sourceGlobalIndex === slotGlobalIndex) return;
 
-      console.log('[handleDropOnSlot] Swapping saved slots:', sourceGlobalIndex, '<->', slotGlobalIndex);
+      // Protect reserved slots (0 and 1: Calendar and Default)
+      if (sourceGlobalIndex < 2 || slotGlobalIndex < 2) return;
+
+      console.log('[handleDropOnSlot] Reordering saved slots:', sourceGlobalIndex, '->', slotGlobalIndex);
       const nextSaved = [...savedPresets];
-      const sourcePreset = nextSaved[sourceGlobalIndex].preset;
-      const targetPreset = nextSaved[slotGlobalIndex].preset;
+      const [draggedItem] = nextSaved.splice(sourceGlobalIndex, 1);
+      nextSaved.splice(slotGlobalIndex, 0, draggedItem);
 
-      const cleanSourcePreset = sourcePreset ? { ...sourcePreset } : null;
-      const cleanTargetPreset = targetPreset ? { ...targetPreset } : null;
-
-      nextSaved[slotGlobalIndex] = {
-        ...nextSaved[slotGlobalIndex],
-        preset: cleanSourcePreset ? { ...cleanSourcePreset, id: `saved-${Date.now()}-${slotGlobalIndex}` } : null
-      };
-      nextSaved[sourceGlobalIndex] = {
-        ...nextSaved[sourceGlobalIndex],
-        preset: cleanTargetPreset ? { ...cleanTargetPreset, id: `saved-${Date.now()}-${sourceGlobalIndex}` } : null
-      };
       setSavedPresets(nextSaved);
-
-      if (slotGlobalIndex < 12 && cleanSourcePreset) {
-        await assignPresetToSlot(slotGlobalIndex, cleanSourcePreset);
-      }
-      if (sourceGlobalIndex < 12 && cleanTargetPreset) {
-        await assignPresetToSlot(sourceGlobalIndex, cleanTargetPreset);
-      }
+      localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
+      return;
     } else {
       if (presets) {
         console.log('[handleDropOnSlot] Dropped local preset ID:', dragData);
@@ -2219,14 +2545,15 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 savedPresets.map(s => s.preset).filter(Boolean).find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId);
       if (p) return p;
       if (typeof lastPushedId === 'string' && lastPushedId.startsWith('hw-slot-')) {
-        return savedPresets[parseInt(lastPushedId.split('-')[2], 10)]?.preset;
+        const slotHwId = parseInt(lastPushedId.split('-')[2], 10);
+        return savedPresets.find(s => s?.preset?.hwSlotId === slotHwId || s?.hwSlotId === slotHwId || s?.preset?.id === lastPushedId)?.preset;
       }
     }
     // 2. Fallback to reading the hardware display_mode status
     if (status?.display_mode && typeof status.display_mode === 'string' && status.display_mode.startsWith('preset-')) {
        const slotIdx = parseInt(status.display_mode.split('-')[1], 10);
-       if (!isNaN(slotIdx) && savedPresets[slotIdx]?.preset) {
-         return savedPresets[slotIdx].preset;
+       if (!isNaN(slotIdx)) {
+         return savedPresets.find(s => s?.preset?.hwSlotId === slotIdx || s?.hwSlotId === slotIdx || s?.preset?.id === `hw-slot-${slotIdx}`)?.preset;
        }
     }
     return null;
@@ -2612,12 +2939,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   const isReservedCalendar = globalIdx === 0;
                   const isReservedDefault = globalIdx === 1;
                   const isReserved = isReservedCalendar || isReservedDefault;
-                  const reservedColor = isReservedCalendar ? '#38bdf8' : '#10b981';
+                  const reservedColor = isReservedCalendar ? '#38bdf8' : '#facc15';
 
                   if (!p) {
                     return (
                       <div
-                        key={slot.slotNumber}
+                        key={slot.hwSlotId !== undefined ? `hw-${slot.hwSlotId}` : `slot-${slot.slotNumber || globalIdx}`}
                         onDragOver={!isReserved ? (e) => { e.preventDefault(); setSavedDragOverIdx(globalIdx); } : undefined}
                         onDragLeave={!isReserved ? () => setSavedDragOverIdx(null) : undefined}
                         onDrop={!isReserved ? (e) => handleDropOnSlot(e, globalIdx) : undefined}
@@ -2676,7 +3003,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
 
                   return (
                     <div
-                      key={slot.slotNumber}
+                      key={slot.hwSlotId !== undefined ? `hw-${slot.hwSlotId}` : `slot-${slot.slotNumber || globalIdx}`}
                       className="preset-card relative group overflow-hidden transition-all"
                       onPointerDown={handlePointerDown}
                       onPointerUp={(e) => handlePointerUp(e, () => playSavedPreset(globalIdx, p))}
@@ -2781,18 +3108,30 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                       {savedPresets[assigningSlotIndex]?.preset && assigningSlotIndex >= 2 && (
                         <button
                           onClick={async () => {
-                            
-                            if (assigningSlotIndex < 12) {
+                            const slotObj = savedPresets[assigningSlotIndex];
+                            const hwSlotId = slotObj?.preset?.hwSlotId !== undefined 
+                              ? slotObj.preset.hwSlotId 
+                              : (slotObj?.hwSlotId !== undefined ? slotObj.hwSlotId : assigningSlotIndex);
+
+                            if (hwSlotId < 12) {
                               try {
+                                const wasActive = (lastPushedId === `hw-slot-${hwSlotId}`) || (status?.display_mode === `preset-${hwSlotId}`);
                                 setPushing(true);
                                 setPushMessage(`Clearing slot ${assigningSlotIndex + 1}...`);
-                                await axios.delete(`${API_BASE}/delete-preset/${assigningSlotIndex}?mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+                                await axios.delete(`${API_BASE}/delete-preset/${hwSlotId}?mac=${encodeURIComponent(status.address || DEFAULT_MAC)}&was_active=${wasActive}`);
                                 setPushMessage(`Cleared slot ${assigningSlotIndex + 1}!`);
                                 
                                 const nextSaved = [...savedPresets];
                                 nextSaved[assigningSlotIndex] = { ...nextSaved[assigningSlotIndex], preset: null };
                                 setSavedPresets(nextSaved);
                                 localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
+                                if (typeof syncHardwareSlots === 'function') {
+                                  await syncHardwareSlots();
+                                }
+                                if (lastPushedId === `hw-slot-${hwSlotId}`) {
+                                  if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
+                                }
+                                if (typeof fetchStatus === 'function') fetchStatus();
                                 setAssigningSlotIndex(null);
                               } catch (err) {
                                 console.error('Failed to delete hardware preset:', err);
@@ -2824,10 +3163,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px', marginBottom: '24px' }}>
                     {presets?.filter(p => {
                       if (!p?.id) return false;
-                      if (assigningSlotIndex !== null && assigningSlotIndex < 12) {
-                        if (p.mode === 'clock' || p.id === 'clock-default' || p.text?.includes('|||')) {
-                          return false;
-                        }
+                      // Dynamic event titles with ||| shouldn't be assigned
+                      if (p.text?.includes('|||')) {
+                        return false;
                       }
                       return true;
                     })?.map(p => {
@@ -3322,7 +3660,8 @@ function HslColorSlider({ label, value, onChange }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, pushing, savedPresets, setSavedPresets, syncHardwareSlots }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, savedPresets, setSavedPresets, syncHardwareSlots, setLastPushedId }) {
+  const fontReady = useFontReady();
   const [isLocalCollapsed, setIsLocalCollapsed] = useState(!!status.connected);
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
@@ -3788,7 +4127,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
     
     setForm(prev => ({ ...prev, pixels: nextPixels }));
-  }, [form.text, form.mode, form.timeFormat, form.showSeconds, isModalOpen, previewTime, scrollOffset, form.animation, form.clockStyle]);
+  }, [form.text, form.mode, form.timeFormat, form.showSeconds, isModalOpen, previewTime, scrollOffset, form.animation, form.clockStyle, fontReady]);
 
   // Re-render crop pixels dynamically when background color changes
   useEffect(() => {
@@ -3807,7 +4146,18 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
   const getAnimationStitchedPixels = async () => {
     if (form.fileType !== 'video' && form.fileType !== 'gif') {
-      return form.pixels;
+      let pixels = form.pixels;
+      if ((!pixels || pixels.length === 0) && imageObjRef.current) {
+        pixels = runCropRender(
+          imageObjRef.current,
+          form.canvasX,
+          form.canvasY,
+          form.dwBase * form.zoom,
+          form.dhBase * form.zoom,
+          form.bgColor || '#000000'
+        );
+      }
+      return { pixels: pixels || form.pixels };
     }
 
     const numFrames = 8;
@@ -4002,53 +4352,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       }
       setPresets(nextPresets);
 
-      // If marked as default, keep saved preset slot 2 in sync and push to hardware if connected
-      if (form.isDefault) {
-        const defaultPresetCopy = { ...presetData };
-        if (defaultPresetCopy.mode === 'text') {
-          delete defaultPresetCopy.pixels;
-        }
-        delete defaultPresetCopy.thumbnail;
-
-        // Immediately sync slot 2 in savedPresets state
-        setSavedPresets(prev => {
-          const next = [...prev];
-          next[1] = {
-            slotNumber: 2,
-            preset: { ...savedPreset, id: 'hw-slot-1' }
-          };
-          return next;
-        });
-
-        if (status?.connected) {
-          try {
-            setPushMessage('Saving default to Slot 2...');
-            const saveRes = await axios.post(`${API_BASE}/save-preset`, {
-              slot_id: 1,
-              address: status.address || DEFAULT_MAC,
-              preset: defaultPresetCopy
-            });
-            console.log('[preset-save] Saved default preset to hardware slot 1');
-            const savedThumb = saveRes.data?.preview_url 
-              ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}` 
-              : (presetData.thumbnail || null);
-            setPushMessage('Saved to Slot 2!');
-            setSavedPresets(prev => {
-              const next = [...prev];
-              next[1] = {
-                slotNumber: 2,
-                preset: { ...defaultPresetCopy, id: 'hw-slot-1', thumbnail: savedThumb }
-              };
-              return next;
-            });
-            syncHardwareSlots();
-          } catch (saveErr) {
-            console.warn('[preset-save] Failed to save default to hw slot 1:', saveErr);
-            setPushMessage('');
-          }
-        }
-      }
-
+      // Close the modal and reset form immediately so UI is snappy!
       setIsModalOpen(false);
       setAnimDropdownOpen(false);
       setEditingId(null);
@@ -4062,6 +4366,56 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         clockStyle: 'default',
         isDefault: false
       });
+
+      // If marked as default, keep saved preset slot 2 in sync and push to hardware if connected
+      if (form.isDefault) {
+        const defaultPresetCopy = { ...presetData };
+        if (defaultPresetCopy.mode === 'text') {
+          delete defaultPresetCopy.pixels;
+        }
+
+        // Immediately sync slot 2 in savedPresets state
+        setSavedPresets(prev => {
+          const next = [...prev];
+          next[1] = {
+            slotNumber: 2,
+            preset: { ...savedPreset, id: 'hw-slot-1', thumbnail: thumbnail || presetData.thumbnail }
+          };
+          return next;
+        });
+
+        if (status?.connected) {
+          try {
+            if (typeof setPushing === 'function') setPushing(true);
+            if (typeof setPushMessage === 'function') setPushMessage('Saving default to Slot 2...');
+            const saveRes = await axios.post(`${API_BASE}/save-preset`, {
+              slot_id: 1,
+              address: status.address || DEFAULT_MAC,
+              preset: defaultPresetCopy
+            });
+            console.log('[preset-save] Saved default preset to hardware slot 1');
+            const savedThumb = saveRes.data?.preview_url 
+              ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}` 
+              : (thumbnail || presetData.thumbnail || null);
+            if (typeof setPushMessage === 'function') setPushMessage('Saved to Slot 2!');
+            setSavedPresets(prev => {
+              const next = [...prev];
+              next[1] = {
+                slotNumber: 2,
+                preset: { ...defaultPresetCopy, id: 'hw-slot-1', thumbnail: savedThumb }
+              };
+              return next;
+            });
+            if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
+            syncHardwareSlots();
+          } catch (saveErr) {
+            console.warn('[preset-save] Failed to save default to hw slot 1:', saveErr);
+            if (typeof setPushMessage === 'function') setPushMessage('Error saving default to Slot 2');
+          } finally {
+            if (typeof setPushing === 'function') setPushing(false);
+          }
+        }
+      }
 
       // Do not push saved preset automatically to the sign
     } catch (err) {
@@ -4102,6 +4456,30 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   const pushPreset = async (p) => {
+    if (p.isDefault && status?.connected) {
+      try {
+        if (typeof setPushing === 'function') setPushing(true);
+        if (typeof setLocalPushMessage === 'function') {
+          setLocalPushMessage(`Pushing "${p.name || 'Default'}" to sign...`);
+        }
+        if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
+        await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+        if (typeof setLocalPushMessage === 'function') {
+          setLocalPushMessage(`Pushed "${p.name || 'Default'}" to sign!`);
+        }
+        if (onPushSuccess) onPushSuccess();
+      } catch (err) {
+        console.error('Failed to trigger default hardware preset:', err);
+        const detail = err.response?.data?.detail || err.message || '';
+        if (typeof setLocalPushMessage === 'function') {
+          setLocalPushMessage(`Error: ${detail}`);
+        }
+      } finally {
+        if (typeof setPushing === 'function') setPushing(false);
+      }
+      return;
+    }
+
     try {
       await onPush(p, true);
       if (onPushSuccess) onPushSuccess();
@@ -4182,8 +4560,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                   cursor: p.isDefault ? 'default' : 'grab',
                   opacity: p.id === draggedId ? 0.4 : 1,
                   transform: p.id === draggedId ? 'scale(0.98)' : 'none',
-                  border: p.id === dragOverId ? '2px dashed var(--accent-primary)' : '1px solid var(--glass-border)',
-                  boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : 'none',
+                  border: p.id === dragOverId ? '2px dashed var(--accent-primary)' : (p.isDefault ? '1px solid #facc1544' : '1px solid var(--glass-border)'),
+                  boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : (p.isDefault ? '0 0 12px #facc1522' : 'none'),
                   transition: 'all 0.15s ease',
                   userSelect: 'none'
                 }}
@@ -4483,7 +4861,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         boxSizing: 'border-box'
                       }}
                     >
-                      {form.pixels.map((p, i) => {
+                      {(Array.isArray(form.pixels) ? form.pixels : Array(1280).fill(0)).map((p, i) => {
                         const activeColor = form.textColor || '#ffffff';
                         return (
                           <div 
@@ -4793,12 +5171,12 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                   </div>
                 )}
 
-                {(form.mode === 'text' || form.mode === 'drawing' || form.mode === 'image') && (
+                {form.mode === 'text' && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '24px' }}>
                     <label style={{ fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>
                       Animation
                     </label>
-                    <div style={{ position: 'relative', width: '255px', flexShrink: 0 }}>
+                    <div style={{ position: 'relative', width: '215px', flexShrink: 0 }}>
                       <button
                         type="button"
                         className="input-field"
@@ -4867,7 +5245,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                     justifyContent: 'space-between'
                                   }}
                                 >
-                                  <span>{a}</span>
+                                  <span style={{ whiteSpace: 'nowrap' }}>{a}</span>
                                   {isSelected && <Check size={13} className="text-emerald-400" />}
                                 </div>
                               );
@@ -4876,20 +5254,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         </>
                       )}
                     </div>
-
-                    {/* Speed slider — inline, only for animated text presets */}
-                    {form.mode === 'text' && form.animation && form.animation !== 'show now' && (
-                      <div className="brightness-rail glass-panel" style={{ flex: 1, padding: '8px 12px', minWidth: 0 }}>
-                        <Gauge className="text-emerald-400 flex-shrink-0" size={14} />
-                        <input
-                          type="range" min="1" max="15"
-                          value={form.speed !== undefined ? form.speed : 8}
-                          onChange={(e) => setForm(prev => ({ ...prev, speed: parseInt(e.target.value) }))}
-                          className="h-slider"
-                        />
-                        <span className="font-bold text-slate-500 w-6 text-[10px] text-right">{form.speed !== undefined ? form.speed : 8}</span>
-                      </div>
-                    )}
                   </div>
                 )}
 
