@@ -460,7 +460,8 @@ async def connect(req: ConnectRequest):
         try:
             await scanner.start()
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+                scan_wait = 15.0 if target_mac else 10.0
+                await asyncio.wait_for(stop_event.wait(), timeout=scan_wait)
             except asyncio.TimeoutError:
                 pass
         except Exception as scan_err:
@@ -610,6 +611,13 @@ async def get_hardware_slots(mac: str = ""):
             if os.path.exists(jf): json_path = jf
             if os.path.exists(gf): gif_path = gf
 
+        if not json_path:
+            alt_jsons = glob.glob(os.path.join(STATIC_DIR, f"preset_*_{slot_id}.json"))
+            if alt_jsons: json_path = alt_jsons[0]
+        if not gif_path:
+            alt_gifs = glob.glob(os.path.join(STATIC_DIR, f"preset_*_{slot_id}.gif"))
+            if alt_gifs: gif_path = alt_gifs[0]
+
         if json_path and os.path.exists(json_path):
             try:
                 with open(json_path, "r") as fj:
@@ -715,6 +723,12 @@ async def play_preset(id: int, mac: str = ""):
         mac_str = (mac or (connected_client.address if connected_client else "") or "").replace(':', '').lower()
         json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{id}.json")
         gif_path  = os.path.join(STATIC_DIR, f"preset_{mac_str}_{id}.gif")
+        if not os.path.exists(json_path):
+            alt_jsons = glob.glob(os.path.join(STATIC_DIR, f"preset_*_{id}.json"))
+            if alt_jsons: json_path = alt_jsons[0]
+        if not os.path.exists(gif_path):
+            alt_gifs = glob.glob(os.path.join(STATIC_DIR, f"preset_*_{id}.gif"))
+            if alt_gifs: gif_path = alt_gifs[0]
         if not os.path.exists(json_path) and not os.path.exists(gif_path):
             raise HTTPException(status_code=404, detail=f"Slot {id + 1} has no saved preset")
         current_display_mode = f"preset-{id}"
