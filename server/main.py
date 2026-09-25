@@ -7,6 +7,7 @@ import datetime
 import shutil
 import tempfile
 import math
+import glob
 from typing import List, Optional, Any, Union
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
@@ -400,8 +401,9 @@ async def get_status():
     }
 
 
-@app.post("/connect")
-async def connect(req: ConnectRequest):
+connect_lock = asyncio.Lock()
+
+async def _connect_internal(req: ConnectRequest):
     global connected_client, connection_ready
     target_mac = (req.address or "").strip().upper()
     if connected_client and connected_client.is_connected:
@@ -419,6 +421,8 @@ async def connect(req: ConnectRequest):
             pass
         connected_client = None
         await asyncio.sleep(0.5)
+
+    client = None
     try:
         if os.path.exists(os.path.join(STATIC_DIR, "current.gif")):
             os.remove(os.path.join(STATIC_DIR, "current.gif"))
@@ -561,9 +565,15 @@ async def connect(req: ConnectRequest):
         import traceback
         tb = traceback.format_exc()
         print(f"[connect] FAILED: {type(e).__name__}: {e}")
-        connected_client = None
-        connection_ready = False
+        if connected_client == client or not (connected_client and connected_client.is_connected):
+            connected_client = None
+            connection_ready = False
         raise HTTPException(status_code=408, detail=f"{type(e).__name__}: {e}")
+
+@app.post("/connect")
+async def connect(req: ConnectRequest):
+    async with connect_lock:
+        return await _connect_internal(req)
 
 @app.post("/disconnect")
 async def disconnect():
@@ -610,13 +620,6 @@ async def get_hardware_slots(mac: str = ""):
             gf = os.path.join(STATIC_DIR, f"preset_{current_mac}_{slot_id}.gif")
             if os.path.exists(jf): json_path = jf
             if os.path.exists(gf): gif_path = gf
-
-        if not json_path:
-            alt_jsons = glob.glob(os.path.join(STATIC_DIR, f"preset_*_{slot_id}.json"))
-            if alt_jsons: json_path = alt_jsons[0]
-        if not gif_path:
-            alt_gifs = glob.glob(os.path.join(STATIC_DIR, f"preset_*_{slot_id}.gif"))
-            if alt_gifs: gif_path = alt_gifs[0]
 
         if json_path and os.path.exists(json_path):
             try:
@@ -723,12 +726,6 @@ async def play_preset(id: int, mac: str = ""):
         mac_str = (mac or (connected_client.address if connected_client else "") or "").replace(':', '').lower()
         json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{id}.json")
         gif_path  = os.path.join(STATIC_DIR, f"preset_{mac_str}_{id}.gif")
-        if not os.path.exists(json_path):
-            alt_jsons = glob.glob(os.path.join(STATIC_DIR, f"preset_*_{id}.json"))
-            if alt_jsons: json_path = alt_jsons[0]
-        if not os.path.exists(gif_path):
-            alt_gifs = glob.glob(os.path.join(STATIC_DIR, f"preset_*_{id}.gif"))
-            if alt_gifs: gif_path = alt_gifs[0]
         if not os.path.exists(json_path) and not os.path.exists(gif_path):
             raise HTTPException(status_code=404, detail=f"Slot {id + 1} has no saved preset")
         current_display_mode = f"preset-{id}"

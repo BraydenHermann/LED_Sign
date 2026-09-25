@@ -1337,31 +1337,18 @@ export default function App() {
   const [allSavedPresets, setAllSavedPresets] = useState({});
 
   const activeMac = status.address?.toUpperCase() || DEFAULT_MAC;
-  const savedPresets = (() => {
-    const direct = allSavedPresets[activeMac];
-    if (Array.isArray(direct) && direct.some(s => s?.preset)) {
-      return normalizeSavedPresets(direct);
-    }
-    // Fallback: check any other MAC key in allSavedPresets that has saved presets
-    for (const key of Object.keys(allSavedPresets)) {
-      const candidate = allSavedPresets[key];
-      if (Array.isArray(candidate) && candidate.some(s => s?.preset)) {
-        return normalizeSavedPresets(candidate);
-      }
-    }
-    return normalizeSavedPresets(direct);
-  })();
+  const savedPresets = normalizeSavedPresets(allSavedPresets[activeMac]);
 
   const setSavedPresets = (nextSaved) => {
     if (typeof nextSaved === 'function') {
       setAllSavedPresets(prev => {
-        const currentList = normalizeSavedPresets(prev[activeMac] || prev[DEFAULT_MAC]);
+        const currentList = normalizeSavedPresets(prev[activeMac]);
         const result = normalizeSavedPresets(nextSaved(currentList));
-        return { ...prev, [activeMac]: result, [DEFAULT_MAC]: result, 'FF:24:10:29:03:1C': result, 'FF:24:10:29:44:9B': result };
+        return { ...prev, [activeMac]: result };
       });
     } else {
       const normalized = normalizeSavedPresets(nextSaved);
-      setAllSavedPresets(prev => ({ ...prev, [activeMac]: normalized, [DEFAULT_MAC]: normalized, 'FF:24:10:29:03:1C': normalized, 'FF:24:10:29:44:9B': normalized }));
+      setAllSavedPresets(prev => ({ ...prev, [activeMac]: normalized }));
     }
   };
 
@@ -1394,7 +1381,7 @@ export default function App() {
         
         // Migration from array to object
         if (Array.isArray(dbSavedPresets)) {
-          dbSavedPresets = { [DEFAULT_MAC]: dbSavedPresets, 'FF:24:10:29:03:1C': dbSavedPresets, 'FF:24:10:29:44:9B': dbSavedPresets };
+          dbSavedPresets = { [DEFAULT_MAC]: dbSavedPresets };
         } else if (!dbSavedPresets) {
           dbSavedPresets = {};
         }
@@ -1404,7 +1391,7 @@ export default function App() {
           try {
             const parsed = JSON.parse(savedLocal2);
             if (Array.isArray(parsed) && parsed.length > 0) {
-              dbSavedPresets = { ...dbSavedPresets, [DEFAULT_MAC]: parsed, 'FF:24:10:29:03:1C': parsed, 'FF:24:10:29:44:9B': parsed };
+              dbSavedPresets = { ...dbSavedPresets, [DEFAULT_MAC]: parsed };
             } else if (typeof parsed === 'object') {
               dbSavedPresets = { ...dbSavedPresets, ...parsed };
             }
@@ -1419,18 +1406,19 @@ export default function App() {
           try {
             const parsed = JSON.parse(savedLegacy);
             if (Array.isArray(parsed) && parsed.length > 0) {
-              dbSavedPresets = { ...dbSavedPresets, [DEFAULT_MAC]: parsed, 'FF:24:10:29:03:1C': parsed, 'FF:24:10:29:44:9B': parsed };
+              dbSavedPresets = { ...dbSavedPresets, [DEFAULT_MAC]: parsed };
             }
           } catch (e) {}
         }
 
+        // Clean any accidental slots 2..11 for FF:24:10:29:44:9B if they were cloned from the other sign
+        if (dbSavedPresets && dbSavedPresets['FF:24:10:29:44:9B']) {
+          const list = normalizeSavedPresets(dbSavedPresets['FF:24:10:29:44:9B']);
+          const cleaned = list.map((item, idx) => idx < 2 ? item : { ...item, preset: null });
+          dbSavedPresets['FF:24:10:29:44:9B'] = cleaned;
+        }
+
         if (dbSavedPresets && Object.keys(dbSavedPresets).length > 0) {
-          const populatedKey = Object.keys(dbSavedPresets).find(k => Array.isArray(dbSavedPresets[k]) && dbSavedPresets[k].some(s => s?.preset));
-          if (populatedKey) {
-            dbSavedPresets['FF:24:10:29:03:1C'] = dbSavedPresets['FF:24:10:29:03:1C'] || dbSavedPresets[populatedKey];
-            dbSavedPresets['FF:24:10:29:44:9B'] = dbSavedPresets['FF:24:10:29:44:9B'] || dbSavedPresets[populatedKey];
-            dbSavedPresets[DEFAULT_MAC] = dbSavedPresets[DEFAULT_MAC] || dbSavedPresets[populatedKey];
-          }
           setAllSavedPresets(dbSavedPresets);
         }
 
@@ -1825,6 +1813,29 @@ export default function App() {
       isManualOverrideRef.current = false;
       syncHardwareSlots();
       const pushDefaultOrActive = async () => {
+        // 1. Push local default preset to this sign's default preset (slot 1) if needed
+        const def = (presets || []).find(p => p.isDefault);
+        const curSlot2 = savedPresetsRef.current?.[1]?.preset;
+        const needsDefaultPush = !curSlot2 || (def && (
+          curSlot2.name !== def.name ||
+          curSlot2.mode !== def.mode ||
+          curSlot2.text !== def.text ||
+          curSlot2.imgSrc !== def.imgSrc
+        ));
+        if (def && needsDefaultPush) {
+          console.log("[connect] Pushing local default preset to sign default slot (slot 1)...");
+          try {
+            await axios.post(`${API_BASE}/save-preset`, {
+              slot_id: 1,
+              address: status.address || DEFAULT_MAC,
+              preset: def
+            });
+          } catch (e) {
+            console.warn("[connect] Failed to push default to slot 1:", e);
+          }
+        }
+
+        // 2. Calendar Slot (slot 0)
         let evs = [];
         try {
           evs = await fetchEvents();
@@ -1847,6 +1858,36 @@ export default function App() {
             await handlePush(activeStr, false);
           }
         } else {
+          // If no active event right now: check if slot 0 has the calendar preset previously pushed to the other sign
+          const curSlot1 = savedPresetsRef.current?.[0]?.preset;
+          if (!curSlot1) {
+            let prevCal = null;
+            try {
+              const stored = localStorage.getItem('loy_last_calendar_preset');
+              if (stored) prevCal = JSON.parse(stored);
+            } catch (e) {}
+            if (!prevCal) {
+              for (const k of Object.keys(allSavedPresets || {})) {
+                if (k !== activeMac && allSavedPresets[k]?.[0]?.preset) {
+                  prevCal = allSavedPresets[k][0].preset;
+                  break;
+                }
+              }
+            }
+            if (prevCal) {
+              console.log("[connect] Pushing previously pushed calendar preset to new sign slot 0:", prevCal.text || prevCal.name);
+              try {
+                await axios.post(`${API_BASE}/save-preset`, {
+                  slot_id: 0,
+                  address: status.address || DEFAULT_MAC,
+                  preset: prevCal
+                });
+              } catch (e) {
+                console.warn("[connect] Failed to push previous calendar preset to slot 0:", e);
+              }
+            }
+          }
+
           // Play hardware slot 1 (0-indexed) — the reserved default slot
           console.log("[connect] Playing hardware default slot (slot 1)");
           setLastPushedId('hw-slot-1');
@@ -1856,6 +1897,8 @@ export default function App() {
             console.warn("[connect] No default saved to slot 1 yet:", e);
           }
         }
+
+        if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
       };
       pushDefaultOrActive();
     } else {
@@ -1984,6 +2027,9 @@ export default function App() {
               return next;
             });
             setLastPushedId('hw-slot-0');
+            try {
+              localStorage.setItem('loy_last_calendar_preset', JSON.stringify({ ...eventPresetCopy, id: 'hw-slot-0', thumbnail: savedThumb || eventPresetCopy.thumbnail }));
+            } catch (e) {}
             handleSetPushMessage('Saved to Slot 1!');
           } catch (saveErr) {
             console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
