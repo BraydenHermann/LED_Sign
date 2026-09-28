@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import math
 import glob
+import unicodedata
 from typing import List, Optional, Any, Union
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
@@ -28,6 +29,20 @@ def hex_to_rgb_global(hex_str: Optional[str], default=(0,0,0)):
         return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
     except ValueError:
         return default
+
+def normalize_for_sign(text: str) -> str:
+    """Strip diacritics/accents so hardware-limited signs receive pure ASCII.
+    e.g. 'Sébastien' → 'Sebastien', 'naïve' → 'naive', 'œ' → 'oe'
+    """
+    if not text:
+        return text
+    text = text.replace('œ', 'oe').replace('Œ', 'OE').replace('æ', 'ae').replace('Æ', 'AE')
+    text = text.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+    text = text.replace('–', '-').replace('—', '-').replace('…', '...')
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', text)
+        if unicodedata.category(c) != 'Mn'
+    )
 
 def save_preview(img: Image.Image, path: str):
     """Atomically save image so uvicorn never serves a half-written file."""
@@ -1429,6 +1444,7 @@ async def flipper_worker(title: str, times: str, textColor: str, bgColor: str):
         print(f"[flipper] Error: {e}")
 
 def generate_text_animation_frames(text: str, anim_name: str, render_font, fg_rgb, bg_rgb, speed: int = 8):
+    text = normalize_for_sign(text or "")
     pal = [bg_rgb[0], bg_rgb[1], bg_rgb[2], fg_rgb[0], fg_rgb[1], fg_rgb[2], 255, 255, 255] + [0] * 759
     anim_clean = (anim_name or "show now").strip().lower()
     pil_frames = []
@@ -2055,7 +2071,7 @@ def save_preview(img: Image.Image, filepath: str):
 async def render_text_preview(req: RenderTextPreviewRequest):
     import base64
     from io import BytesIO
-    text = req.text or ""
+    text = normalize_for_sign(req.text or "")
     unifont_path = os.path.join(os.path.dirname(__file__), "unifont.otf")
     try:
         if os.path.exists(unifont_path):
@@ -2644,7 +2660,7 @@ async def save_preset(req: SavePresetRequest):
                 pil_frames.append(img)
         else:
             # Text preset
-            text = preset.text or ""
+            text = normalize_for_sign(preset.text or "")
             unifont_path = os.path.join(os.path.dirname(__file__), "unifont.otf")
             try:
                 if os.path.exists(unifont_path):

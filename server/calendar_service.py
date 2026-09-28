@@ -11,6 +11,25 @@ REDIRECT_URI = 'http://localhost:8000/auth/callback'
 
 _active_flow: Flow = None
 
+import re
+import unicodedata
+
+def clean_event_summary(summary: str) -> str:
+    if not summary:
+        return "Untitled"
+    # Remove common boilerplate like 'and Brayden Hermann'
+    cleaned = re.sub(r'\s*(?:and|&)\s+Brayden\s+Hermann\b', '', summary, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\bBrayden\s+Hermann\s+(?:and|&)\s*', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*[-/]\s*Brayden\s+Hermann\b', '', cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip()
+
+    # Transliterate French / European / special characters to ASCII equivalents
+    cleaned = cleaned.replace('œ', 'oe').replace('Œ', 'OE').replace('æ', 'ae').replace('Æ', 'AE')
+    cleaned = cleaned.replace('’', "'").replace('‘', "'").replace('“', '"').replace('”', '"')
+    cleaned = cleaned.replace('–', '-').replace('—', '-').replace('…', '...')
+    cleaned = ''.join(c for c in unicodedata.normalize('NFD', cleaned) if unicodedata.category(c) != 'Mn')
+    return cleaned.strip() or "Untitled"
+
 class CalendarService:
     def __init__(self, credentials_path="credentials.json", token_path="token.json"):
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -133,7 +152,7 @@ class CalendarService:
                 # Windows uses %#I for zero-padded-suppressed hours, %-I is for Linux
                 start_fmt = start_dt.astimezone().strftime('%#I:%M %p')
                 end_fmt = end_dt.astimezone().strftime('%#I:%M %p')
-                time_str = f"{start_fmt} – {end_fmt}"
+                time_str = f"{start_fmt} - {end_fmt}"
             except Exception as ex:
                 print(f"[calendar] Error formatting event {e.get('summary')}: {ex}")
                 # Keep is_active but fallback the time string
@@ -162,16 +181,18 @@ class CalendarService:
                 # External event without attendees list
                 response_status = 'needsAction'
 
-            print(f"[calendar] Event: {e.get('summary')} | Status: {response_status} | Attendees: {len(attendees)}")
+            raw_summary = e.get('summary', 'Untitled')
+            cleaned_summary = clean_event_summary(raw_summary)
+            print(f"[calendar] Event: {cleaned_summary} (raw: {raw_summary}) | Status: {response_status} | Attendees: {len(attendees)}")
 
             # Only accepted calendar invites/events appear in the schedule to avoid spam
             if response_status.lower() != 'accepted':
-                print(f"[calendar] Skipping unaccepted invite: {e.get('summary')} (status: {response_status})")
+                print(f"[calendar] Skipping unaccepted invite: {cleaned_summary} (status: {response_status})")
                 continue
 
             events.append({
                 "id": e.get("id"),
-                "summary": e.get("summary", "Untitled"),
+                "summary": cleaned_summary,
                 "time": time_str,
                 "start_iso": start_raw,
                 "end_iso": end_raw,
