@@ -46,3 +46,10 @@ fix*.py
 server/static/preset_*
 server/static/current.*
 server/static/test_text_rendered.png
+
+# PyInstaller
+dist/
+build/
+*.spec
+_icon.ico
+launcher_icon.ico
