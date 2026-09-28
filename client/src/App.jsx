@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Power, Sun, Calendar, Image as ImageIcon, Bluetooth, Wifi,
   Activity, Upload, Clock, ExternalLink, Link2Off, Link2,
-  FileSearch, Search, RefreshCw, EyeOff, ChevronRight, ChevronDown, X,
+  FileSearch, Search, RefreshCw, RotateCcw, StretchHorizontal, StretchVertical, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
   Trash2, Pipette, Save, Send, Star
 } from 'lucide-react';
@@ -684,7 +684,8 @@ const PixelPresetCardPreview = ({ preset, style }) => {
   const canvasRef = useRef(null);
   const scrollOffsetRef = useRef(0);
   const animName = preset?.animation;
-  const isAnimating = Boolean(animName && animName !== 'show now' && animName !== 'static');
+  const isImageOrDrawing = preset?.mode === 'image' || preset?.mode === 'drawing';
+  const isAnimating = !isImageOrDrawing && Boolean(animName && animName !== 'show now' && animName !== 'static');
   const animSpeed = preset?.speed !== undefined ? preset?.speed : 8;
 
   useEffect(() => {
@@ -776,6 +777,321 @@ const PixelPresetCardPreview = ({ preset, style }) => {
       className="led-preview"
       style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated', position: 'absolute', inset: 0, ...(style || {}) }}
     />
+  );
+};
+
+const PixelatedImageCanvas = ({ pixels, bgColor }) => {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const imgData = ctx.createImageData(64, 20);
+    const bgCol = bgColor || '#000000';
+    const bgR = parseInt(bgCol.slice(1, 3), 16) || 0;
+    const bgG = parseInt(bgCol.slice(3, 5), 16) || 0;
+    const bgB = parseInt(bgCol.slice(5, 7), 16) || 0;
+
+    for (let i = 0; i < 1280; i++) {
+      const p = pixels && pixels[i];
+      const idx = i * 4;
+      let r = bgR, g = bgG, b = bgB;
+      if (p && typeof p === 'string' && p.startsWith('#')) {
+        r = parseInt(p.slice(1, 3), 16) || 0;
+        g = parseInt(p.slice(3, 5), 16) || 0;
+        b = parseInt(p.slice(5, 7), 16) || 0;
+      } else if (p && p !== 0) {
+        r = 255; g = 255; b = 255;
+      }
+      imgData.data[idx] = r;
+      imgData.data[idx + 1] = g;
+      imgData.data[idx + 2] = b;
+      imgData.data[idx + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }, [pixels, bgColor]);
+
+  return (
+    <canvas 
+      ref={canvasRef} 
+      width={64} 
+      height={20} 
+      className="led-preview"
+      style={{ 
+        position: 'absolute', 
+        inset: 0, 
+        width: '100%', 
+        height: '100%', 
+        objectFit: 'fill', 
+        imageRendering: 'pixelated', 
+        pointerEvents: 'none', 
+        userSelect: 'none', 
+        display: 'block' 
+      }} 
+    />
+  );
+};
+
+const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor, pixels, speed, frameDurationMs }) => {
+  const canvasRef = useRef(null);
+  const videoRef = useRef(null);
+  const gifBitmapsRef = useRef([]);
+  const [gifDecoded, setGifDecoded] = useState(false);
+
+  // Decode GIF frames using native ImageDecoder if available
+  useEffect(() => {
+    if (fileType !== 'gif' || !imgSrc) {
+      gifBitmapsRef.current.forEach(f => {
+        try { f.bitmap?.close?.(); } catch {}
+      });
+      gifBitmapsRef.current = [];
+      setGifDecoded(false);
+      return;
+    }
+
+    let isCancelled = false;
+
+    const decode = async () => {
+      if (typeof window.ImageDecoder === 'undefined') {
+        return;
+      }
+      try {
+        const res = await fetch(imgSrc);
+        const buffer = await res.arrayBuffer();
+        if (isCancelled) return;
+        const decoder = new window.ImageDecoder({ data: buffer, type: 'image/gif' });
+        await decoder.tracks.ready;
+        const loaded = [];
+        let i = 0;
+        while (true) {
+          try {
+            const frame = await decoder.decode({ frameIndex: i });
+            if (isCancelled) {
+              try { frame.image.close(); } catch {}
+              return;
+            }
+            const durMs = frame.image.duration ? (frame.image.duration / 1000) : 100;
+            const bmp = await createImageBitmap(frame.image);
+            try { frame.image.close(); } catch {}
+            loaded.push({
+              bitmap: bmp,
+              duration: Math.max(20, durMs)
+            });
+            i++;
+          } catch {
+            break; // Reached end of frames
+          }
+        }
+        if (!isCancelled && loaded.length > 0) {
+          gifBitmapsRef.current.forEach(f => {
+            try { f.bitmap?.close?.(); } catch {}
+          });
+          gifBitmapsRef.current = loaded;
+          setGifDecoded(true);
+        }
+      } catch (err) {
+        console.warn('[MediaPixelPreview] GIF decode error:', err);
+      }
+    };
+
+    decode();
+
+    return () => {
+      isCancelled = true;
+      gifBitmapsRef.current.forEach(f => {
+        try { f.bitmap?.close?.(); } catch {}
+      });
+      gifBitmapsRef.current = [];
+    };
+  }, [imgSrc, fileType]);
+
+  // Video playback initialization
+  useEffect(() => {
+    if (fileType === 'video' && videoRef.current) {
+      const v = videoRef.current;
+      v.muted = true;
+      v.defaultMuted = true;
+      v.loop = true;
+      v.playsInline = true;
+      v.play().catch(e => console.log('[MediaPixelPreview] Video play error:', e));
+    }
+  }, [fileType, imgSrc]);
+
+  // Canvas render loop
+  useEffect(() => {
+    let animId;
+    let lastFrameTime = performance.now();
+    let currentFrameIdx = 0;
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Check if we have pre-rendered multi-frame pixels (e.g. editing a saved preset or loaded animation)
+    const hasMultiFramePixels = pixels && pixels.length > 1280;
+    let parsedPixelFrames = null;
+
+    if (hasMultiFramePixels && (!gifBitmapsRef.current || gifBitmapsRef.current.length === 0) && fileType !== 'video') {
+      const numFrames = Math.floor(pixels.length / 1280);
+      const frameWidth = 64;
+      const frameHeight = 20;
+      const stitchedWidth = frameWidth * numFrames;
+      parsedPixelFrames = [];
+
+      for (let f = 0; f < numFrames; f++) {
+        const imgData = ctx.createImageData(frameWidth, frameHeight);
+        for (let r = 0; r < frameHeight; r++) {
+          const rowStartInStitched = r * stitchedWidth;
+          const rowStartInFrame = r * frameWidth;
+          for (let c = 0; c < frameWidth; c++) {
+            const p = pixels[rowStartInStitched + f * frameWidth + c];
+            const idx = (rowStartInFrame + c) * 4;
+            if (p && p !== 0 && typeof p === 'string') {
+              const color = p.startsWith('#') ? p : '#ffffff';
+              imgData.data[idx] = parseInt(color.slice(1, 3), 16) || 0;
+              imgData.data[idx+1] = parseInt(color.slice(3, 5), 16) || 0;
+              imgData.data[idx+2] = parseInt(color.slice(5, 7), 16) || 0;
+              imgData.data[idx+3] = 255;
+            } else {
+              const bgCol = bgColor || '#000000';
+              imgData.data[idx] = parseInt(bgCol.slice(1, 3), 16) || 0;
+              imgData.data[idx+1] = parseInt(bgCol.slice(3, 5), 16) || 0;
+              imgData.data[idx+2] = parseInt(bgCol.slice(5, 7), 16) || 0;
+              imgData.data[idx+3] = 255;
+            }
+          }
+        }
+        parsedPixelFrames.push(imgData);
+      }
+    }
+
+    const render = (now) => {
+      ctx.imageSmoothingEnabled = false;
+
+      // 1) Multi-frame pixels from saved preset
+      if (parsedPixelFrames && parsedPixelFrames.length > 1) {
+        const presetSpeed = speed || 8;
+        const clampedSpeed = Math.max(1, Math.min(15, presetSpeed));
+        const delayMs = frameDurationMs ? Math.max(16, frameDurationMs) : Math.max(50, (0.4 - (clampedSpeed * 0.025)) * 1000);
+        
+        if (now - lastFrameTime >= delayMs) {
+          currentFrameIdx = (currentFrameIdx + 1) % parsedPixelFrames.length;
+          lastFrameTime = now;
+        }
+        ctx.putImageData(parsedPixelFrames[currentFrameIdx % parsedPixelFrames.length], 0, 0);
+        animId = requestAnimationFrame(render);
+        return;
+      }
+
+      // Fill background
+      ctx.fillStyle = bgColor || '#000000';
+      ctx.fillRect(0, 0, 64, 20);
+
+      // 2) Video playback
+      if (fileType === 'video') {
+        const v = videoRef.current;
+        if (v && v.readyState >= 2) {
+          try {
+            ctx.drawImage(v, canvasX, canvasY, dw, dh);
+          } catch {}
+        }
+        animId = requestAnimationFrame(render);
+        return;
+      }
+
+      // 3) Decoded GIF playback
+      if (fileType === 'gif' && gifBitmapsRef.current.length > 0) {
+        const frames = gifBitmapsRef.current;
+        const curFrame = frames[currentFrameIdx % frames.length];
+        const frameDur = curFrame ? curFrame.duration : 100;
+        if (now - lastFrameTime >= frameDur) {
+          currentFrameIdx = (currentFrameIdx + 1) % frames.length;
+          lastFrameTime = now;
+        }
+        const frameToDraw = frames[currentFrameIdx % frames.length];
+        if (frameToDraw && frameToDraw.bitmap) {
+          try {
+            ctx.drawImage(frameToDraw.bitmap, canvasX, canvasY, dw, dh);
+          } catch {}
+        }
+        animId = requestAnimationFrame(render);
+        return;
+      }
+
+      // 4) Single-frame pixels fallback
+      if (pixels && pixels.length >= 1280) {
+        const bgCol = bgColor || '#000000';
+        const bgR = parseInt(bgCol.slice(1, 3), 16) || 0;
+        const bgG = parseInt(bgCol.slice(3, 5), 16) || 0;
+        const bgB = parseInt(bgCol.slice(5, 7), 16) || 0;
+        const imgData = ctx.createImageData(64, 20);
+        for (let i = 0; i < 1280; i++) {
+          const p = pixels[i];
+          const idx = i * 4;
+          let r = bgR, g = bgG, b = bgB;
+          if (p && typeof p === 'string' && p.startsWith('#')) {
+            r = parseInt(p.slice(1, 3), 16) || 0;
+            g = parseInt(p.slice(3, 5), 16) || 0;
+            b = parseInt(p.slice(5, 7), 16) || 0;
+          } else if (p && p !== 0) {
+            r = 255; g = 255; b = 255;
+          }
+          imgData.data[idx] = r;
+          imgData.data[idx + 1] = g;
+          imgData.data[idx + 2] = b;
+          imgData.data[idx + 3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+      }
+    };
+
+    animId = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(animId);
+  }, [imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor, pixels, gifDecoded, speed, frameDurationMs]);
+
+  return (
+    <>
+      {fileType === 'video' && (
+        <video
+          ref={videoRef}
+          src={imgSrc}
+          autoPlay
+          loop
+          muted
+          playsInline
+          style={{
+            position: 'absolute',
+            width: '1px',
+            height: '1px',
+            opacity: 0.01,
+            pointerEvents: 'none',
+            zIndex: 0
+          }}
+        />
+      )}
+      <canvas
+        ref={canvasRef}
+        width={64}
+        height={20}
+        className="led-preview"
+        style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          objectFit: 'fill',
+          imageRendering: 'pixelated',
+          pointerEvents: 'none',
+          userSelect: 'none',
+          display: 'block',
+          zIndex: 1
+        }}
+      />
+    </>
   );
 };
 
@@ -1139,11 +1455,8 @@ export default function App() {
   
   const [power, setPower] = useState(false);
   const [macAddress, setMacAddress] = useState(() => {
-    const saved = localStorage.getItem('loy_mac') || '';
-    if (saved && !saved.startsWith('FF:24:10:29:')) {
-      return DEFAULT_MAC;
-    }
-    return saved || DEFAULT_MAC;
+    const saved = localStorage.getItem('loy_last_connected_mac') || localStorage.getItem('loy_mac') || '';
+    return saved;
   });
   const [isConnecting, setIsConnecting] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
@@ -1206,7 +1519,13 @@ export default function App() {
     try {
       const res = await axios.get(`${API_BASE}/status`);
       setStatus(res.data);
-      if (res.data && res.data.connected === false) {
+      if (res.data && res.data.connected && res.data.address) {
+        setMacAddress(res.data.address);
+        try {
+          localStorage.setItem('loy_last_connected_mac', res.data.address);
+          localStorage.setItem('loy_mac', res.data.address);
+        } catch (e) {}
+      } else if (res.data && res.data.connected === false) {
         setPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
         setLocalPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
       }
@@ -1234,14 +1553,15 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Dedicated Auto-Connect Effect
+  // Dedicated Auto-Connect Effect — only reconnect to the most recently connected sign
   useEffect(() => {
-    if (hasFetchedStatus && !status.connected && macAddress && !autoConnectTried.current && !isConnecting && !apiError) {
-      console.log("[auto-connect] Attempting to reconnect to:", macAddress);
+    const lastConnected = localStorage.getItem('loy_last_connected_mac');
+    if (hasFetchedStatus && !status.connected && lastConnected && !autoConnectTried.current && !isConnecting && !apiError) {
+      console.log("[auto-connect] Attempting to reconnect to most recently connected sign:", lastConnected);
       autoConnectTried.current = true;
-      doConnect(macAddress, false, true);
+      doConnect(lastConnected, false, true);
     }
-  }, [hasFetchedStatus, status.connected, macAddress, isConnecting, apiError]);
+  }, [hasFetchedStatus, status.connected, isConnecting, apiError]);
 
   const doConnect = async (addr, isRetry = false, isAuto = false) => {
     if (!addr || (isConnecting && !isRetry)) return;
@@ -1254,12 +1574,16 @@ export default function App() {
       const connectedAddr = resPost.data?.address || addr;
       if (connectedAddr && connectedAddr.toUpperCase().startsWith('FF:24:10:29:')) {
         setMacAddress(connectedAddr);
+        localStorage.setItem('loy_last_connected_mac', connectedAddr);
+        localStorage.setItem('loy_mac', connectedAddr);
       }
       const res = await axios.get(`${API_BASE}/status`);
       setStatus(res.data);
       if (res.data.connected) {
         setScanOpen(false);
         setConnectionFailed(false);
+        localStorage.setItem('loy_last_connected_mac', res.data.address || connectedAddr);
+        localStorage.setItem('loy_mac', res.data.address || connectedAddr);
         if (res.data.power !== undefined) setPower(res.data.power);
         else setPower(true);
       } else {
@@ -1336,7 +1660,7 @@ export default function App() {
   const [dbLoaded, setDbLoaded] = useState(false);
   const [allSavedPresets, setAllSavedPresets] = useState({});
 
-  const activeMac = status.address?.toUpperCase() || DEFAULT_MAC;
+  const activeMac = status.address?.toUpperCase() || localStorage.getItem('loy_last_connected_mac') || 'DEFAULT';
   const savedPresets = normalizeSavedPresets(allSavedPresets[activeMac]);
 
   const setSavedPresets = (nextSaved) => {
@@ -1807,35 +2131,43 @@ export default function App() {
 
   // Sync on connection
   useEffect(() => {
-    if (status.connected) {
+    if (status.connected && status.address && dbLoaded && presets && presets.length > 0) {
       setScanOpen(false);
       setIsManualOverride(false);
       isManualOverrideRef.current = false;
-      syncHardwareSlots();
+      const targetMac = status.address.toUpperCase();
+
       const pushDefaultOrActive = async () => {
-        // 1. Push local default preset to this sign's default preset (slot 1) if needed
-        const def = (presets || []).find(p => p.isDefault);
-        const curSlot2 = savedPresetsRef.current?.[1]?.preset;
-        const needsDefaultPush = !curSlot2 || (def && (
-          curSlot2.name !== def.name ||
-          curSlot2.mode !== def.mode ||
-          curSlot2.text !== def.text ||
-          curSlot2.imgSrc !== def.imgSrc
-        ));
-        if (def && needsDefaultPush) {
-          console.log("[connect] Pushing local default preset to sign default slot (slot 1)...");
+        // 1. Check if hardware slot 1 (Default Preset, slot 2 in UI) is synced to this sign's hardware
+        const def = presets.find(p => p.isDefault);
+        const isDefaultSynced = localStorage.getItem('loy_hw_default_synced_' + targetMac);
+        if (def && !isDefaultSynced) {
+          console.log("[connect] Pushing local default preset to new sign default slot (slot 1)...");
           try {
-            await axios.post(`${API_BASE}/save-preset`, {
+            const resSave = await axios.post(`${API_BASE}/save-preset`, {
               slot_id: 1,
-              address: status.address || DEFAULT_MAC,
+              address: targetMac,
               preset: def
             });
+            const savedThumb = resSave.data?.preview_url
+              ? `${API_BASE}${resSave.data.preview_url}?t=${Date.now()}`
+              : def.thumbnail;
+            setAllSavedPresets(prev => {
+              const curList = normalizeSavedPresets(prev[targetMac]);
+              curList[1] = {
+                slotNumber: 2,
+                hwSlotId: 1,
+                preset: { ...def, id: 'hw-slot-1', hwSlotId: 1, thumbnail: savedThumb, isHardware: false }
+              };
+              return { ...prev, [targetMac]: curList };
+            });
+            localStorage.setItem('loy_hw_default_synced_' + targetMac, 'true');
           } catch (e) {
             console.warn("[connect] Failed to push default to slot 1:", e);
           }
         }
 
-        // 2. Calendar Slot (slot 0)
+        // 2. Calendar Slot (hardware slot 0, slot 1 in UI)
         let evs = [];
         try {
           evs = await fetchEvents();
@@ -1843,24 +2175,16 @@ export default function App() {
 
         const activeEvents = (evs || []).filter(ev => isEventActive(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined');
         const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
+
         if (active) {
           const activeStr = getEventDisplayString(active);
-          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
-          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
-          if (currentSlot1Text && currentSlot1Text === activeStr.trim()) {
-            console.log("[connect] Slot 1 already contains active event text, playing slot 0 directly:", activeStr);
-            setLastPushedId('hw-slot-0');
-            try {
-              await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
-            } catch (e) {}
-          } else {
-            console.log("[connect] Pushing active event on connect:", active.summary);
-            await handlePush(activeStr, false);
-          }
+          console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
+          await handlePush(activeStr, false);
+          localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         } else {
-          // If no active event right now: check if slot 0 has the calendar preset previously pushed to the other sign
-          const curSlot1 = savedPresetsRef.current?.[0]?.preset;
-          if (!curSlot1) {
+          // If no active event right now: check if this sign has had its calendar preset initialized on hardware
+          const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
+          if (!isCalSynced) {
             let prevCal = null;
             try {
               const stored = localStorage.getItem('loy_last_calendar_preset');
@@ -1868,20 +2192,33 @@ export default function App() {
             } catch (e) {}
             if (!prevCal) {
               for (const k of Object.keys(allSavedPresets || {})) {
-                if (k !== activeMac && allSavedPresets[k]?.[0]?.preset) {
+                if (k !== targetMac && allSavedPresets[k]?.[0]?.preset) {
                   prevCal = allSavedPresets[k][0].preset;
                   break;
                 }
               }
             }
             if (prevCal) {
-              console.log("[connect] Pushing previously pushed calendar preset to new sign slot 0:", prevCal.text || prevCal.name);
+              console.log("[connect] Pushing cached calendar preset to new sign slot 0:", prevCal.text || prevCal.name);
               try {
-                await axios.post(`${API_BASE}/save-preset`, {
+                const resCal = await axios.post(`${API_BASE}/save-preset`, {
                   slot_id: 0,
-                  address: status.address || DEFAULT_MAC,
+                  address: targetMac,
                   preset: prevCal
                 });
+                const calThumb = resCal.data?.preview_url
+                  ? `${API_BASE}${resCal.data.preview_url}?t=${Date.now()}`
+                  : prevCal.thumbnail;
+                setAllSavedPresets(prev => {
+                  const curList = normalizeSavedPresets(prev[targetMac]);
+                  curList[0] = {
+                    slotNumber: 1,
+                    hwSlotId: 0,
+                    preset: { ...prevCal, id: 'hw-slot-0', hwSlotId: 0, thumbnail: calThumb, isHardware: false }
+                  };
+                  return { ...prev, [targetMac]: curList };
+                });
+                localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
               } catch (e) {
                 console.warn("[connect] Failed to push previous calendar preset to slot 0:", e);
               }
@@ -1892,7 +2229,7 @@ export default function App() {
           console.log("[connect] Playing hardware default slot (slot 1)");
           setLastPushedId('hw-slot-1');
           try {
-            await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+            await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
           } catch (e) {
             console.warn("[connect] No default saved to slot 1 yet:", e);
           }
@@ -1901,13 +2238,13 @@ export default function App() {
         if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
       };
       pushDefaultOrActive();
-    } else {
+    } else if (!status.connected) {
       setPushMessage(prev => prev && prev.toLowerCase().includes('error') ? prev : '');
       setIsManualOverride(false);
       isManualOverrideRef.current = false;
       setLastPushedId(null);
     }
-  }, [status.connected]);
+  }, [status.connected, status.address, dbLoaded, presets]);
 
   // Regular poll
   useEffect(() => {
@@ -1982,23 +2319,41 @@ export default function App() {
       } else if (data.isDefault && status?.connected) {
         // Default preset: play saved default preset (hardware slot 1) directly from hardware
         setLastPushedId('hw-slot-1');
-        await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
-        if (manual && !skipMessages) {
-          handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        try {
+          await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || '')}`);
+          if (manual && !skipMessages) {
+            handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+          }
+        } catch (defErr) {
+          if (defErr.response?.status === 404) {
+            // Hardware slot not saved yet for this sign — push the local preset data directly
+            console.log('[handlePush] Default HW slot not found, pushing local preset data directly');
+            const fallbackData = { ...data };
+            if (fallbackData.mode === 'text') delete fallbackData.pixels;
+            await axios.post(`${API_BASE}/push`, fallbackData);
+            if (manual && !skipMessages) {
+              handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+            }
+          } else {
+            throw defErr;
+          }
         }
       } else if (isEvent) {
         if (status.connected) {
           const eventPresetCopy = { ...data };
           delete eventPresetCopy.pixels;
 
+          const targetMac = (status.address || '').toUpperCase();
           const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
           const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
           const targetEventText = (eventPresetCopy.text || eventPresetCopy.name || '').trim();
+          const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
 
-          if (currentSlot1Text && currentSlot1Text === targetEventText) {
+          // Only take shortcut if it's an automatic background refresh AND hardware is already confirmed synced
+          if (!manual && isCalSynced && currentSlot1Text && currentSlot1Text === targetEventText) {
             console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
             setLastPushedId('hw-slot-0');
-            await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+            await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
             if (manual && !skipMessages) {
               handleSetPushMessage('Playing from Slot 1');
             }
@@ -2011,7 +2366,7 @@ export default function App() {
           try {
             const saveRes = await axios.post(`${API_BASE}/save-preset`, {
               slot_id: 0,
-              address: status.address || DEFAULT_MAC,
+              address: targetMac,
               preset: eventPresetCopy
             });
             const savedThumb = saveRes.data?.preview_url
@@ -2027,6 +2382,7 @@ export default function App() {
               return next;
             });
             setLastPushedId('hw-slot-0');
+            localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
             try {
               localStorage.setItem('loy_last_calendar_preset', JSON.stringify({ ...eventPresetCopy, id: 'hw-slot-0', thumbnail: savedThumb || eventPresetCopy.thumbnail }));
             } catch (e) {}
@@ -2178,9 +2534,16 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [recents, setRecents] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('loy_recents') || '[]');
-      if (Array.isArray(saved) && saved.length > 0) return saved;
+      if (Array.isArray(saved) && saved.length > 0) {
+        if (!saved.some(d => d.address === DEFAULT_MAC)) {
+          return [...saved, { address: DEFAULT_MAC, name: 'Test Sign' }];
+        }
+        return saved;
+      }
     } catch {}
-    return [{ address: DEFAULT_MAC, name: 'YS524B150258' }];
+    return [
+      { address: DEFAULT_MAC, name: 'Test Sign' }
+    ];
   });
   const [scanTab, setScanTab] = useState('all');
   const [isScanning, setIsScanning] = useState(false);
@@ -2222,8 +2585,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     try { await axios.post(`${API_BASE}/speed?level=${val}`); } catch (e) {}
   };
 
-  const startScan = async () => {
-    setScanTab('all');
+  const startScan = async (forcedTab) => {
+    if (forcedTab) setScanTab(forcedTab);
     setScanPage(0);
     setIsScanning(true);
     setScanResults([]);
@@ -2240,10 +2603,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     setScanOpen(true);
     setScanSearch('');
     setScanPage(0);
-    // Always auto-scan if 'all' tab is active
-    if (scanTab === 'all') {
-      startScan();
-    }
+    startScan();
   };
 
   const handleConnectOrScan = () => {
@@ -2254,17 +2614,13 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const isMacAddress = (s) => /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(s);
 
   const addRecent = (addr, name) => {
+    if (!addr) return;
     setRecents(prev => {
       const existing = prev.find(d => d.address === addr);
-      // If the new name is just the MAC address or undefined, and we already have a real name, keep the real name
-      let finalName = name || (addr === DEFAULT_MAC ? 'YS524B150258' : addr);
+      let finalName = name || addr;
       if (existing && existing.name && !isMacAddress(existing.name) && (!name || name === addr)) {
         finalName = existing.name;
       }
-      if (isMacAddress(finalName) && addr === DEFAULT_MAC) {
-        finalName = 'YS524B150258';
-      }
-      // Don't create a new entry if we only have the MAC and no existing record
       if (!existing && isMacAddress(finalName)) return prev;
       const filtered = prev.filter(d => d.address !== addr);
       return [{ address: addr, name: finalName }, ...filtered].slice(0, 10);
@@ -2283,6 +2639,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     setScanOpen(false);
     setIsManualOverride(false);
     setLastPushedId(null);
+    setMacAddress(addr);
+    try {
+      localStorage.setItem('loy_last_connected_mac', addr);
+      localStorage.setItem('loy_mac', addr);
+    } catch (e) {}
     pendingConnectRef.current = { addr, name }; // remember name; only commit to recents on success
     onConnect(addr);
   };
@@ -2303,10 +2664,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   }, [status.connected, status.address]);
 
   // For recents, filter out any nameless records while retaining known signs
-  const recentsFiltered = recents.map(d => ({
-    ...d,
-    name: (isMacAddress(d.name) && d.address === DEFAULT_MAC) ? 'YS524B150258' : d.name
-  })).filter(d => d.name && (!isMacAddress(d.name) || d.address === DEFAULT_MAC));
+  const recentsFiltered = recents.filter(d => d.name && !isMacAddress(d.name));
   const devicesToFilter = scanTab === 'recents' ? recentsFiltered : scanResults;
   const filteredDevices = devicesToFilter.filter(d =>
     d.name?.toLowerCase().includes(scanSearch.toLowerCase()) ||
@@ -2627,8 +2985,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           <div onClick={togglePower} className={`power-btn ${power ? 'on' : 'off'} ${!status.connected ? 'disabled' : ''}`} title={power ? 'Turn Off' : 'Turn On'}>
             <Power size={26} />
           </div>
-          <div onClick={onClear} className={`power-btn off ${!status.connected ? 'disabled' : ''}`} style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#f8fafc', opacity: status.connected ? 1 : 0.2, pointerEvents: status.connected ? 'auto' : 'none' }} title="Set to Default" onMouseOver={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)'; e.currentTarget.style.transform = 'scale(1.05)'; }} onMouseOut={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.transform = 'none'; }}>
-            <img src="https://static.thenounproject.com/png/5507757-200.png" alt="Clear" width="34" height="34" style={{ filter: 'invert(100%)', opacity: status.connected ? 0.9 : 0.4 }} />
+          <div onClick={() => {
+            const defPreset = (presets || []).find(p => p.isDefault);
+            if (defPreset && status?.connected) {
+              setIsManualOverride(true);
+              pushPreset(defPreset);
+            }
+          }} className={`power-btn off ${!status.connected ? 'disabled' : ''}`} style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#f8fafc', opacity: status.connected ? 1 : 0.2, pointerEvents: status.connected ? 'auto' : 'none' }} title="Trigger Default Preset" onMouseOver={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)'; e.currentTarget.style.transform = 'scale(1.05)'; }} onMouseOut={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.transform = 'none'; }}>
+            <img src="https://static.thenounproject.com/png/5507757-200.png" alt="Default" width="34" height="34" style={{ filter: 'invert(100%)', opacity: status.connected ? 0.9 : 0.4 }} />
           </div>
         </div>
 
@@ -2741,16 +3105,30 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             )}
           </>
         ) : (
-          <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <button 
               className="btn-styled flex items-center justify-center gap-2" 
-              style={{ whiteSpace: 'nowrap', minWidth: '160px', height: '42px', padding: '0 20px' }} 
-              onClick={isConnecting ? onDisconnect : handleConnectOrScan} 
-              disabled={isScanning}
+              style={{ whiteSpace: 'nowrap', minWidth: '140px', height: '42px', padding: '0 18px' }} 
+              onClick={() => {
+                if (isConnecting) onDisconnect();
+                else if (macAddress) onConnect(macAddress);
+                else handleConnectOrScan();
+              }} 
+              title={macAddress ? `Connect to ${deviceNames[macAddress?.toUpperCase()] || macAddress}` : 'Connect'}
             >
               {isConnecting ? (
                 <><RefreshCw size={14} className="animate-spin" /> Cancel</>
-              ) : isScanning ? 'Scanning...' : 'Connect'}
+              ) : isScanning ? 'Scanning...' : (
+                `Connect${macAddress && deviceNames[macAddress?.toUpperCase()] ? ` (${deviceNames[macAddress.toUpperCase()]})` : ''}`
+              )}
+            </button>
+            <button
+              className="btn-styled flex items-center justify-center"
+              style={{ height: '42px', width: '42px', padding: 0 }}
+              onClick={handleScanOpen}
+              title="Change Sign / Scan Nearby"
+            >
+              <Search size={15} />
             </button>
             {connectionFailed && !isConnecting && (
               <div style={{
@@ -2763,7 +3141,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 <span>Connection failed — power cycle the sign and retry</span>
               </div>
             )}
-          </>
+          </div>
         )}
 
         {/* Scan popup — floats above, doesn't push layout */}
@@ -2799,38 +3177,39 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   <button 
                     className={`btn-styled ${scanTab === 'all' ? '' : 'inactive'}`}
                     style={{ flex: 1, padding: '10px 0', minWidth: 0, fontSize: '12px', textTransform: 'uppercase' }}
-                    onClick={() => { setScanTab('all'); setScanPage(0); if (scanResults.length === 0) startScan(); }}
+                    onClick={() => { setScanTab('all'); setScanPage(0); if (!isScanning && scanResults.length === 0) startScan('all'); }}
                   >
                     All Devices
                   </button>
                   <button 
                     className={`btn-styled ${scanTab === 'recents' ? '' : 'inactive'}`}
                     style={{ flex: 1, padding: '10px 0', minWidth: 0, fontSize: '12px', textTransform: 'uppercase' }}
-                    onClick={() => { setScanTab('recents'); setScanPage(0); }}
+                    onClick={() => { setScanTab('recents'); setScanPage(0); if (!isScanning && scanResults.length === 0) startScan('recents'); }}
                   >
                     Recents
                   </button>
                 </div>
 
                 {/* Search */}
-                {!isScanning && (
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' }}>
-                    <div className="input-field" style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, padding: '10px 14px' }}>
-                      <Search size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
-                      <input
-                        style={{ background: 'transparent', border: 'none', color: 'white', flex: 1, outline: 'none', width: '100%', fontSize: '12px' }}
-                        placeholder={scanTab === 'recents' ? "Search recents..." : "Search for a device..."}
-                        value={scanSearch}
-                        onChange={(e) => { setScanSearch(e.target.value); setScanPage(0); }}
-                      />
-                    </div>
-                    {scanTab === 'all' && (
-                      <button onClick={startScan} className="btn-styled" style={{ padding: '11px', minWidth: 'auto', flexShrink: 0, borderRadius: '14px' }}>
-                        <RefreshCw size={14} />
-                      </button>
-                    )}
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px' }}>
+                  <div className="input-field" style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, padding: '10px 14px' }}>
+                    <Search size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
+                    <input
+                      style={{ background: 'transparent', border: 'none', color: 'white', flex: 1, outline: 'none', width: '100%', fontSize: '12px' }}
+                      placeholder={scanTab === 'recents' ? "Search recents..." : "Search for a device..."}
+                      value={scanSearch}
+                      onChange={(e) => { setScanSearch(e.target.value); setScanPage(0); }}
+                    />
                   </div>
-                )}
+                  <button 
+                    onClick={() => startScan(scanTab)} 
+                    className="btn-styled" 
+                    style={{ padding: '11px', minWidth: 'auto', flexShrink: 0, borderRadius: '14px' }}
+                    title="Scan for nearby devices"
+                  >
+                    <RefreshCw size={14} className={isScanning ? "animate-spin text-violet-400" : ""} />
+                  </button>
+                </div>
 
                 <div className="scan-popup-list">
                   {isScanning && scanTab === 'all' && (
@@ -2866,17 +3245,23 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     const defaultName = sn || dev.name || 'LED Sign';
                     const displayName = customName || defaultName;
                     
-                    const isAvailable = scanTab === 'all' || 
-                      scanResults.some(r => r.address === dev.address) ||
-                      (status.connected && status.address?.toLowerCase() === dev.address?.toLowerCase());
+                    const isConnected = status.connected && status.address?.toLowerCase() === dev.address?.toLowerCase();
+                    const isDiscovered = scanResults.some(r => r.address?.toLowerCase() === dev.address?.toLowerCase());
+                    const isAvailable = isConnected || isDiscovered;
                     
                     return (
                       <div 
                         key={dev.address} 
                         className="scan-item"
-                        style={!isAvailable ? { opacity: 0.4, filter: 'grayscale(100%)' } : {}}
+                        style={!isAvailable ? {
+                          opacity: 0.55,
+                          filter: 'grayscale(100%)',
+                          cursor: 'pointer'
+                        } : {
+                          cursor: 'pointer'
+                        }}
                         onClick={() => {
-                          if (isAvailable) pickDevice(dev.address, rawName);
+                          pickDevice(dev.address, rawName);
                         }}
                       >
                         <div className="flex flex-col gap-0.5">
@@ -2884,6 +3269,19 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                             <p className="font-bold text-sm text-slate-100" style={!isAvailable ? { color: '#94a3b8' } : {}}>
                               {displayName}
                             </p>
+                            {isConnected ? (
+                              <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(34,197,94,0.15)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)', fontWeight: 600 }}>
+                                Connected
+                              </span>
+                            ) : isAvailable ? (
+                              <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(56,189,248,0.15)', color: '#38bdf8', border: '1px solid rgba(56,189,248,0.3)', fontWeight: 600 }}>
+                                Available
+                              </span>
+                            ) : (
+                              <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(255,255,255,0.06)', color: '#94a3b8', border: '1px solid rgba(255,255,255,0.1)', fontWeight: 600 }}>
+                                Offline
+                              </span>
+                            )}
                           </div>
                           <p className="text-xs font-mono text-slate-500" style={!isAvailable ? { color: '#64748b' } : {}}>
                             {dev.address}
@@ -3410,7 +3808,7 @@ function EventCard({ ev, now, onPush }) {
         >
           {ev.html_link || ev.id ? (
             <a 
-              href={ev.id ? `https://calendar.google.com/calendar/r/eventedit/${ev.id}` : ev.html_link} 
+              href={ev.html_link || `https://calendar.google.com/calendar/r/event/${ev.id}`} 
               target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}
               onClick={(e) => e.stopPropagation()}
             >
@@ -3424,7 +3822,7 @@ function EventCard({ ev, now, onPush }) {
         >
           {ev.html_link || ev.id ? (
             <a 
-              href={ev.id ? `https://calendar.google.com/calendar/r/eventedit/${ev.id}` : ev.html_link} 
+              href={ev.html_link || `https://calendar.google.com/calendar/r/event/${ev.id}`} 
               target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}
               onClick={(e) => e.stopPropagation()}
             >
@@ -3800,12 +4198,15 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   const [editingId, setEditingId] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
   const [animDropdownOpen, setAnimDropdownOpen] = useState(false);
+  const fileInputRef = useRef(null);
+  const [showGrid, setShowGrid] = useState(true);
+  const [showGuides, setShowGuides] = useState(true);
   const [form, setForm] = useState({
     name: '', 
     text: '', 
     textColor: '#ffffff', 
     bgColor: '#000000', 
-    animation: 'show now', 
+    animation: 'continuous left shift', 
     speed: 8, 
     rotation: 0,
     mode: 'text', // 'text', 'drawing', or 'image'
@@ -4029,47 +4430,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
   }, [isModalOpen, form.mode, form.imgSrc, form.canvasX, form.dwBase, form.fileType]);
 
-  // Throttled animation preview loop for video/gif
-  useEffect(() => {
-    if (!isModalOpen || form.mode !== 'image' || !form.imgSrc || !imageObjRef.current) return;
-    if (form.fileType !== 'video') return;
-
-    let active = true;
-    let lastTime = 0;
-    const fps = 10;
-    const interval = 1000 / fps;
-
-    const loop = (timestamp) => {
-      if (!active) return;
-      
-      if (!lastTime) lastTime = timestamp;
-      const elapsed = timestamp - lastTime;
-
-      if (elapsed > interval) {
-        lastTime = timestamp - (elapsed % interval);
-        
-        if (imageObjRef.current) {
-          const nextPixels = runCropRender(
-            imageObjRef.current,
-            form.canvasX,
-            form.canvasY,
-            form.dwBase * form.zoom,
-            form.dhBase * form.zoom,
-            form.bgColor || '#000000'
-          );
-          setForm(prev => ({ ...prev, pixels: nextPixels }));
-        }
-      }
-      
-      requestAnimationFrame(loop);
-    };
-
-    const animId = requestAnimationFrame(loop);
-    return () => {
-      active = false;
-      cancelAnimationFrame(animId);
-    };
-  }, [isModalOpen, form.mode, form.imgSrc, form.fileType, form.canvasX, form.canvasY, form.zoom, form.dwBase, form.dhBase, form.bgColor]);
 
   const [isEraserActive, setIsEraserActive] = useState(false);
   const [undoStack, setUndoStack] = useState([]);
@@ -4380,6 +4740,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         ...form, 
         pixels: finalPixels,
         thumbnail,
+        animation: form.mode === 'text' ? (form.animation || 'continuous left shift') : 'show now',
         name: form.mode === 'clock' ? 'Digital Clock' :
               form.mode === 'drawing' ? `Drawing ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 
               form.mode === 'image' ? (form.fileType === 'video' ? 'Custom Video' : form.fileType === 'gif' ? 'Custom GIF' : 'Custom Image') : (form.text || 'Untitled Text') 
@@ -4404,7 +4765,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       setEditingId(null);
       setForm({
         name: '', text: '', textColor: '#ffffff', bgColor: '#000000',
-        animation: 'show now', speed: 8, rotation: 0,
+        animation: 'continuous left shift', speed: 8, rotation: 0,
         mode: 'text', pixels: Array(64 * 20).fill(0),
         imgSrc: null, fileType: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20,
         timeFormat: '12h',
@@ -4487,7 +4848,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
     
     const fileType = p.fileType || (p.name.includes('GIF') || (p.imgSrc && p.imgSrc.startsWith('data:image/gif')) ? 'gif' : (p.imgSrc ? 'image' : null));
-    setForm({ ...p, fileType, pixels: normalizedPixels, animation: p.animation || 'show now' });
+    setForm({ ...p, fileType, pixels: normalizedPixels, animation: p.animation || 'continuous left shift' });
     setIsModalOpen(true);
   };
 
@@ -4516,9 +4877,20 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         if (onPushSuccess) onPushSuccess();
       } catch (err) {
         console.error('Failed to trigger default hardware preset:', err);
-        const detail = err.response?.data?.detail || err.message || '';
-        if (typeof setLocalPushMessage === 'function') {
-          setLocalPushMessage(`Error: ${detail}`);
+        if (err.response?.status === 404) {
+          // Hardware slot not yet saved for this sign — fall back to pushing local preset data directly
+          console.log('[pushPreset] Hardware slot not found, falling back to local push');
+          try {
+            await onPush(p, true);
+            if (onPushSuccess) onPushSuccess();
+          } catch (e) {
+            // handled in handlePush
+          }
+        } else {
+          const detail = err.response?.data?.detail || err.message || '';
+          if (typeof setLocalPushMessage === 'function') {
+            setLocalPushMessage(`Error: ${detail}`);
+          }
         }
       } finally {
         if (typeof setPushing === 'function') setPushing(false);
@@ -4581,7 +4953,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 cursor: 'pointer'
               }}
               onClick={() => {
-                editingModeRef.current = 'text'; setEditingId(null); setForm({name: '', text: '', textColor: '#ffffff', bgColor: '#000000', animation: 'show now', speed: 8, rotation: 0, mode: 'text', pixels: Array(64 * 20).fill(0), spacing: 1, views: 1, imgSrc: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20, timeFormat: '12h', showSeconds: true, clockStyle: 'default', isDefault: false}); setIsModalOpen(true);
+                editingModeRef.current = 'text'; setEditingId(null); setForm({name: '', text: '', textColor: '#ffffff', bgColor: '#000000', animation: 'continuous left shift', speed: 8, rotation: 0, mode: 'text', pixels: Array(64 * 20).fill(0), spacing: 1, views: 1, imgSrc: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20, timeFormat: '12h', showSeconds: true, clockStyle: 'default', isDefault: false}); setIsModalOpen(true);
               }}
             >
               <Plus className="text-emerald-400" size={24} />
@@ -4668,225 +5040,283 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               <div style={{ marginBottom: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' }}>
                 <div className="preview-stack opacity-100 scale-100" style={{ margin: '0 auto', width: '100%', maxWidth: 'var(--preview-width)' }}>
                   {form.mode === 'image' ? (
-                    !form.imgSrc ? (
-                      <div 
-                        ref={containerRef}
-                        onClick={() => document.getElementById('img-upload').click()}
-                        onDragEnter={handleMediaDragOver}
-                        onDragOver={handleMediaDragOver}
-                        onDragLeave={handleMediaDragLeave}
-                        onDrop={handleMediaDrop}
-                        className="preview-box cursor-pointer relative group"
-                        style={{ 
-                          background: form.bgColor || '#000000', 
-                          boxSizing: 'border-box'
+                    <>
+                      <input 
+                        type="file" 
+                        ref={fileInputRef} 
+                        id="img-upload" 
+                        hidden 
+                        accept="image/*,video/*"
+                        onChange={e => {
+                          handleMediaFile(e.target.files?.[0]);
+                          e.target.value = '';
                         }}
-                      >
+                      />
+                      {!form.imgSrc ? (
                         <div 
-                          style={{
-                            position: 'absolute',
-                            top: 0,
-                            left: 0,
-                            width: '100%',
-                            height: '100%',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            backgroundColor: 'transparent',
-                            borderRadius: '8px',
-                            transition: 'background-color 0.2s',
-                            pointerEvents: 'none'
+                          ref={containerRef}
+                          onClick={() => fileInputRef.current?.click()}
+                          onDragEnter={handleMediaDragOver}
+                          onDragOver={handleMediaDragOver}
+                          onDragLeave={handleMediaDragLeave}
+                          onDrop={handleMediaDrop}
+                          className="preview-box cursor-pointer relative group"
+                          style={{ 
+                            background: form.bgColor || '#000000', 
+                            boxSizing: 'border-box'
                           }}
                         >
-                          <ImageIcon size={48} className="text-slate-400 mb-2 transition-transform group-hover:scale-105" />
-                          <span className="text-sm font-semibold text-slate-300">Select Image/Video</span>
-                        </div>
-                        {isDraggingOver && (
-                          <div style={{
-                            position: 'absolute',
-                            inset: 0,
-                            backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                            border: '2px dashed #10B981',
-                            borderRadius: '8px',
-                            zIndex: 50,
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: '#10B981',
-                            fontWeight: 'bold',
-                            pointerEvents: 'none',
-                            backdropFilter: 'blur(4px)'
-                          }}>
-                            <Upload size={32} className="animate-bounce mb-2" />
-                            <span className="text-sm">Drop to Upload Media</span>
+                          <div 
+                            style={{
+                              position: 'absolute',
+                              top: 0,
+                              left: 0,
+                              width: '100%',
+                              height: '100%',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              backgroundColor: 'transparent',
+                              borderRadius: '8px',
+                              transition: 'background-color 0.2s',
+                              pointerEvents: 'none'
+                            }}
+                          >
+                            <ImageIcon size={48} className="text-slate-400 mb-2 transition-transform group-hover:scale-105" />
+                            <span className="text-sm font-semibold text-slate-300">Select Image/Video</span>
                           </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div 
-                        ref={containerRef}
-                        onDragEnter={handleMediaDragOver}
-                        onDragOver={handleMediaDragOver}
-                        onDragLeave={handleMediaDragLeave}
-                        onDrop={handleMediaDrop}
-                        className="preview-box"
-                        style={{
-                          backgroundColor: form.bgColor || '#000000',
-                          userSelect: 'none',
-                          cursor: 'grab',
-                          boxSizing: 'border-box'
-                        }}
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          if (!form.imgSrc || !imageObjRef.current) return;
-                          
-                          const container = e.currentTarget;
-                          const scale = (container.clientWidth || 512) / 64;
-                          const startX = e.clientX;
-                          const startY = e.clientY;
-                          const initialCanvasX = form.canvasX;
-                          const initialCanvasY = form.canvasY;
-                          
-                          container.style.cursor = 'grabbing';
-                          
-                          const handleDragMove = (moveEvent) => {
-                            const dx = moveEvent.clientX - startX;
-                            const dy = moveEvent.clientY - startY;
+                          {isDraggingOver && (
+                            <div style={{
+                              position: 'absolute',
+                              inset: 0,
+                              backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                              border: '2px dashed #10B981',
+                              borderRadius: '8px',
+                              zIndex: 50,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              color: '#10B981',
+                              fontWeight: 'bold',
+                              pointerEvents: 'none',
+                              backdropFilter: 'blur(4px)'
+                            }}>
+                              <Upload size={32} className="animate-bounce mb-2" />
+                              <span className="text-sm">Drop to Upload Media</span>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div 
+                          ref={containerRef}
+                          onDragEnter={handleMediaDragOver}
+                          onDragOver={handleMediaDragOver}
+                          onDragLeave={handleMediaDragLeave}
+                          onDrop={handleMediaDrop}
+                          className="preview-box"
+                          style={{
+                            backgroundColor: form.bgColor || '#000000',
+                            userSelect: 'none',
+                            cursor: 'grab',
+                            boxSizing: 'border-box',
+                            position: 'relative'
+                          }}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            if (!form.imgSrc || !imageObjRef.current) return;
                             
-                            let newCanvasX = initialCanvasX + dx / scale;
-                            let newCanvasY = initialCanvasY + dy / scale;
+                            const container = e.currentTarget;
+                            const scale = (container.clientWidth || 512) / 64;
+                            const startX = e.clientX;
+                            const startY = e.clientY;
+                            const initialCanvasX = form.canvasX;
+                            const initialCanvasY = form.canvasY;
                             
-                            const snapThreshold = 2.0;
-                            const imageWidth = form.dwBase * form.zoom;
-                            const imageHeight = form.dhBase * form.zoom;
+                            container.style.cursor = 'grabbing';
+                            
+                            const handleDragMove = (moveEvent) => {
+                              const dx = moveEvent.clientX - startX;
+                              const dy = moveEvent.clientY - startY;
+                              
+                              let newCanvasX = initialCanvasX + dx / scale;
+                              let newCanvasY = initialCanvasY + dy / scale;
+                              
+                              const snapThreshold = 2.0;
+                              const imageWidth = form.dwBase * form.zoom;
+                              const imageHeight = form.dhBase * form.zoom;
 
-                            if (Math.abs(newCanvasX) < snapThreshold) newCanvasX = 0;
-                            if (Math.abs(newCanvasX + imageWidth - 64) < snapThreshold) newCanvasX = 64 - imageWidth;
-                            if (Math.abs(newCanvasY) < snapThreshold) newCanvasY = 0;
-                            if (Math.abs(newCanvasY + imageHeight - 20) < snapThreshold) newCanvasY = 20 - imageHeight;
+                              // Snap to horizontal and vertical center (Photoshop smart guide snap)
+                              if (Math.abs(newCanvasX + imageWidth / 2 - 32) < snapThreshold) {
+                                newCanvasX = 32 - imageWidth / 2;
+                              }
+                              if (Math.abs(newCanvasY + imageHeight / 2 - 10) < snapThreshold) {
+                                newCanvasY = 10 - imageHeight / 2;
+                              }
+
+                              if (Math.abs(newCanvasX) < snapThreshold) newCanvasX = 0;
+                              if (Math.abs(newCanvasX + imageWidth - 64) < snapThreshold) newCanvasX = 64 - imageWidth;
+                              if (Math.abs(newCanvasY) < snapThreshold) newCanvasY = 0;
+                              if (Math.abs(newCanvasY + imageHeight - 20) < snapThreshold) newCanvasY = 20 - imageHeight;
+                              
+                              const nextPixels = runCropRender(
+                                imageObjRef.current,
+                                newCanvasX,
+                                newCanvasY,
+                                form.dwBase * form.zoom,
+                                form.dhBase * form.zoom,
+                                form.bgColor || '#000000'
+                              );
+                              
+                              setForm(prev => ({
+                                ...prev,
+                                canvasX: newCanvasX,
+                                canvasY: newCanvasY,
+                                pixels: nextPixels
+                              }));
+                            };
+                            
+                            const handleDragEnd = () => {
+                              container.style.cursor = 'grab';
+                              window.removeEventListener('mousemove', handleDragMove);
+                              window.removeEventListener('mouseup', handleDragEnd);
+                            };
+                            
+                            window.addEventListener('mousemove', handleDragMove);
+                            window.addEventListener('mouseup', handleDragEnd);
+                          }}
+                          onWheel={(e) => {
+                            e.preventDefault();
+                            if (!imageObjRef.current) return;
+                            
+                            const zoomFactor = e.deltaY < 0 ? 1.05 : 0.95;
+                            const newZoom = Math.min(Math.max(form.zoom * zoomFactor, 0.1), 10.0);
+                            
+                            const oldZoom = form.zoom;
+                            const oldX = form.canvasX;
+                            const oldY = form.canvasY;
+                            
+                            const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                            const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
                             
                             const nextPixels = runCropRender(
                               imageObjRef.current,
-                              newCanvasX,
-                              newCanvasY,
-                              form.dwBase * form.zoom,
-                              form.dhBase * form.zoom,
+                              newX,
+                              newY,
+                              form.dwBase * newZoom,
+                              form.dhBase * newZoom,
                               form.bgColor || '#000000'
                             );
                             
                             setForm(prev => ({
                               ...prev,
-                              canvasX: newCanvasX,
-                              canvasY: newCanvasY,
+                              zoom: newZoom,
+                              canvasX: newX,
+                              canvasY: newY,
                               pixels: nextPixels
                             }));
-                          };
-                          
-                          const handleDragEnd = () => {
-                            container.style.cursor = 'grab';
-                            window.removeEventListener('mousemove', handleDragMove);
-                            window.removeEventListener('mouseup', handleDragEnd);
-                          };
-                          
-                          window.addEventListener('mousemove', handleDragMove);
-                          window.addEventListener('mouseup', handleDragEnd);
-                        }}
-                        onWheel={(e) => {
-                          e.preventDefault();
-                          if (!imageObjRef.current) return;
-                          
-                          const zoomFactor = e.deltaY < 0 ? 1.05 : 0.95;
-                          const newZoom = Math.min(Math.max(form.zoom * zoomFactor, 0.1), 10.0);
-                          
-                          const oldZoom = form.zoom;
-                          const oldX = form.canvasX;
-                          const oldY = form.canvasY;
-                          
-                          const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
-                          const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
-                          
-                          const nextPixels = runCropRender(
-                            imageObjRef.current,
-                            newX,
-                            newY,
-                            form.dwBase * newZoom,
-                            form.dhBase * newZoom,
-                            form.bgColor || '#000000'
-                          );
-                          
-                          setForm(prev => ({
-                            ...prev,
-                            zoom: newZoom,
-                            canvasX: newX,
-                            canvasY: newY,
-                            pixels: nextPixels
-                          }));
-                        }}
-                      >
-                        {/* Image / Video with exact pixelated sign styling */}
-                        {form.fileType === 'video' ? (
-                          <video 
-                            src={form.imgSrc} 
-                            autoPlay
-                            loop
-                            muted
-                            playsInline
-                            style={{ 
-                              position: 'absolute', 
-                              left: `${(form.canvasX / 64) * 100}%`, 
-                              top: `${(form.canvasY / 20) * 100}%`, 
-                              width: `${((form.dwBase * form.zoom) / 64) * 100}%`, 
-                              height: `${((form.dhBase * form.zoom) / 20) * 100}%`, 
-                              pointerEvents: 'none',
-                              userSelect: 'none',
-                              maxWidth: 'none',
-                              objectFit: 'fill',
-                              imageRendering: 'pixelated'
-                            }} 
+                          }}
+                        >
+                          {/* Image / Video / GIF with exact 64x20 quantized pixelated styling */}
+                          <MediaPixelPreview
+                            imgSrc={form.imgSrc}
+                            fileType={form.fileType}
+                            canvasX={form.canvasX}
+                            canvasY={form.canvasY}
+                            dw={form.dwBase * form.zoom}
+                            dh={form.dhBase * form.zoom}
+                            bgColor={form.bgColor}
+                            pixels={form.pixels}
+                            speed={form.speed}
+                            frameDurationMs={form.frameDurationMs}
                           />
-                        ) : (
-                          <img 
-                            src={form.imgSrc} 
-                            alt="Crop Preview"
-                            style={{ 
-                              position: 'absolute', 
-                              left: `${(form.canvasX / 64) * 100}%`, 
-                              top: `${(form.canvasY / 20) * 100}%`, 
-                              width: `${((form.dwBase * form.zoom) / 64) * 100}%`, 
-                              height: `${((form.dhBase * form.zoom) / 20) * 100}%`, 
+
+                          {/* 64x20 Pixel Matrix Grid */}
+                          {showGrid && (
+                            <div 
+                              style={{
+                                position: 'absolute',
+                                inset: 0,
+                                backgroundImage: `
+                                  linear-gradient(to right, rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+                                  linear-gradient(to bottom, rgba(255, 255, 255, 0.08) 1px, transparent 1px)
+                                `,
+                                backgroundSize: 'calc(100% / 64) calc(100% / 20)',
+                                pointerEvents: 'none',
+                                zIndex: 10
+                              }} 
+                            />
+                          )}
+
+                          {/* Photoshop-style Centering Guides */}
+                          {showGuides && (() => {
+                            const imgW = form.dwBase * form.zoom;
+                            const imgH = form.dhBase * form.zoom;
+                            const isHCenter = Math.abs((form.canvasX + imgW / 2) - 32) < 0.35;
+                            const isVCenter = Math.abs((form.canvasY + imgH / 2) - 10) < 0.35;
+                            return (
+                              <>
+                                {/* Vertical Center Guide (x=32) */}
+                                <div 
+                                  style={{
+                                    position: 'absolute',
+                                    left: '50%',
+                                    top: 0,
+                                    bottom: 0,
+                                    width: isHCenter ? '2px' : '1px',
+                                    transform: 'translateX(-50%)',
+                                    backgroundColor: isHCenter ? '#f43f5e' : 'rgba(244, 63, 94, 0.4)',
+                                    boxShadow: isHCenter ? '0 0 8px #f43f5e, 0 0 2px #ffffff' : 'none',
+                                    pointerEvents: 'none',
+                                    zIndex: 12,
+                                    transition: 'all 0.1s ease'
+                                  }} 
+                                />
+                                {/* Horizontal Center Guide (y=10) */}
+                                <div 
+                                  style={{
+                                    position: 'absolute',
+                                    top: '50%',
+                                    left: 0,
+                                    right: 0,
+                                    height: isVCenter ? '2px' : '1px',
+                                    transform: 'translateY(-50%)',
+                                    backgroundColor: isVCenter ? '#f43f5e' : 'rgba(244, 63, 94, 0.4)',
+                                    boxShadow: isVCenter ? '0 0 8px #f43f5e, 0 0 2px #ffffff' : 'none',
+                                    pointerEvents: 'none',
+                                    zIndex: 12,
+                                    transition: 'all 0.1s ease'
+                                  }} 
+                                />
+                              </>
+                            );
+                          })()}
+
+                          {isDraggingOver && (
+                            <div style={{
+                              position: 'absolute',
+                              inset: 0,
+                              backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                              border: '2px dashed #10B981',
+                              borderRadius: '8px',
+                              zIndex: 50,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              color: '#10B981',
+                              fontWeight: 'bold',
                               pointerEvents: 'none',
-                              userSelect: 'none',
-                              maxWidth: 'none',
-                              objectFit: 'fill',
-                              imageRendering: 'pixelated'
-                            }} 
-                          />
-                        )}
-                        {isDraggingOver && (
-                          <div style={{
-                            position: 'absolute',
-                            inset: 0,
-                            backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                            border: '2px dashed #10B981',
-                            borderRadius: '8px',
-                            zIndex: 50,
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: '#10B981',
-                            fontWeight: 'bold',
-                            pointerEvents: 'none',
-                            backdropFilter: 'blur(4px)'
-                          }}>
-                            <Upload size={32} className="animate-bounce mb-2" />
-                            <span className="text-sm">Drop to Upload Media</span>
-                          </div>
-                        )}
-                      </div>
-                    )
+                              backdropFilter: 'blur(4px)'
+                            }}>
+                              <Upload size={32} className="animate-bounce mb-2" />
+                              <span className="text-sm">Drop to Upload Media</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
                   ) : form.mode === 'drawing' ? (
                     <div 
                       onMouseDown={(e) => {
@@ -5184,9 +5614,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         </button>
                       </div>
                     </div>
-                  ) : form.mode === 'clock' ? null : (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        <label className="text-[10px] font-bold text-slate-500 uppercase ml-1">Display Text (Max 25 chars)</label>
+                  ) : form.mode === 'text' ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <label className="text-[10px] font-bold text-slate-500 uppercase ml-1">Display Text (Max 25 chars)</label>
                       <input 
                         className="input-field w-full" 
                         value={form.text} 
@@ -5198,8 +5628,293 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         placeholder="Type something..."
                       />
                     </div>
-                  )}
+                  ) : null}
                 </div>
+
+                {/* Image / Video Controls */}
+                {form.mode === 'image' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5"
+                          style={{ borderRadius: '12px' }}
+                        >
+                          <Upload size={13} /> {form.imgSrc ? 'Replace Media' : 'Select Media'}
+                        </button>
+                        {form.imgSrc && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!imageObjRef.current) return;
+                              const newX = (64 - form.dwBase * form.zoom) / 2;
+                              const newY = (20 - form.dhBase * form.zoom) / 2;
+                              const nextPixels = runCropRender(
+                                imageObjRef.current,
+                                newX,
+                                newY,
+                                form.dwBase * form.zoom,
+                                form.dhBase * form.zoom,
+                                form.bgColor || '#000000'
+                              );
+                              setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY, pixels: nextPixels }));
+                            }}
+                            className="btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5"
+                            style={{ borderRadius: '12px' }}
+                            title="Center horizontally and vertically"
+                          >
+                            Center
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Visual Tools Toggles */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <button
+                          type="button"
+                          onClick={() => setShowGrid(prev => !prev)}
+                          className={`btn-styled text-[10px] px-3 py-2 ${!showGrid ? 'inactive' : ''}`}
+                          style={{ borderRadius: '12px' }}
+                          title="Toggle pixel matrix grid"
+                        >
+                          Grid
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowGuides(prev => !prev)}
+                          className={`btn-styled text-[10px] px-3 py-2 ${!showGuides ? 'inactive' : ''}`}
+                          style={{ borderRadius: '12px' }}
+                          title="Toggle Photoshop-style centering guides"
+                        >
+                          Guides
+                        </button>
+                      </div>
+                    </div>
+
+                    {form.imgSrc && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '4px' }}>
+                        {/* Zoom Slider */}
+                        <div className="brightness-rail glass-panel" style={{ padding: '12px 16px', width: '100%', display: 'flex', alignItems: 'center', gap: '14px' }}>
+                          <Search className="text-emerald-400 flex-shrink-0" size={17} />
+                          <input 
+                            type="range" min="0.1" max="10.0" step="0.05" 
+                            value={form.zoom || 1} 
+                            onChange={e => {
+                              const newZoom = parseFloat(e.target.value);
+                              if (!imageObjRef.current) return;
+                              const oldZoom = form.zoom || 1.0;
+                              const oldX = form.canvasX || 0;
+                              const oldY = form.canvasY || 0;
+                              
+                              const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                              const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                              
+                              const nextPixels = runCropRender(
+                                imageObjRef.current,
+                                newX,
+                                newY,
+                                form.dwBase * newZoom,
+                                form.dhBase * newZoom,
+                                form.bgColor || '#000000'
+                              );
+                              
+                              setForm(prev => ({
+                                ...prev,
+                                zoom: newZoom,
+                                canvasX: newX,
+                                canvasY: newY,
+                                pixels: nextPixels
+                              }));
+                            }}
+                            className="h-slider"
+                            style={{ flex: 1 }}
+                          />
+                          <span className="font-bold text-slate-400 w-12 text-[11px] text-right">{(form.zoom || 1).toFixed(1)}x</span>
+                          <div
+                            className="power-btn off"
+                            style={{
+                              width: '34px',
+                              height: '34px',
+                              borderRadius: '10px',
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              border: '1px solid rgba(255, 255, 255, 0.08)',
+                              color: '#f8fafc',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s',
+                              flexShrink: 0
+                            }}
+                            title="Fit to Width"
+                            onMouseOver={e => {
+                              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
+                              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+                              e.currentTarget.style.transform = 'scale(1.05)';
+                            }}
+                            onMouseOut={e => {
+                              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+                              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+                              e.currentTarget.style.transform = 'none';
+                            }}
+                            onClick={() => {
+                              if (!imageObjRef.current) return;
+                              const targetZoom = Math.min(Math.max(64 / (form.dwBase || 64), 0.1), 10.0);
+                              const newX = 0;
+                              const newY = (20 - (form.dhBase || 20) * targetZoom) / 2;
+                              const nextPixels = runCropRender(
+                                imageObjRef.current,
+                                newX,
+                                newY,
+                                (form.dwBase || 64) * targetZoom,
+                                (form.dhBase || 20) * targetZoom,
+                                form.bgColor || '#000000'
+                              );
+                              setForm(prev => ({
+                                ...prev,
+                                zoom: targetZoom,
+                                canvasX: newX,
+                                canvasY: newY,
+                                pixels: nextPixels
+                              }));
+                            }}
+                          >
+                            <StretchHorizontal size={16} />
+                          </div>
+
+                          <div
+                            className="power-btn off"
+                            style={{
+                              width: '34px',
+                              height: '34px',
+                              borderRadius: '10px',
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              border: '1px solid rgba(255, 255, 255, 0.08)',
+                              color: '#f8fafc',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s',
+                              flexShrink: 0
+                            }}
+                            title="Fit to Height"
+                            onMouseOver={e => {
+                              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
+                              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+                              e.currentTarget.style.transform = 'scale(1.05)';
+                            }}
+                            onMouseOut={e => {
+                              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+                              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+                              e.currentTarget.style.transform = 'none';
+                            }}
+                            onClick={() => {
+                              if (!imageObjRef.current) return;
+                              const targetZoom = Math.min(Math.max(20 / (form.dhBase || 20), 0.1), 10.0);
+                              const newY = 0;
+                              const newX = (64 - (form.dwBase || 64) * targetZoom) / 2;
+                              const nextPixels = runCropRender(
+                                imageObjRef.current,
+                                newX,
+                                newY,
+                                (form.dwBase || 64) * targetZoom,
+                                (form.dhBase || 20) * targetZoom,
+                                form.bgColor || '#000000'
+                              );
+                              setForm(prev => ({
+                                ...prev,
+                                zoom: targetZoom,
+                                canvasX: newX,
+                                canvasY: newY,
+                                pixels: nextPixels
+                              }));
+                            }}
+                          >
+                            <StretchVertical size={16} />
+                          </div>
+
+                          <div
+                            className="power-btn off"
+                            style={{
+                              width: '34px',
+                              height: '34px',
+                              borderRadius: '10px',
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              border: '1px solid rgba(255, 255, 255, 0.08)',
+                              color: '#f8fafc',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s',
+                              flexShrink: 0
+                            }}
+                            title="Reset Zoom (1.0x)"
+                            onMouseOver={e => {
+                              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
+                              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+                              e.currentTarget.style.transform = 'scale(1.05)';
+                            }}
+                            onMouseOut={e => {
+                              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+                              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+                              e.currentTarget.style.transform = 'none';
+                            }}
+                            onClick={() => {
+                              if (!imageObjRef.current) return;
+                              const newZoom = 1.0;
+                              const oldZoom = form.zoom || 1.0;
+                              const oldX = form.canvasX || 0;
+                              const oldY = form.canvasY || 0;
+                              const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                              const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                              const nextPixels = runCropRender(
+                                imageObjRef.current,
+                                newX,
+                                newY,
+                                form.dwBase * newZoom,
+                                form.dhBase * newZoom,
+                                form.bgColor || '#000000'
+                              );
+                              setForm(prev => ({
+                                ...prev,
+                                zoom: newZoom,
+                                canvasX: newX,
+                                canvasY: newY,
+                                pixels: nextPixels
+                              }));
+                            }}
+                          >
+                            <RotateCcw size={16} />
+                          </div>
+                        </div>
+
+                        {/* Background Color Slider */}
+                        <HslColorSlider 
+                          label="Background Colour" 
+                          value={form.bgColor || '#000000'} 
+                          onChange={val => {
+                            setForm(prev => ({ ...prev, bgColor: val }));
+                            if (imageObjRef.current) {
+                              const nextPixels = runCropRender(
+                                imageObjRef.current,
+                                form.canvasX,
+                                form.canvasY,
+                                form.dwBase * (form.zoom || 1),
+                                form.dhBase * (form.zoom || 1),
+                                val
+                              );
+                              setForm(prev => ({ ...prev, bgColor: val, pixels: nextPixels }));
+                            }
+                          }} 
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Conditional Form Options */}
                 {form.mode === 'text' && (
@@ -5240,7 +5955,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         }}
                         onClick={() => setAnimDropdownOpen(prev => !prev)}
                       >
-                        <span style={{ fontSize: '12px', textTransform: 'none', whiteSpace: 'nowrap' }}>{form.animation || 'show now'}</span>
+                        <span style={{ fontSize: '12px', textTransform: 'none', whiteSpace: 'nowrap' }}>{form.animation || 'continuous left shift'}</span>
                         <ChevronDown 
                           size={14} 
                           className="text-slate-400 transition-transform duration-200" 
@@ -5270,8 +5985,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                               overflowY: 'auto'
                             }}
                           >
-                            {['show now', 'shift left', 'move right', 'move up', 'move down', 'snow', 'bubble', 'flicker', 'continuous left shift'].map(a => {
-                              const isSelected = (form.animation || 'show now') === a;
+                            {['bubble', 'continuous left shift', 'flicker', 'move down', 'move right', 'move up', 'shift left', 'show now', 'snow'].map(a => {
+                              const isSelected = (form.animation || 'continuous left shift') === a;
                               return (
                                 <div
                                   key={a}

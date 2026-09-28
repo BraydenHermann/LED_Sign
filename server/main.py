@@ -138,6 +138,27 @@ current_clock_style: str = "default"
 hardware_slots_state = {i: {"slot_id": i, "occupied": False, "key": ""} for i in range(60)}
 notification_buffer = bytearray()
 
+# Reconnect state
+last_connected_mac: str = ""
+_reconnect_task: Optional[asyncio.Task] = None
+
+async def _auto_reconnect(mac: str, delay: float = 4.0):
+    """Background task: waits `delay` seconds then tries to reconnect to `mac`."""
+    global connected_client, connection_ready, _reconnect_task
+    await asyncio.sleep(delay)
+    if connected_client and connected_client.is_connected:
+        print(f"[auto_reconnect] Already reconnected, skipping.")
+        _reconnect_task = None
+        return
+    print(f"[auto_reconnect] Attempting reconnect to {mac}...")
+    try:
+        req = ConnectRequest(address=mac)
+        result = await _connect_internal(req)
+        print(f"[auto_reconnect] Reconnect result: {result}")
+    except Exception as e:
+        print(f"[auto_reconnect] Reconnect failed: {e}")
+    _reconnect_task = None
+
 def notification_handler(sender, data: bytearray):
     global hardware_slots_state, notification_buffer
     try:
@@ -434,67 +455,76 @@ async def _connect_internal(req: ConnectRequest):
     try:
         target_mac = (req.address or "").strip().upper()
         print(f"[connect] Target LED sign: {target_mac or 'auto-discover'}...")
-        found_device = None
-        stop_event = asyncio.Event()
-
-        def detection_callback(device, adv_data):
-            nonlocal found_device
-            addr = device.address.upper()
-            name = (device.name or adv_data.local_name or "").upper()
-            services = [s.lower() for s in (adv_data.service_uuids or [])]
-
-            if target_mac:
-                if addr == target_mac:
-                    found_device = device
-                    stop_event.set()
-            else:
-                is_sign = (
-                    "0000fff0-0000-1000-8000-00805f9b34fb" in services
-                    or "HELLO" in name
-                    or "SIGN" in name
-                    or name.startswith("YS")
-                    or name.startswith("TL")
-                    or name.startswith("LOY")
-                )
-                if is_sign:
-                    found_device = device
-                    stop_event.set()
-
-        scanner = BleakScanner(detection_callback=detection_callback)
-        try:
-            await scanner.start()
-            try:
-                scan_wait = 15.0 if target_mac else 10.0
-                await asyncio.wait_for(stop_event.wait(), timeout=scan_wait)
-            except asyncio.TimeoutError:
-                pass
-        except Exception as scan_err:
-            print(f"[connect] Scanner error: {scan_err}")
-        finally:
-            try:
-                await scanner.stop()
-            except Exception:
-                pass
-
-        if not found_device:
-            if target_mac:
-                print(f"[connect] Sign {target_mac} not detected in 15s advertisement window; trying direct address handle...")
-                found_device = target_mac
-            else:
-                raise Exception("No LED sign found in range. Ensure the sign is powered on.")
 
         def on_disconnect(c):
-            global connected_client, connection_ready
-            print(f"[BLE] Device disconnected callback: {getattr(c, 'address', 'unknown')}")
+            global connected_client, connection_ready, last_connected_mac, _reconnect_task
+            addr = getattr(c, 'address', 'unknown')
+            print(f"[BLE] Device disconnected callback: {addr}")
             connected_client = None
             connection_ready = False
+            # Schedule background auto-reconnect
+            mac_to_reconnect = last_connected_mac or (addr if addr != 'unknown' else '')
+            if mac_to_reconnect and (_reconnect_task is None or _reconnect_task.done()):
+                print(f"[BLE] Scheduling auto-reconnect to {mac_to_reconnect} in 4s...")
+                loop = asyncio.get_event_loop()
+                _reconnect_task = loop.create_task(_auto_reconnect(mac_to_reconnect, delay=4.0))
 
         client = None
         last_connect_error = None
-        for attempt in range(2):
+        max_attempts = 3 if target_mac else 2
+
+        for attempt in range(max_attempts):
+            found_device = None
+            stop_event = asyncio.Event()
+
+            def detection_callback(device, adv_data):
+                nonlocal found_device
+                addr = device.address.upper()
+                name = (device.name or adv_data.local_name or "").upper()
+                services = [s.lower() for s in (adv_data.service_uuids or [])]
+
+                if target_mac:
+                    if addr == target_mac:
+                        found_device = device
+                        stop_event.set()
+                else:
+                    is_sign = (
+                        "0000fff0-0000-1000-8000-00805f9b34fb" in services
+                        or "HELLO" in name
+                        or "SIGN" in name
+                        or name.startswith("YS")
+                        or name.startswith("TL")
+                        or name.startswith("LOY")
+                    )
+                    if is_sign:
+                        found_device = device
+                        stop_event.set()
+
+            scanner = BleakScanner(detection_callback=detection_callback, scanning_mode="active")
             try:
-                if attempt > 0:
-                    await asyncio.sleep(1.0)
+                await scanner.start()
+                try:
+                    scan_wait = 5.0 if target_mac else 8.0
+                    await asyncio.wait_for(stop_event.wait(), timeout=scan_wait)
+                except asyncio.TimeoutError:
+                    pass
+            except Exception as scan_err:
+                print(f"[connect] Scanner error: {scan_err}")
+            finally:
+                try:
+                    await scanner.stop()
+                except Exception:
+                    pass
+
+            if not found_device and target_mac:
+                print(f"[connect] Attempt {attempt + 1}: Sign {target_mac} not detected in live scan; attempting direct address connection...")
+                found_device = target_mac
+            elif not found_device:
+                print(f"[connect] Attempt {attempt + 1}: Auto-discover sign not found in scan, retrying...")
+                await asyncio.sleep(1.0)
+                continue
+
+            try:
                 c = BleakClient(found_device, disconnected_callback=on_disconnect)
                 await c.connect(timeout=15.0)
                 if c.is_connected:
@@ -519,16 +549,18 @@ async def _connect_internal(req: ConnectRequest):
                     break
             except Exception as ce:
                 last_connect_error = ce
-                print(f"[connect] Attempt {attempt + 1} failed: {ce}")
+                print(f"[connect] Attempt {attempt + 1} connection failed: {ce}")
                 try:
                     await c.disconnect()
                 except Exception:
                     pass
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(1.0)
 
         if not client or not client.is_connected:
             raise Exception(
-                f"Could not connect to sign after 2 attempts. "
-                f"Last error: {last_connect_error}. "
+                f"Could not connect to sign after {max_attempts} attempts. "
+                f"Last error: {last_connect_error or 'Device not found in range'}. "
                 "Try: 1) Power cycle the sign, 2) Remove the sign from Windows Bluetooth settings and re-pair."
             )
 
@@ -560,6 +592,7 @@ async def _connect_internal(req: ConnectRequest):
             print(f"[connect] Warning initializing slots: {se}")
 
         connection_ready = True
+        last_connected_mac = client_address.upper() if client_address else ""
         return {"status": "success", "address": client_address}
     except Exception as e:
         import traceback
@@ -2709,9 +2742,14 @@ async def save_preset(req: SavePresetRequest):
                 speed = preset.speed if preset.speed is not None else current_speed
                 speed = max(1, min(15, speed))
 
-                # Turn screen power off so it remains solid black during saving instead of flashing ATOTO screensaver
+                # Blank the physical screen so it remains solid black during saving instead of flashing ATOTO screensaver
                 try:
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(False), response=True)
+                    await stop_all_playback(blank=True)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+                    await asyncio.sleep(0.02)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+                    await asyncio.sleep(0.02)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
                     await asyncio.sleep(0.02)
                 except Exception as clear_err:
                     print(f"[save_preset] Note: screen blanking before save encountered: {clear_err}")
@@ -2740,28 +2778,22 @@ async def save_preset(req: SavePresetRequest):
                         c_data = slot_payload[c_idx * chunk_size : (c_idx + 1) * chunk_size]
                         chunk_pkt = protocol.build_slot_file_chunk(slot_id, c_idx, total_chunks, chunk_size, c_data)
                         await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
-                        await asyncio.sleep(0.02)
+                        await asyncio.sleep(0.035)
 
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after chunk writes")
 
+                    await asyncio.sleep(0.1)
                     commit_pkt = protocol.build_slot_commit(slot_id, slot_payload)
                     await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.2)
 
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    # Restore screen power, allow display controller to wake and stabilize, then select and play the newly saved slot
-                    try:
-                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
-                        await asyncio.sleep(0.2)
-                    except Exception:
-                        pass
-
                     select_pkt = protocol.build_slot_select_command(slot_id)
                     await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.1)
 
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
@@ -2806,19 +2838,13 @@ async def save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after chunk writes")
 
+                    await asyncio.sleep(0.05)
                     commit_pkt = protocol.build_slot_commit(slot_id, ystp_bytes)
                     await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.1)
 
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
-
-                    # Restore screen power, allow display controller to wake and stabilize, then select and play the newly saved slot
-                    try:
-                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
-                        await asyncio.sleep(0.2)
-                    except Exception:
-                        pass
 
                     select_pkt = protocol.build_slot_select_command(slot_id)
                     await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
@@ -2836,11 +2862,13 @@ async def save_preset(req: SavePresetRequest):
 
                 print(f"[save_preset] Done. Slot {slot_id} saved (is_anim={is_anim}).")
             except Exception as e:
-                try:
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
-                except Exception:
-                    pass
                 print(f"[save_preset] Error: {e}")
+                # Only attempt recovery write if still connected; skip if BLE already dropped
+                if connected_client and connected_client.is_connected:
+                    try:
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
+                    except Exception:
+                        pass
                 raise HTTPException(status_code=500, detail=str(e))
 
         # Update live dashboard preview files

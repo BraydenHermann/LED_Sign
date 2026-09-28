@@ -139,16 +139,35 @@ class CalendarService:
                 # Keep is_active but fallback the time string
                 time_str = start_raw
 
-            # Extract attendee response status
-            response_status = 'accepted'
-            
+            # Skip cancelled events
+            if e.get('status') == 'cancelled':
+                continue
+
+            # Determine attendee response status
             attendees = e.get('attendees', [])
-            for a in attendees:
-                if a.get('self'):
-                    response_status = a.get('responseStatus', 'needsAction')
-                    break
+            is_self_organizer = e.get('organizer', {}).get('self', False)
             
+            if attendees:
+                self_attendee = next((a for a in attendees if a.get('self')), None)
+                if self_attendee:
+                    response_status = self_attendee.get('responseStatus', 'needsAction')
+                elif is_self_organizer:
+                    response_status = 'accepted'
+                else:
+                    # User is not organizer and not an accepted attendee -> skip
+                    continue
+            elif is_self_organizer:
+                response_status = 'accepted'
+            else:
+                # External event without attendees list
+                response_status = 'needsAction'
+
             print(f"[calendar] Event: {e.get('summary')} | Status: {response_status} | Attendees: {len(attendees)}")
+
+            # Only accepted calendar invites/events appear in the schedule to avoid spam
+            if response_status.lower() != 'accepted':
+                print(f"[calendar] Skipping unaccepted invite: {e.get('summary')} (status: {response_status})")
+                continue
 
             events.append({
                 "id": e.get("id"),
