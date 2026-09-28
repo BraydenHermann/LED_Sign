@@ -149,6 +149,14 @@ function isEventActive(ev, atTime) {
   return atTime >= start && atTime <= end;
 }
 
+// Returns true if event starts within `windowMs` ms from now but hasn't started yet
+function isEventUpcoming(ev, atTime, windowMs = 5 * 60 * 1000) {
+  if (!ev?.start_iso) return false;
+  const start = new Date(ev.start_iso);
+  const msUntilStart = start - atTime;
+  return msUntilStart > 0 && msUntilStart <= windowMs;
+}
+
 function getEventDisplayString(ev) {
   if (!ev) return 'IN A MEETING';
   const summary = ev.summary || 'Untitled Event';
@@ -1644,6 +1652,7 @@ export default function App() {
   const [isManualOverride, setIsManualOverrideState] = useState(false);
   const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
+  const lastPreSavedEventIdRef = useRef(null); // tracks which upcoming event was pre-saved 5min early
   const setIsManualOverride = (val) => {
     isManualOverrideRef.current = val;
     setIsManualOverrideState(val);
@@ -2080,6 +2089,64 @@ export default function App() {
       }
     } catch (err) {
       console.error("[auto-push] Error during transition check:", err);
+    }
+
+    // 5-minute pre-save: detect upcoming events and pre-load them into slot 1
+    if (events && status?.connected) {
+      // Find the soonest upcoming accepted event within 5 minutes
+      const upcomingEvents = events.filter(ev =>
+        isEventUpcoming(ev, now) && ev.response_status?.toLowerCase() !== 'declined'
+      );
+      const upcomingEvent = upcomingEvents.sort((a, b) => new Date(a.start_iso) - new Date(b.start_iso))[0];
+      const upcomingEventKey = upcomingEvent ? `${upcomingEvent.id}-${upcomingEvent.start_iso}` : null;
+
+      // Reset pre-save ref when the event transitions to active (so active logic takes over)
+      if (upcomingEvent && isEventActive(upcomingEvent, now)) {
+        lastPreSavedEventIdRef.current = null;
+      }
+
+      if (upcomingEvent && !isEventActive(upcomingEvent, now) && upcomingEventKey !== lastPreSavedEventIdRef.current) {
+        lastPreSavedEventIdRef.current = upcomingEventKey;
+        const eventStr = getEventDisplayString(upcomingEvent);
+        const targetMac = (status.address || '').toUpperCase();
+        console.log(`[pre-save] Upcoming event in <5min: "${upcomingEvent.summary}" — pre-saving to slot 1 and pushing`);
+        // Run async save in background IIFE (useEffect callback cannot be async)
+        (async () => {
+          try {
+            const eventPreset = {
+              mode: 'text',
+              text: eventStr,
+              name: eventStr,
+              animation: 'continuous left shift',
+              speed: 8,
+              textColor: '#ffffff',
+              bgColor: '#000000',
+            };
+            handleSetLocalPushMessage('Pre-loading upcoming event...');
+            const saveRes = await axios.post(`${API_BASE}/save-preset`, {
+              slot_id: 0,
+              address: targetMac,
+              preset: eventPreset,
+            });
+            const savedThumb = saveRes.data?.preview_url
+              ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}`
+              : null;
+            setAllSavedPresets(prev => {
+              const curList = normalizeSavedPresets(prev[targetMac]);
+              curList[0] = { slotNumber: 1, hwSlotId: 0, preset: { ...eventPreset, id: 'hw-slot-0', hwSlotId: 0, thumbnail: savedThumb } };
+              return { ...prev, [targetMac]: curList };
+            });
+            localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
+            // Push to live preview & physical sign
+            setLastPushedId(`event-${upcomingEvent.id}-${eventStr}`);
+            await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
+            handleSetLocalPushMessage(`Pre-loaded: ${upcomingEvent.summary}`);
+          } catch (preSaveErr) {
+            console.warn('[pre-save] Pre-save failed, will retry at event start:', preSaveErr);
+            lastPreSavedEventIdRef.current = null; // allow retry on next tick
+          }
+        })();
+      }
     }
 
     if (isManualOverride) return;
