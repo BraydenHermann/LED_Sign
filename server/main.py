@@ -61,6 +61,10 @@ def save_preview(img: Image.Image, path: str):
         raise
 
 ble_lock = asyncio.Lock()
+# Selecting a saved slot updates the shared current.gif/current.png preview.
+# Keep those file swaps ordered when a user taps several presets in quick
+# succession, otherwise two requests can remove each other's active preview.
+preset_switch_lock = asyncio.Lock()
 
 async def cancel_active_worker():
     global active_scroller_task
@@ -774,6 +778,11 @@ async def set_speed(level: int):
 
 @app.post("/preset")
 async def play_preset(id: int, mac: str = ""):
+    async with preset_switch_lock:
+        return await _play_preset(id, mac)
+
+
+async def _play_preset(id: int, mac: str = ""):
     print(f"[DEBUG] /preset called with id={id}, mac={mac}")
     global connected_client, connection_ready, active_scroller_task, current_display_mode, frames_sent
     import json as _json
