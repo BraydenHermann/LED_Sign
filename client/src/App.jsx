@@ -684,6 +684,18 @@ const PresetCardMedia = ({ preset, now }) => {
       />
     );
   }
+  // Animated GIF thumbnail from server (saved presets, live preview)
+  if (preset.thumbnail && preset.thumbnail.toLowerCase().includes('.gif')) {
+    return (
+      <img
+        src={preset.thumbnail}
+        className="led-preview"
+        draggable={false}
+        alt={preset.name || "GIF"}
+        style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
+      />
+    );
+  }
   if (preset.thumbnail) {
     return (
       <img 
@@ -970,7 +982,7 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
     const hasMultiFramePixels = pixels && pixels.length > 1280;
     let parsedPixelFrames = null;
 
-    if (hasMultiFramePixels && (!gifBitmapsRef.current || gifBitmapsRef.current.length === 0) && fileType !== 'video') {
+    if (hasMultiFramePixels && fileType !== 'video') {
       const numFrames = Math.floor(pixels.length / 1280);
       const frameWidth = 64;
       const frameHeight = 20;

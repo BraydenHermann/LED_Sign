@@ -2758,24 +2758,11 @@ async def save_preset(req: SavePresetRequest):
                 speed = preset.speed if preset.speed is not None else current_speed
                 speed = max(1, min(15, speed))
 
-                # Blank the physical screen before saving so it stays solid black.
-                # We ONLY send clock_off (not stop_playlist) to avoid the hardware reverting
-                # to its internal slot 1 / ATOTO screensaver between commands.
-                # A solid black bitmap pushed to the live display buffer holds the screen
-                # black for the duration of the slot write.
-                try:
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-                    await asyncio.sleep(0.02)
-                    black_bitmap = [1] * (PANEL_W * PANEL_H)
-                    black_packet = protocol.bitmap_command(black_bitmap, PANEL_W, PANEL_H, color="#000000")
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
-                    await asyncio.sleep(0.02)
-                    await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(black_packet), response=True)
-                    await asyncio.sleep(0.04)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
-                    await asyncio.sleep(0.1)  # let hardware latch the black frame before slot write starts
-                except Exception as clear_err:
-                    print(f"[save_preset] Note: screen blanking before save encountered: {clear_err}")
+                # Note: we intentionally send NO pre-blank commands before the slot write.
+                # Any command that stops or interrupts the current display (stop_playlist,
+                # clock_off, session_start) causes the hardware to briefly revert to its
+                # internal ATOTO screensaver/slot-1. The slot write will take over the display
+                # naturally when it commits and plays, with minimal interruption.
 
                 if is_anim:
                     # Animated GIF/video and animated text:
