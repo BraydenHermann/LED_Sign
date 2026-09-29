@@ -29,6 +29,11 @@ scratch/
 /*.png
 /*.gif
 /*.txt
+!/launcher.py
+!/launcher_icon.png
+!/launcher_icon.ico
+led-sign-launcher.log
+led-sign-server.log
 all_writes.txt
 functions.txt
 8args.txt

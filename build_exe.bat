@@ -14,14 +14,13 @@ if %errorlevel% neq 0 (
     pause & exit /b 1
 )
 
-echo [2/3] Generating icon...
-python -c "from PIL import Image, ImageDraw; img = Image.new('RGBA',(64,64),(0,0,0,0)); d = ImageDraw.Draw(img); d.rounded_rectangle([4,14,60,50],radius=6,fill=(28,28,36),outline=(134,59,255),width=2); colors=[(0,230,80),(0,180,255),(230,60,255),(255,180,0),(0,230,80)]; [d.ellipse([10+i*10,23,16+i*10,29],fill=c) for i,c in enumerate(colors)]; img.save('_icon.ico',format='ICO',sizes=[(16,16),(32,32),(48,48),(64,64)])"
+echo [2/3] Preparing LED Sign icon...
+python -c "from PIL import Image; im=Image.open('launcher_icon.png').convert('RGBA'); im.save('launcher_icon.ico',format='ICO',sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 if %errorlevel% neq 0 (
-    echo WARNING: Icon generation failed, using default.
-    set ICON_ARG=
-) else (
-    set ICON_ARG=--icon=_icon.ico
+    echo ERROR: launcher_icon.png is required to build the app icon.
+    pause & exit /b 1
 )
+set ICON_ARG=--icon=launcher_icon.ico
 
 echo [3/3] Building LED Sign.exe with PyInstaller...
 python -m PyInstaller ^
@@ -38,7 +37,6 @@ if %errorlevel% neq 0 (
     pause & exit /b 1
 )
 
-if exist _icon.ico del _icon.ico
 if exist "LED Sign.spec" del "LED Sign.spec"
 
 echo.

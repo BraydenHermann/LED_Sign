@@ -71,7 +71,7 @@ body {
   white-space: nowrap;
 }
 .btn-styled:hover { transform: scale(1.02); box-shadow: var(--neon-shadow); }
-.btn-styled:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+.btn-styled:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
 .btn-styled.inactive {
   background: rgba(255,255,255,0.05);
   color: var(--text-muted);

@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import math
 import glob
+import time
 import unicodedata
 from typing import List, Optional, Any, Union
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
@@ -140,6 +141,7 @@ current_speed: int = 8
 brightness: int = 15
 power: bool = True
 start_time = datetime.datetime.now()
+ui_last_seen_monotonic: float = 0.0
 
 # Clock State (last pushed clock configuration)
 current_clock_color: str = "#ffffff"
@@ -156,6 +158,19 @@ notification_buffer = bytearray()
 # Reconnect state
 last_connected_mac: str = ""
 _reconnect_task: Optional[asyncio.Task] = None
+
+
+@app.post("/ui-heartbeat")
+async def ui_heartbeat():
+    """Lets the desktop launcher know an LED Sign browser tab is already open."""
+    global ui_last_seen_monotonic
+    ui_last_seen_monotonic = time.monotonic()
+    return {"status": "ok"}
+
+
+@app.get("/ui-open")
+async def ui_open():
+    return {"open": (time.monotonic() - ui_last_seen_monotonic) < 15.0}
 
 async def _auto_reconnect(mac: str, delay: float = 4.0):
     """Background task: waits `delay` seconds then tries to reconnect to `mac`."""
@@ -302,7 +317,6 @@ def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_
     actual_duration_ms = gif_duration_ms
     
     num_frames = getattr(img, "n_frames", 1)
-    num_frames = min(num_frames, 64)
     
     def hex_to_rgb(hex_str: Optional[str]):
         if not hex_str:
@@ -328,7 +342,6 @@ def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_
             break
             
     num_frames = len(extracted_frames)
-    num_frames = min(num_frames, 64)
     
     frames_list = []
     for f in range(num_frames):
@@ -2758,11 +2771,18 @@ async def save_preset(req: SavePresetRequest):
                 speed = preset.speed if preset.speed is not None else current_speed
                 speed = max(1, min(15, speed))
 
-                # Note: we intentionally send NO pre-blank commands before the slot write.
-                # Any command that stops or interrupts the current display (stop_playlist,
-                # clock_off, session_start) causes the hardware to briefly revert to its
-                # internal ATOTO screensaver/slot-1. The slot write will take over the display
-                # naturally when it commits and plays, with minimal interruption.
+                # Put a direct black frame in display RAM before the transfer. Stopping the
+                # playlist makes this firmware flash its ATOTO screen before a clear lands.
+                # Turning off the clock and committing an all-black bitmap avoids that fallback.
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+                await asyncio.sleep(0.02)
+                black_frame = protocol.bitmap_command([1] * (PANEL_W * PANEL_H), PANEL_W, PANEL_H, color="#000000")
+                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, black_frame, response=True)
+                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+                await asyncio.sleep(0.02)
 
                 if is_anim:
                     # Animated GIF/video and animated text:

@@ -7,7 +7,7 @@ import {
   Activity, Upload, Clock, ExternalLink, Link2Off, Link2,
   FileSearch, Search, RefreshCw, RotateCcw, StretchHorizontal, StretchVertical, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
-  Trash2, Pipette, Save, Send, Star
+  Trash2, Pipette, Save, Send, Star, Download, Crosshair, Grid3X3, ScanLine
 } from 'lucide-react';
 
 const API_BASE = '';
@@ -653,6 +653,22 @@ const PresetCardMedia = ({ preset, now }) => {
   }
   if (preset.mode === 'text') {
     return <TextPresetCardPreview preset={preset} />;
+  }
+  // Reuse the editor's media renderer for local/saved/live cards. It decodes
+  // every GIF frame and applies the same crop and pixelated 64×20 canvas.
+  if (preset.mode === 'image' && preset.imgSrc && (preset.fileType === 'gif' || preset.fileType === 'video')) {
+    return <MediaPixelPreview
+      imgSrc={preset.imgSrc}
+      fileType={preset.fileType}
+      canvasX={preset.canvasX || 0}
+      canvasY={preset.canvasY || 0}
+      dw={(preset.dwBase || 64) * (preset.zoom || 1)}
+      dh={(preset.dhBase || 20) * (preset.zoom || 1)}
+      bgColor={preset.bgColor}
+      pixels={null}
+      speed={preset.speed}
+      frameDurationMs={preset.frameDurationMs}
+    />;
   }
   if (preset.pixels && preset.pixels.length > 1280) {
     return <AnimatedPresetCardPreview preset={preset} />;
@@ -1601,6 +1617,15 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Tell the launcher that an LED Sign page already exists, even when it is in
+  // a different browser window.
+  useEffect(() => {
+    const heartbeat = () => axios.post(`${API_BASE}/ui-heartbeat`).catch(() => {});
+    heartbeat();
+    const id = setInterval(heartbeat, 5000);
+    return () => clearInterval(id);
+  }, []);
+
   // Dedicated Auto-Connect Effect — only reconnect to the most recently connected sign
   useEffect(() => {
     const lastConnected = localStorage.getItem('loy_last_connected_mac');
@@ -1639,6 +1664,7 @@ export default function App() {
       }
     } catch (e) {
       console.error(`[connect] ${isRetry ? 'Retry' : 'Attempt 1'} failed:`, e.message);
+      if (!e.response) setApiError(true);
       if (!isRetry && !isAuto) {
         // Silent first-failure retry for manual user connection
         console.log('[connect] Auto-retrying once...');
@@ -1693,6 +1719,9 @@ export default function App() {
   const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
   const lastNotifiedEventIdRef = useRef(null);
+  // A transient BLE disconnect (for example while the PC is locked) must not
+  // replay the default and overwrite the preset the user deliberately chose.
+  const initializedConnectionMacsRef = useRef(new Set());
   const setIsManualOverride = (val) => {
     isManualOverrideRef.current = val;
     setIsManualOverrideState(val);
@@ -2225,9 +2254,11 @@ export default function App() {
   useEffect(() => {
     if (status.connected && status.address && dbLoaded && presets && presets.length > 0) {
       setScanOpen(false);
+      const targetMac = status.address.toUpperCase();
+      if (initializedConnectionMacsRef.current.has(targetMac)) return;
+      initializedConnectionMacsRef.current.add(targetMac);
       setIsManualOverride(false);
       isManualOverrideRef.current = false;
-      const targetMac = status.address.toUpperCase();
 
       const pushDefaultOrActive = async () => {
         // 1. Check if hardware slot 1 (Default Preset, slot 2 in UI) is synced to this sign's hardware
@@ -2332,9 +2363,8 @@ export default function App() {
       pushDefaultOrActive();
     } else if (!status.connected) {
       setPushMessage(prev => prev && prev.toLowerCase().includes('error') ? prev : '');
-      setIsManualOverride(false);
-      isManualOverrideRef.current = false;
-      setLastPushedId(null);
+      // Keep the chosen preset across temporary disconnects. The next
+      // connection is initialized only once per sign during this app session.
     }
   }, [status.connected, status.address, dbLoaded, presets]);
 
@@ -2547,6 +2577,7 @@ export default function App() {
               isModalOpen={isModalOpen}
               onPush={handlePush}
               connectionFailed={connectionFailed}
+              apiError={apiError}
               deviceNames={deviceNames}
               setDeviceName={setDeviceName}
               previewStamp={previewStamp}
@@ -2618,7 +2649,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -3233,7 +3264,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 borderRadius: '8px', padding: '6px 10px', whiteSpace: 'nowrap'
               }}>
                 <span>⚠</span>
-                <span>Connection failed — power cycle the sign and retry</span>
+                <span>{apiError ? 'Server offline' : 'Connection failed — power cycle the sign and retry'}</span>
               </div>
             )}
           </div>
@@ -4328,6 +4359,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   const handleMediaFile = (file) => {
     if (!file) return;
 
+    // Tear down the previous source before loading the replacement. This is
+    // especially important for GIFs: otherwise a decoded frame cache can keep
+    // painting the old animation until the new one has finished decoding.
+    imageObjRef.current = null;
+
     const isVideo = file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.mp4') || file.name.toLowerCase().endsWith('.webm');
     const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
     const fileType = isVideo ? 'video' : (isGif ? 'gif' : 'image');
@@ -4357,6 +4393,28 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       reader.readAsDataURL(file);
     }
   };
+
+  // A media file dropped anywhere over the preset editor becomes an image/video
+  // preset, even if the user was editing text, drawing, or a clock.
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const acceptDrop = (event) => {
+      if (!event.dataTransfer?.files?.length) return;
+      event.preventDefault();
+      const file = event.dataTransfer.files[0];
+      setForm(prev => ({ ...prev, mode: 'image' }));
+      setTimeout(() => handleMediaFile(file), 0);
+    };
+    const allowDrop = (event) => {
+      if (event.dataTransfer?.types?.includes('Files')) event.preventDefault();
+    };
+    window.addEventListener('dragover', allowDrop);
+    window.addEventListener('drop', acceptDrop);
+    return () => {
+      window.removeEventListener('dragover', allowDrop);
+      window.removeEventListener('drop', acceptDrop);
+    };
+  }, [isModalOpen]);
 
   const handleMediaDragOver = (e) => {
     e.preventDefault();
@@ -4394,6 +4452,19 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       window.removeEventListener('resize', updateWidth);
       clearTimeout(timer);
     };
+  }, [isModalOpen, form.mode, form.imgSrc]);
+
+  // React's delegated wheel handler can be passive in some browser paths.
+  // Use a native non-passive listener so zooming the crop never scrolls the
+  // page behind the editor.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!isModalOpen || form.mode !== 'image' || !container) return;
+    const preventPageScroll = (event) => {
+      event.preventDefault();
+    };
+    container.addEventListener('wheel', preventPageScroll, { passive: false });
+    return () => container.removeEventListener('wheel', preventPageScroll);
   }, [isModalOpen, form.mode, form.imgSrc]);
 
   const runCropRender = (img, x, y, w, h, bgColor = '#000000') => {
@@ -4542,6 +4613,15 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     if (!isModalOpen) {
       editingModeRef.current = null;
     }
+  }, [isModalOpen]);
+
+  // The editor owns scroll while it is open; the document behind the overlay
+  // must remain fixed.
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previousOverflow; };
   }, [isModalOpen]);
 
   // Keep previewTime updated when clock mode is active
@@ -4740,6 +4820,19 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   const handleSave = async () => {
+    const drawingHasContent = Array.isArray(form.pixels) && form.pixels.some(pixel => pixel && pixel !== 0);
+    if (form.mode === 'image' && !form.imgSrc) {
+      setUnifiedPushMessage('Add image or video media before saving.');
+      return;
+    }
+    if (form.mode === 'text' && !(form.text || '').trim()) {
+      setUnifiedPushMessage('Enter text before saving.');
+      return;
+    }
+    if (form.mode === 'drawing' && !drawingHasContent) {
+      setUnifiedPushMessage('Draw something before saving.');
+      return;
+    }
     setIsSaving(true);
     try {
       let finalPixels = form.pixels;
@@ -4927,6 +5020,24 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const drawingHasContent = Array.isArray(form.pixels) && form.pixels.some(pixel => pixel && pixel !== 0);
+  const hasRequiredPresetContent =
+    (form.mode === 'image' && Boolean(form.imgSrc)) ||
+    (form.mode === 'text' && Boolean((form.text || '').trim())) ||
+    (form.mode === 'drawing' && drawingHasContent) ||
+    form.mode === 'clock';
+
+  const exportOriginalMedia = () => {
+    if (!form.imgSrc) return;
+    const extension = form.fileType === 'gif' ? 'gif' : form.fileType === 'video' ? 'mp4' : 'png';
+    const link = document.createElement('a');
+    link.href = form.imgSrc;
+    link.download = `${(form.name || 'led-sign-media').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'led-sign-media'}.${extension}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   };
 
   const startEdit = (p, e) => {
@@ -5218,7 +5329,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                             userSelect: 'none',
                             cursor: 'grab',
                             boxSizing: 'border-box',
-                            position: 'relative'
+                            position: 'relative',
+                            overscrollBehavior: 'contain'
                           }}
                           onMouseDown={(e) => {
                             e.preventDefault();
@@ -5317,6 +5429,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         >
                           {/* Image / Video / GIF with exact 64x20 quantized pixelated styling */}
                           <MediaPixelPreview
+                            key={form.imgSrc || 'empty-media'}
                             imgSrc={form.imgSrc}
                             fileType={form.fileType}
                             canvasX={form.canvasX}
@@ -5739,8 +5852,23 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           className="btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5"
                           style={{ borderRadius: '12px' }}
                         >
-                          <Upload size={13} /> {form.imgSrc ? 'Replace Media' : 'Select Media'}
+                          <Upload size={13} />
                         </button>
+                          {form.imgSrc && (
+                            <button
+                              type="button"
+                              onClick={exportOriginalMedia}
+                              className="btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5"
+                              style={{ borderRadius: '12px' }}
+                              title="Download the original uploaded media at its original quality"
+                            >
+                              <Download size={13} />
+                            </button>
+                          )}
+                      </div>
+
+                      {/* Visual Tools Toggles */}
+                      {form.imgSrc && <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         {form.imgSrc && (
                           <button
                             type="button"
@@ -5748,27 +5876,16 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                               if (!imageObjRef.current) return;
                               const newX = (64 - form.dwBase * form.zoom) / 2;
                               const newY = (20 - form.dhBase * form.zoom) / 2;
-                              const nextPixels = runCropRender(
-                                imageObjRef.current,
-                                newX,
-                                newY,
-                                form.dwBase * form.zoom,
-                                form.dhBase * form.zoom,
-                                form.bgColor || '#000000'
-                              );
+                              const nextPixels = runCropRender(imageObjRef.current, newX, newY, form.dwBase * form.zoom, form.dhBase * form.zoom, form.bgColor || '#000000');
                               setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY, pixels: nextPixels }));
                             }}
-                            className="btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5"
+                            className="btn-styled text-[10px] px-3 py-2"
                             style={{ borderRadius: '12px' }}
-                            title="Center horizontally and vertically"
+                            title="Center media"
                           >
-                            Center
+                            <Crosshair size={13} />
                           </button>
                         )}
-                      </div>
-
-                      {/* Visual Tools Toggles */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <button
                           type="button"
                           onClick={() => setShowGrid(prev => !prev)}
@@ -5776,18 +5893,18 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           style={{ borderRadius: '12px' }}
                           title="Toggle pixel matrix grid"
                         >
-                          Grid
+                          <Grid3X3 size={13} />
                         </button>
                         <button
                           type="button"
                           onClick={() => setShowGuides(prev => !prev)}
                           className={`btn-styled text-[10px] px-3 py-2 ${!showGuides ? 'inactive' : ''}`}
                           style={{ borderRadius: '12px' }}
-                          title="Toggle Photoshop-style centering guides"
+                          title="Toggle centering guides"
                         >
-                          Guides
+                          <ScanLine size={13} />
                         </button>
-                      </div>
+                      </div>}
                     </div>
 
                     {form.imgSrc && (
@@ -6122,9 +6239,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     className="btn-styled py-4" 
                     style={{ flex: 3 }}
                     onClick={handleSave}
-                    disabled={isSaving}
+                    disabled={isSaving || !hasRequiredPresetContent}
                   >
-                    {isSaving ? 'Processing...' : (editingId ? 'Update Preset' : 'Save Preset')}
+                    <Save size={16} /> {isSaving ? 'Processing...' : (editingId ? 'Update Preset' : 'Save Preset')}
                   </button>
                   {editingId && (
                     <button 
@@ -6132,7 +6249,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                       style={{ flex: 1, minWidth: 'auto' }}
                       onClick={() => deletePreset()}
                     >
-                      <Trash2 size={18} />
+                      <Trash2 size={18} /> Delete
                     </button>
                   )}
                 </div>
