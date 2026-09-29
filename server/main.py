@@ -2758,12 +2758,13 @@ async def save_preset(req: SavePresetRequest):
                 speed = preset.speed if preset.speed is not None else current_speed
                 speed = max(1, min(15, speed))
 
-                # Blank the physical screen before saving so it stays solid black
-                # instead of flashing the ATOTO screensaver during the BLE slot write.
-                # We push a solid black bitmap to the live display buffer (same path as
-                # push_frame) which holds the screen black for the duration of the save.
+                # Blank the physical screen before saving so it stays solid black.
+                # We ONLY send clock_off (not stop_playlist) to avoid the hardware reverting
+                # to its internal slot 1 / ATOTO screensaver between commands.
+                # A solid black bitmap pushed to the live display buffer holds the screen
+                # black for the duration of the slot write.
                 try:
-                    await stop_all_playback(blank=False)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
                     await asyncio.sleep(0.02)
                     black_bitmap = [1] * (PANEL_W * PANEL_H)
                     black_packet = protocol.bitmap_command(black_bitmap, PANEL_W, PANEL_H, color="#000000")

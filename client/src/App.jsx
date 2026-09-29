@@ -2798,6 +2798,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         if (typeof onPush === 'function') {
           await onPush(preset, true, true);
         }
+        // Only update preview and localStorage after successful push
         setPushMessage(`Assigned Clock to Slot ${globalIdx + 1}!`);
         setSavedPresets(nextSaved);
         localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
@@ -2805,7 +2806,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         setLastPushedId(preset.id || `saved-clock-${globalIdx}`);
       } catch (err) {
         console.warn('Failed to push clock on assign:', err);
-        setPushMessage(`Failed to assign Clock to Slot ${globalIdx + 1}`);
+        const detail = err.response?.data?.detail || err.message || '';
+        setPushMessage(`Error: Failed to assign Clock to Slot ${globalIdx + 1}${detail ? ` — ${detail}` : ''}`);
       }
       return;
     }

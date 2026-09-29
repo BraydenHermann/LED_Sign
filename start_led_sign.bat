@@ -1,3 +1,2 @@
 @echo off
-python "%~dp0start.py"
-pause
+wscript //nologo "%~dp0Start LED Sign.vbs"
