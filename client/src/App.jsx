@@ -5070,7 +5070,24 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
   };
 
+  const canPushLocalPresetDirectly = (preset) => {
+    if (!preset) return false;
+    if (preset.mode === 'clock' || preset.id === 'clock-default') return true;
+    if (preset.mode === 'drawing') return true;
+    if (preset.mode === 'image') {
+      return preset.fileType !== 'gif' && preset.fileType !== 'video';
+    }
+    return preset.mode === 'text' && (preset.animation || '').trim().toLowerCase() === 'show now';
+  };
+
   const pushPreset = async (p) => {
+    if (!canPushLocalPresetDirectly(p)) {
+      if (typeof setLocalPushMessage === 'function') {
+        setLocalPushMessage('Save animated text, GIFs, and videos to Saved Presets before pushing.');
+      }
+      return;
+    }
+
     if (p.isDefault && status?.connected) {
       try {
         if (typeof setPushing === 'function') setPushing(true);
@@ -5173,6 +5190,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               ?.sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0))
               ?.map(p => {
               const isClock = p.mode === 'clock' || p.id === 'clock-default';
+              const canPushDirectly = canPushLocalPresetDirectly(p);
               return (
               <div 
                 key={p.id} 
@@ -5183,8 +5201,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 onDrop={(e) => handleDrop(e, p.id)}
                 onDragEnd={handleDragEnd}
                 style={{
-                  cursor: p.isDefault ? 'default' : 'grab',
-                  opacity: p.id === draggedId ? 0.4 : 1,
+                  cursor: p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'not-allowed'),
+                  opacity: p.id === draggedId ? 0.4 : (canPushDirectly ? 1 : 0.65),
                   transform: p.id === draggedId ? 'scale(0.98)' : 'none',
                   border: p.id === dragOverId ? '2px dashed var(--accent-primary)' : (p.isDefault ? '1px solid #facc1544' : '1px solid var(--glass-border)'),
                   boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : (p.isDefault ? '0 0 12px #facc1522' : 'none'),
@@ -5199,6 +5217,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     setMsg('Error: Sign is not connected');
                   }
                 })}
+                title={canPushDirectly ? undefined : 'Save animated text, GIFs, and videos to Saved Presets before pushing'}
               >
                 {p.isDefault && (
                   <div className="preset-card-badge">
