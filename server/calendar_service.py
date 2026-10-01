@@ -7,7 +7,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
-REDIRECT_URI = 'http://localhost:8000/auth/callback'
+REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8000/auth/callback')
 
 _active_flow: Flow = None
 
@@ -42,7 +42,11 @@ class CalendarService:
     def __init__(self, credentials_path="credentials.json", token_path="token.json"):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.credentials_path = os.path.join(base_dir, credentials_path) if not os.path.isabs(credentials_path) else credentials_path
-        self.token_path = os.path.join(base_dir, token_path) if not os.path.isabs(token_path) else token_path
+        env_token_path = os.getenv("GOOGLE_TOKEN_PATH")
+        if env_token_path:
+            self.token_path = env_token_path if os.path.isabs(env_token_path) else os.path.join(base_dir, env_token_path)
+        else:
+            self.token_path = os.path.join(base_dir, token_path) if not os.path.isabs(token_path) else token_path
         self.creds = None
         if os.path.exists(self.token_path):
             try:
@@ -56,13 +60,35 @@ class CalendarService:
             with open(self.token_path, 'w') as f:
                 f.write(self.creds.to_json())
 
+    def _create_flow(self):
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+        
+        if client_id and client_secret:
+            client_config = {
+                "web": {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                }
+            }
+            return Flow.from_client_config(
+                client_config, scopes=SCOPES, redirect_uri=REDIRECT_URI
+            )
+        else:
+            if not os.path.exists(self.credentials_path):
+                raise FileNotFoundError(
+                    "Google OAuth credentials not found. Either set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET "
+                    "environment variables, or provide a credentials.json file in the server/ folder."
+                )
+            return Flow.from_client_secrets_file(
+                self.credentials_path, scopes=SCOPES, redirect_uri=REDIRECT_URI
+            )
+
     def get_auth_url(self):
         global _active_flow
-        if not os.path.exists(self.credentials_path):
-            raise FileNotFoundError("credentials.json not found in server/ folder")
-        _active_flow = Flow.from_client_secrets_file(
-            self.credentials_path, scopes=SCOPES, redirect_uri=REDIRECT_URI
-        )
+        _active_flow = self._create_flow()
         auth_url, _ = _active_flow.authorization_url(
             prompt='consent', access_type='offline', include_granted_scopes='true'
         )
@@ -72,11 +98,14 @@ class CalendarService:
         global _active_flow
         try:
             if _active_flow is None:
-                _active_flow = Flow.from_client_secrets_file(
-                    self.credentials_path, scopes=SCOPES, redirect_uri=REDIRECT_URI
-                )
+                _active_flow = self._create_flow()
             _active_flow.fetch_token(code=code)
             self.creds = _active_flow.credentials
+            
+            token_dir = os.path.dirname(self.token_path)
+            if token_dir and not os.path.exists(token_dir):
+                os.makedirs(token_dir, exist_ok=True)
+                
             with open(self.token_path, 'w') as f:
                 f.write(self.creds.to_json())
         except Exception as e:

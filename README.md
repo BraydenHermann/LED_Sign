@@ -1,0 +1,27 @@
+# LED Sign Setup
+
+This application can run in various configurations depending on your deployment needs. It supports both local development and hosted deployments.
+
+## Setup Scenarios
+
+### A. Existing/local development
+This is the standard configuration for running the application locally on your machine to communicate with nearby LED signs over Bluetooth.
+- **Credentials:** Uses server/credentials.json (downloaded from Google Cloud).
+- **Redirect URI:** Defaults to http://localhost:8000/auth/callback.
+- **Token Storage:** The user token is saved locally to server/token.json.
+- **Action Required:** No migration required. Your existing setup will continue to work seamlessly.
+
+### B. Local installation using environment configuration
+This configuration is ideal if you are distributing the app (e.g., as a desktop application) and want to use your own OAuth client while still running the server locally.
+- **Credentials:** Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables.
+- **Redirect URI:** Defaults to http://localhost:8000/auth/callback (you must add this as an authorized redirect URI in your Google Cloud OAuth client).
+- **Token Storage:** The user token is saved locally to the default server/token.json or to the path specified in GOOGLE_TOKEN_PATH.
+
+### C. Hosted/production deployment
+This configuration is for deploying the application to a cloud server (e.g., by another organization like ATOTO) where the backend is hosted centrally.
+- **Credentials:** Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables using the deployer's own Google Cloud credentials.
+- **Redirect URI:** Set GOOGLE_REDIRECT_URI to your hosted deployment's callback URL (e.g., https://atoto.example.com/auth/callback). Ensure this exact URI is authorized in your Google Cloud console.
+- **Token Storage:** Set GOOGLE_TOKEN_PATH to an appropriate persistent storage location for the deployment environment.
+
+---
+**Note:** The redirect URI configured in the application (GOOGLE_REDIRECT_URI) must exactly correspond to an authorized redirect URI configured for that OAuth client in Google Cloud.
