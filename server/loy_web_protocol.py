@@ -1,7 +1,7 @@
 import struct
 from typing import List
 
-# Removed hallucinated encode_var_len
+# Variable-length encoding is not required by the observed protocol behavior.
 
 class LOYBitmap:
     @staticmethod

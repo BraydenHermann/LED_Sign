@@ -2922,7 +2922,7 @@ async def _save_preset(req: SavePresetRequest):
                 save_all=True,
                 append_images=pil_frames[1:],
                 duration=gif_duration,
-                # Match the GIF format used by the working GitHub version.
+                # Match the GIF format used in previous stable revisions.
                 loop=0,
             )
             return gif_io.getvalue()
