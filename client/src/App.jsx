@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 
 const API_BASE = '';
-const DEFAULT_MAC = 'FF:24:10:29:03:1C';
+const DEFAULT_MAC = '';
 const SCAN_PAGE_SIZE = 6;
 const PANEL_W = 64;
 const PANEL_H = 20;

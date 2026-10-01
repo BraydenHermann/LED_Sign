@@ -51,6 +51,9 @@ This project uses various third-party open source dependencies and assets. Below
   - License: Requires Manual Verification (Typically Apache 2.0 or BSD depending on version)
 
 ## Fonts and Assets
-* **Unifont** (server/unifont.otf, client/public/UnifontMedium16.woff2)
+* **Unifont** (`server/unifont.otf`, `client/public/UnifontMedium16.woff2`)
   - Purpose: Font used for accurate rendering on the 64x20 LED sign.
   - License: **REQUIRES MANUAL VERIFICATION**. (Typically GNU Unifont is GPLv2 with a font exception or OFL, but the exact provenance and redistribution terms of the bundled files must be verified before commercial redistribution).
+
+## Dependency Note
+**Important**: The Python dependencies specified in `requirements.txt` are currently unpinned. Before producing a reproducible commercial release, these dependency versions should be explicitly pinned/locked to ensure deterministic builds and avoid unexpected updates.

@@ -1037,7 +1037,7 @@ async def scan_devices():
                 or name.upper().startswith("LEO")
             )
 
-            display_name = name or ("YS524B150258" if (is_led and addr == "FF:24:10:29:03:1C") else ("LED Sign" if is_led else ""))
+            display_name = name or ("LED Sign" if is_led else "")
             if not display_name and not is_led:
                 return
 
