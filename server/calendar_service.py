@@ -14,13 +14,21 @@ _active_flow: Flow = None
 import re
 import unicodedata
 
-def clean_event_summary(summary: str) -> str:
+def clean_event_summary(summary: str, user_name: str = None) -> str:
     if not summary:
         return "Untitled"
-    # Remove common boilerplate like 'and Brayden Hermann'
-    cleaned = re.sub(r'\s*(?:and|&)\s+Brayden\s+Hermann\b', '', summary, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\bBrayden\s+Hermann\s+(?:and|&)\s*', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\s*[-/]\s*Brayden\s+Hermann\b', '', cleaned, flags=re.IGNORECASE)
+        
+    cleaned = summary
+    if user_name:
+        escaped_name = re.escape(user_name)
+        cleaned = re.sub(r'\s*(?:and|&)\s+' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b' + escaped_name + r'\s+(?:and|&)\s*', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s*[-/]\s*' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b' + escaped_name + r'\s*[-/]\s*', '', cleaned, flags=re.IGNORECASE)
+        
+        if cleaned.strip().lower() == user_name.lower():
+            cleaned = ''
+            
     cleaned = cleaned.strip()
 
     # Transliterate French / European / special characters to ASCII equivalents
@@ -117,7 +125,7 @@ class CalendarService:
         ).execute()
         return result.get('items', [])
 
-    def get_today_events(self):
+    def get_today_events(self, clean_name=True):
         """Return timed events for today only (all-day events excluded), each with is_active flag."""
         service = self._get_service()
         if not service:
@@ -182,7 +190,28 @@ class CalendarService:
                 response_status = 'needsAction'
 
             raw_summary = e.get('summary', 'Untitled')
-            cleaned_summary = clean_event_summary(raw_summary)
+            
+            user_name = None
+            if clean_name:
+                organizer = e.get('organizer', {})
+                creator = e.get('creator', {})
+                attendees = e.get('attendees', [])
+                
+                for a in attendees:
+                    if a.get('self') and a.get('displayName'):
+                        user_name = a.get('displayName')
+                        break
+                        
+                if not user_name and organizer.get('self') and organizer.get('displayName'):
+                    user_name = organizer.get('displayName')
+                    
+                if not user_name and creator.get('self') and creator.get('displayName'):
+                    user_name = creator.get('displayName')
+                    
+                if not user_name:
+                    user_name = os.environ.get('CALENDAR_DISPLAY_NAME')
+            
+            cleaned_summary = clean_event_summary(raw_summary, user_name)
             print(f"[calendar] Event: {cleaned_summary} (raw: {raw_summary}) | Status: {response_status} | Attendees: {len(attendees)}")
 
             # Only accepted calendar invites/events appear in the schedule to avoid spam

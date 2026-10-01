@@ -185,20 +185,9 @@ function normalizeForSign(str) {
     .replace(/[\u0300-\u036f]/g, '');
 }
 
-// Remove common boilerplate from event titles like "and Brayden Hermann", and normalize characters
-function cleanEventSummary(summary) {
-  if (!summary) return 'Untitled Event';
-  let s = summary
-    .replace(/\s*(?:and|&)\s+Brayden\s+Hermann\b/gi, '')
-    .replace(/\bBrayden\s+Hermann\s+(?:and|&)\s*/gi, '')
-    .replace(/\s*[-/]\s*Brayden\s+Hermann\b/gi, '')
-    .trim();
-  return normalizeForSign(s) || 'Untitled Event';
-}
-
 function getEventDisplayString(ev) {
   if (!ev) return 'IN A MEETING';
-  const summary = cleanEventSummary(ev.summary);
+  const summary = ev.summary || 'Untitled Event';
   try {
     const endD = new Date(ev.end_iso);
     const timeFmt = new Intl.DateTimeFormat(undefined, { 
@@ -1785,6 +1774,7 @@ export default function App() {
     catch { return {}; }
   });
   const [events, setEvents] = useState(null);
+  const [cleanName, setCleanName] = useState(() => localStorage.getItem('loy_clean_name') !== 'false');
   const [calLoading, setCalLoading] = useState(false);
   const [now, setNow] = useState(new Date());
   const [presets, setPresets] = useState([]);
@@ -2048,7 +2038,8 @@ export default function App() {
     if (!status?.calendar_connected) return [];
     setCalLoading(true);
     try {
-      const res = await axios.get(`${API_BASE}/calendar/today`);
+      const isClean = localStorage.getItem('loy_clean_name') !== 'false';
+      const res = await axios.get(`${API_BASE}/calendar/today?clean_name=${isClean}`);
       const evs = res.data?.events || [];
       setEvents(evs);
       setCalLoading(false);
@@ -2279,7 +2270,7 @@ export default function App() {
                 const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
                 const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
                 new Notification('Upcoming Meeting', {
-                  body: `${cleanEventSummary(currentEvent.summary)} starts ${timeLabel}`,
+                  body: `${currentEvent.summary || 'Untitled Event'} starts ${timeLabel}`,
                   icon: '/favicon.ico',
                   tag: `meeting-${targetId}`,
                 });
@@ -2730,6 +2721,8 @@ export default function App() {
             onPush={handlePush}
             pushMessage={pushMessage || localPushMessage}
             pushing={pushing}
+            cleanName={cleanName}
+            setCleanName={setCleanName}
           />
         </div>
       </div>
@@ -3933,7 +3926,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
 }
 
 /* ─── Calendar ───────────────────────────────────────────────────────── */
-function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushMessage, pushing }) {
+function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName }) {
   const [calError, setCalError] = useState('');
 
   useEffect(() => {
@@ -3974,9 +3967,33 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
           )}
         </div>
       </div>
-      <p className="text-slate-400 text-sm w-full mb-8">
-        {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-      </p>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginBottom: '32px' }}>
+        <p className="text-slate-400 text-sm">
+          {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+        </p>
+        {status.calendar_connected && (
+          <div 
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
+            onClick={() => {
+              const val = !cleanName;
+              setCleanName(val);
+              localStorage.setItem('loy_clean_name', val.toString());
+              setTimeout(() => fetchEvents(), 0);
+            }}
+          >
+            <div style={{
+              width: '18px', height: '18px', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: cleanName ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' : 'rgba(255,255,255,0.05)',
+              border: cleanName ? 'none' : '1px solid rgba(255,255,255,0.2)'
+            }}>
+              {cleanName && <Check size={14} color="white" strokeWidth={3} />}
+            </div>
+            <span style={{ fontSize: '14px', color: '#cbd5e1', userSelect: 'none' }}>
+              Remove my name from event titles
+            </span>
+          </div>
+        )}
+      </div>
 
       {calError && (
         <div className={`flex items-center gap-3 text-sm mb-6 w-full px-5 py-3 rounded-2xl bg-amber-400/10 text-amber-300`}>
@@ -4052,7 +4069,7 @@ function formatEventTime(ev) {
 
 function EventCard({ ev, now, onPush }) {
   const timeStr = formatEventTime(ev);
-  const summary = cleanEventSummary(ev?.summary);
+  const summary = ev?.summary || 'Untitled Event';
   const isDeclined = ev?.response_status?.toLowerCase() === 'declined' || summary.toLowerCase().includes('[declined]');
   const isActive = isEventActive(ev, now);
 

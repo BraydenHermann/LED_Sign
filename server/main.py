@@ -1098,9 +1098,9 @@ async def logout():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/calendar/today")
-async def get_today_events():
+async def get_today_events(clean_name: bool = True):
     try:
-        events = calendar_service.get_today_events()
+        events = calendar_service.get_today_events(clean_name=clean_name)
         if events is None:
             return {"events": []}
         return {"events": events}
