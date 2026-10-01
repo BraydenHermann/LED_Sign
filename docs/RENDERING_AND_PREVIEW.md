@@ -1,6 +1,6 @@
-# Rendering and Preview Architecture
+﻿# Rendering and Preview Architecture
 
-One of the application's most important features is its ability to preview content accurately before it is sent to the physical LED sign. This document describes the relationship between the application's preview functionality and the actual hardware output.
+The application provides a hardware-aware 64x20 preview of sign content before it is sent to the device. Images, GIFs, and video are previewed from the processed pixel/frame data used for hardware output, while native text animation effects are simulated in the browser to closely represent the behavior performed by the sign's firmware.
 
 ## Hardware Dimensions
 The physical LED sign operates on a strict 64x20 pixel grid (1280 total pixels). All rendering logic is fundamentally built around mapping content onto this resolution.
@@ -8,23 +8,23 @@ The physical LED sign operates on a strict 64x20 pixel grid (1280 total pixels).
 ## Content Types and Accuracy
 
 ### Images, GIFs, and Videos
-For static and animated media, the application provides a **highly accurate (1:1 pixel-perfect)** preview.
-- **Rendering Pipeline:** When you upload media, the frontend calculates exactly how the image/video maps to a 64x20 coordinate space (handling zoom, panning, and background colors). 
-- **Preview Display:** The frontend preview renders exactly 64x20 simulated pixels by utilizing CSS image-rendering: pixelated combined with a strict layout grid and nearest-neighbor scaling.
-- **Hardware Push:** When pushed to the sign, the exact same coordinates and zoom levels are passed to the Python backend. The backend uses Pillow/OpenCV to rasterize, scale, and crop the original media into the exact same 64x20 matrix of RGB values displayed in the browser. 
-- **Result:** The preview output is essentially identical to the physical hardware output.
+For static and animated media, the application provides a pixel-accurate preview.
+- **Rendering Pipeline:** When you upload media, the frontend calculates how the image/video maps to a 64x20 coordinate space. 
+- **Preview Display:** The frontend preview is generated at the physical 64x20 panel resolution. For GIF and video animation, the preview represents the actual processed frames.
+- **Hardware Push:** The backend uses Pillow/OpenCV to rasterize, scale, and crop the original media into the exact same 64x20 matrix of RGB values displayed in the browser. 
+- **Result:** The visual frame and pixel content is shared and based on the same processed pixel/frame representation used for hardware output. Minor timing differences may exist for animations due to Bluetooth transmission, browser playback scheduling, or firmware timing.
 
 ### Static Text
-- **Rendering Pipeline:** Text is rendered using a highly specialized unifont.otf pixel font mapping.
+- **Rendering Pipeline:** Text is rendered using a highly specialized `unifont.otf` pixel font mapping.
 - **Preview Display:** The frontend uses the same underlying WOFF2 version of the font to preview the typography natively in the browser.
 - **Hardware Push:** The backend draws the text using Pillow and the physical OTF font, sending the resulting raw pixels to the sign.
-- **Result:** The character glyphs and spacing are nearly identical, though sub-pixel anti-aliasing in browsers can sometimes cause the preview text to look slightly softer than the physical hardware's harsh LED pixels.
+- **Result:** The character glyphs and spacing closely match the sign, but browser font rendering introduces differences such as sub-pixel anti-aliasing that can cause the preview text to look softer than the physical hardware's LED pixels.
 
 ### Animated Text (e.g., Left Shift, Snowflake, Marquee)
-- **Rendering Pipeline:** The physical hardware contains native rendering algorithms for handling animations like "Continuous Left Shift" or "Snowflake" without requiring the software to send every single frame.
-- **Preview Display:** The frontend attempts to visually simulate these native hardware animations using CSS keyframes and transitions (e.g., translating a div to mimic scrolling).
-- **Hardware Push:** The software sends the raw text string along with an animation speed/type byte to the hardware, instructing the hardware's internal chip to perform the animation.
-- **Result:** While the preview accurately reflects the *concept* and *speed* of the animation, it is an approximation. The exact timing, frame rate, and pixel interpolation of effects like "Snowflake" or "Flash" will differ slightly on the actual hardware because the hardware executes its own closed-source animation routines.
+For effects such as scrolling or left shift, the application provides a live simulation of the sign's native text animation.
+- **Rendering Pipeline:** The application sends the raw text string and an animation command to the sign. The sign's firmware performs the native animation.
+- **Preview Display:** The browser separately simulates that animation for the user. 
+- **Result:** This hardware-aware animated text preview is intended to show the direction, behavior, content, approximate speed, and overall visual result. Exact frame interpolation and timing may differ because the firmware animation implementation is proprietary and internal to the hardware.
 
 ## Presets
-Hardware presets are rendered exactly as they appear in the UI thumbnails. The thumbnails are generated by requesting the first frame of the fully rendered 64x20 byte buffer from the backend.
+Hardware preset thumbnails are generated by requesting the first frame of the fully rendered 64x20 byte buffer from the backend, guaranteeing they reflect the processed output data.

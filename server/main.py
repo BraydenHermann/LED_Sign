@@ -1013,7 +1013,7 @@ async def scan_devices():
             cur_addr = connected_client.address.upper()
             found_map[cur_addr] = {
                 "name": "LED Sign (Connected)",
-                "adv_name": "YS524B150258",
+                "adv_name": getattr(connected_client, "name", None) or "LED Sign",
                 "address": connected_client.address,
                 "rssi": -40,
                 "is_led": True
