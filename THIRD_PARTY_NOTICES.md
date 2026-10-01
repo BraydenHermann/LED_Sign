@@ -45,6 +45,14 @@ This project uses various third-party open source dependencies and assets. Below
   - Purpose: Google Calendar integration and OAuth
   - Source: https://github.com/googleapis/google-api-python-client
   - License: Apache License 2.0
+* **Google Auth**
+  - Purpose: Core Google authentication library
+  - Source: https://github.com/googleapis/google-auth-library-python
+  - License: Apache License 2.0
+* **Pydantic**
+  - Purpose: Data validation and settings management
+  - Source: https://github.com/pydantic/pydantic
+  - License: MIT
 * **OpenCV-Python (opencv-python-headless)**
   - Purpose: Video processing
   - Source: https://github.com/opencv/opencv-python

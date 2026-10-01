@@ -1,6 +1,13 @@
 # LED Sign Setup
 
-This application can run in various configurations depending on your deployment needs. It supports both local development and hosted deployments.
+The application is designed primarily for local deployment alongside Bluetooth hardware, with configurable OAuth settings that can also support future hybrid/hosted components.
+
+## Network Configuration
+
+By default, the backend securely binds to `127.0.0.1` and restricts CORS origins to local development and application ports. Exposing the backend to a Local Area Network (LAN) should be an intentional deployment choice.
+
+- **`LED_SIGN_HOST`**: Can be set to override the bind address (e.g., `0.0.0.0` for LAN access).
+- **`LED_SIGN_CORS_ORIGINS`**: Can be set to a comma-separated list of permitted frontend origins if the default localhost origins need to be expanded.
 
 ## Setup Scenarios
 
