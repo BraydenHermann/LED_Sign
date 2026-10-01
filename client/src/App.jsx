@@ -2750,16 +2750,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [recents, setRecents] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('loy_recents') || '[]');
-      if (Array.isArray(saved) && saved.length > 0) {
-        if (!saved.some(d => d.address === DEFAULT_MAC)) {
-          return [...saved, { address: DEFAULT_MAC, name: 'Test Sign' }];
-        }
+      if (Array.isArray(saved)) {
         return saved;
       }
     } catch {}
-    return [
-      { address: DEFAULT_MAC, name: 'Test Sign' }
-    ];
+    return [];
   });
   const [scanTab, setScanTab] = useState('all');
   const [isScanning, setIsScanning] = useState(false);

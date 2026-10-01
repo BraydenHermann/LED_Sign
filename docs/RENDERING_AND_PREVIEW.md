@@ -1,30 +1,43 @@
 ﻿# Rendering and Preview Architecture
 
-The application provides a hardware-aware 64x20 preview of sign content before it is sent to the device. Images, GIFs, and video are previewed from the processed pixel/frame data used for hardware output, while native text animation effects are simulated in the browser to closely represent the behavior performed by the sign's firmware.
+The application provides a hardware-aware 64x20 preview of sign content before it is sent to the device. The application previews all content against the physical 64x20 target. Once media is processed for saving or transmission, saved and live previews can use the processed frame/pixel representation associated with the hardware output. Immediate editor previews may use browser-side rendering before that processing stage.
 
 ## Hardware Dimensions
 The physical LED sign operates on a strict 64x20 pixel grid (1280 total pixels). All rendering logic is fundamentally built around mapping content onto this resolution.
 
+## Preview Stages
+
+The accuracy of the preview depends on the stage of the workflow:
+
+### A. Editor / Pre-Save Preview
+- Immediate browser-side representation while editing content.
+- May use browser rendering, HTML Canvas, or CSS approximations.
+- Designed to closely represent the 64x20 target result.
+- Should not be considered byte-for-byte or frame-for-frame identical to hardware output.
+
+### B. Processed / Saved Preview
+- Uses content after it has been fully rendered and processed by the backend.
+- Where the same backend-rendered frames and pixels are reused for the hardware payload, this provides the strongest accuracy case.
+- Presets generally fall into this category, representing the actual payload bytes.
+
+### C. Live Dashboard Preview
+- Generated directly from the backend-rendered data associated with the current sign output.
+- Reflects what the backend believes the sign is currently displaying.
+
 ## Content Types and Accuracy
 
 ### Images, GIFs, and Videos
-For static and animated media, the application provides a pixel-accurate preview.
-- **Rendering Pipeline:** When you upload media, the frontend calculates how the image/video maps to a 64x20 coordinate space. 
-- **Preview Display:** The frontend preview is generated at the physical 64x20 panel resolution. For GIF and video animation, the preview represents the actual processed frames.
-- **Hardware Push:** The backend uses Pillow/OpenCV to rasterize, scale, and crop the original media into the exact same 64x20 matrix of RGB values displayed in the browser. 
-- **Result:** The visual frame and pixel content is shared and based on the same processed pixel/frame representation used for hardware output. Minor timing differences may exist for animations due to Bluetooth transmission, browser playback scheduling, or firmware timing.
+- **Editor Previews:** When you upload media, the frontend calculates how the image/video maps to a 64x20 coordinate space using browser-side canvas rendering. 
+- **Processed Output:** The backend independently uses Pillow/OpenCV to rasterize, scale, and crop the original media into the final RGB matrix suitable for the hardware.
+- **Result:** Once saved or pushed, the resulting live preview represents the actual processed frames. Minor timing differences may exist for animations due to Bluetooth transmission or browser playback scheduling, but the visual frame and pixel content is derived directly from the backend payload.
 
 ### Static Text
-- **Rendering Pipeline:** Text is rendered using a highly specialized `unifont.otf` pixel font mapping.
-- **Preview Display:** The frontend uses the same underlying WOFF2 version of the font to preview the typography natively in the browser.
-- **Hardware Push:** The backend draws the text using Pillow and the physical OTF font, sending the resulting raw pixels to the sign.
-- **Result:** The character glyphs and spacing closely match the sign, but browser font rendering introduces differences such as sub-pixel anti-aliasing that can cause the preview text to look softer than the physical hardware's LED pixels.
+- **Editor Previews:** The frontend uses a WOFF2 version of the unifont pixel font to preview typography natively in the browser.
+- **Processed Output:** The backend draws the text using Pillow and the physical OTF font.
+- **Result:** The character glyphs and spacing closely match the sign, but browser font rendering introduces differences such as sub-pixel anti-aliasing that can cause the pre-save preview text to look softer than the physical hardware's LED pixels.
 
 ### Animated Text (e.g., Left Shift, Snowflake, Marquee)
-For effects such as scrolling or left shift, the application provides a live simulation of the sign's native text animation.
-- **Rendering Pipeline:** The application sends the raw text string and an animation command to the sign. The sign's firmware performs the native animation.
-- **Preview Display:** The browser separately simulates that animation for the user. 
-- **Result:** This hardware-aware animated text preview is intended to show the direction, behavior, content, approximate speed, and overall visual result. Exact frame interpolation and timing may differ because the firmware animation implementation is proprietary and internal to the hardware.
-
-## Presets
-Hardware preset thumbnails are generated by requesting the first frame of the fully rendered 64x20 byte buffer from the backend, guaranteeing they reflect the processed output data.
+Text animations are defined and rendered by application logic.
+- **Editor Previews:** Animated text previews use a browser-side 64x20 renderer that mirrors the application's backend animation logic.
+- **Processed Output:** The backend independently generates the actual frames used for physical output (e.g., via `generate_text_animation_frames`). Saved animated-text presets are built directly from those rendered frames.
+- **Result:** The browser provides its own 64x20 simulation of the animation behavior for immediate editing. Because the browser and backend rendering are separate implementations, the preview closely represents the resulting animation, while minor differences in timing, synchronization, or font rasterization may occur. Once backend-rendered preview content is generated (Saved/Live), it more directly represents the content being sent to the sign.

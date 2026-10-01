@@ -8,7 +8,7 @@ This application consists of a decoupled frontend and backend that communicate v
 - A single-page application built with React and Vite.
 - Manages the user interface, preview simulations, preset management, and local configuration.
 - Handles interactions with the user and polls the backend for Bluetooth status and Calendar events.
-- Accurate 64x20 content preview, including pixel-accurate media previews and live simulations of the sign's native text animations.
+- Provides an accurate 64x20 content preview, where immediate browser-side editor previews closely simulate the backend logic, and saved/live previews directly reflect the actual processed hardware output.
 
 ### 2. Python Backend (`server/`)
 - A RESTful API built with FastAPI and Uvicorn.
