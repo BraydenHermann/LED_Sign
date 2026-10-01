@@ -380,6 +380,17 @@ img.scrolling-preview {
   box-shadow: 0 0 15px rgba(255, 255, 255, 0.2) !important;
 }
 
+/* Keep media processing deterministic: crop gestures and controls cannot
+   change while frames are being extracted, but do not show a busy cursor. */
+.media-processing-lock button,
+.media-processing-lock input,
+.media-processing-lock select,
+.media-processing-lock [role="button"] {
+  opacity: 0.55 !important;
+  pointer-events: none !important;
+  cursor: default !important;
+}
+
 .h-slider {
   flex: 1;
   height: 6px;
@@ -447,7 +458,9 @@ img.scrolling-preview {
   max-width: 70%;
   display: flex;
   flex-direction: column;
-  gap: 40px;
+  /* The Local preset grid follows the shared Presets header in a sibling
+     component; no column gap keeps it aligned with the Saved grid. */
+  gap: 0;
 }
 
 .right-column {

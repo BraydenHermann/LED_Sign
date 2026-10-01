@@ -83,7 +83,7 @@ async def write_large_gatt_char(client: BleakClient, char_uuid: str, data: bytes
     Protected by ble_lock to prevent concurrent BLE operations on Windows.
     """
     if not client or not getattr(client, "is_connected", False):
-        return
+        raise RuntimeError("Sign is not connected")
     try:
         async with ble_lock:
             if chunk_size is None:
@@ -100,6 +100,18 @@ async def write_large_gatt_char(client: BleakClient, char_uuid: str, data: bytes
                     await asyncio.sleep(delay)
     except Exception as e:
         print(f"[BLE write_large_gatt_char error] {e}")
+        raise
+
+def save_preview_bytes(data: bytes, path: str):
+    """Publish complete previews; never truncate a GIF being served."""
+    with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as tmp:
+        tmp.write(data)
+        temporary = tmp.name
+    try:
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 async def safe_write_gatt_char(char_uuid: str, data: Union[bytes, bytearray], response: bool = True):
     global connected_client, connection_ready
@@ -109,6 +121,9 @@ async def safe_write_gatt_char(char_uuid: str, data: Union[bytes, bytearray], re
                 await connected_client.write_gatt_char(char_uuid, bytearray(data), response=response)
         except Exception as e:
             print(f"[safe_write_gatt_char error] {e}")
+            raise
+    else:
+        raise RuntimeError("Sign is not connected")
 
 async def stop_all_playback(blank: bool = False):
     """Halts the onboard hardware playlist engine and clock."""
@@ -261,6 +276,10 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 if not os.path.exists(STATIC_DIR):
     os.makedirs(STATIC_DIR)
 
+# Small in-memory status map for browser-side progress while a preset is being
+# written to a hardware slot. Entries are keyed by a client-generated id.
+save_progress: dict[str, dict[str, Any]] = {}
+
 # Mount static folder so frontend can read preview images
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -279,6 +298,7 @@ class PushTextRequest(BaseModel):
     views: Optional[Any] = 1
     mode: Optional[Any] = "text"
     pixels: Optional[Any] = None
+    pixelsRgbB64: Optional[str] = None
     fileType: Optional[Any] = None
     frameDurationMs: Optional[Any] = None  # Exact per-frame delay for GIF/video animations
     name: Optional[Any] = None
@@ -293,6 +313,15 @@ class RenderTextPreviewRequest(BaseModel):
 
 class ProcessGifRequest(BaseModel):
     imgSrc: str
+    canvasX: float
+    canvasY: float
+    zoom: float
+    dwBase: float
+    dhBase: float
+    bgColor: Optional[str] = "#000000"
+
+class ProcessVideoRequest(BaseModel):
+    videoB64: str
     canvasX: float
     canvasY: float
     zoom: float
@@ -337,11 +366,13 @@ def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_
     
     # Use seek() to correctly apply GIF disposal and compositing per-frame
     extracted_frames = []
+    frame_durations_ms = []
     n_frames = getattr(img, "n_frames", 1)
     for i in range(n_frames):
         try:
             img.seek(i)
             extracted_frames.append(img.copy().convert("RGBA"))
+            frame_durations_ms.append(max(16, int(img.info.get("duration", gif_duration_ms) or gif_duration_ms)))
         except EOFError:
             break
             
@@ -382,7 +413,7 @@ def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_
             for c in range(64):
                 final_pixels.append(frames_list[f][start_idx + c])
                 
-    return final_pixels, recommended_speed, actual_duration_ms
+    return final_pixels, recommended_speed, actual_duration_ms, frame_durations_ms
 
 
 @app.post("/process-gif")
@@ -390,14 +421,83 @@ async def process_gif(req: ProcessGifRequest):
     try:
         w = req.dwBase * req.zoom
         h = req.dhBase * req.zoom
-        pixels, speed, duration_ms = process_gif_pixels(req.imgSrc, req.canvasX, req.canvasY, w, h, req.bgColor or "#000000")
+        pixels, speed, duration_ms, frame_durations_ms = process_gif_pixels(req.imgSrc, req.canvasX, req.canvasY, w, h, req.bgColor or "#000000")
         # Return the RGB pixels directly — process_gif_pixels() already renders full-color
         # RGB frames. Applying quantize_frames() here (MAXCOVERAGE → 3 colors) was causing
         # drastic color corruption (e.g. beer mug GIF turning mostly yellow on re-save).
-        return {"pixels": pixels, "speed": speed, "frameDurationMs": duration_ms}
+        return {"pixels": pixels, "speed": speed, "frameDurationMs": duration_ms, "frameDurationsMs": frame_durations_ms}
     except Exception as e:
         print(f"Error processing GIF: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/process-video")
+def process_video(req: ProcessVideoRequest):
+    """Decode uploaded video locally instead of seeking once per frame in the browser."""
+    import base64
+    temp_path = None
+    cap = None
+    try:
+        import cv2
+        raw = base64.b64decode(req.videoB64)
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp:
+            temp.write(raw)
+            temp_path = temp.name
+
+        cap = cv2.VideoCapture(temp_path)
+        if not cap.isOpened():
+            raise ValueError("Unable to decode video")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        fps = max(1.0, min(60.0, fps))
+        frame_duration_ms = max(16, int(round(1000 / fps)))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        step = max(1.0, total_frames / 300)
+        frame_duration_ms = 1000 * step / fps
+        bg_rgb = hex_to_rgb_global(req.bgColor or "#000000")
+        width = max(1, int(round(req.dwBase * req.zoom)))
+        height = max(1, int(round(req.dhBase * req.zoom)))
+        x = int(round(req.canvasX))
+        y = int(round(req.canvasY))
+        frames = []
+        # Preserve native-frame motion for clips up to 300 frames, matching
+        # the old 24 fps client limit without 240 browser seek operations.
+        source_index = 0
+        while len(frames) < 300:
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            source_index += 1
+            if source_index - 1 < int(len(frames) * step):
+                continue
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            source = Image.fromarray(rgb, "RGB")
+            panel = Image.new("RGB", (PANEL_W, PANEL_H), bg_rgb)
+            panel.paste(source.resize((width, height), Image.Resampling.LANCZOS), (x, y))
+            pixels = []
+            for r, g, b in panel.getdata():
+                if (req.bgColor or "#000000").lower() == "#000000" and r < 16 and g < 16 and b < 16:
+                    pixels.append(0)
+                else:
+                    pixels.append(f"#{min(255, max(0, int(round(r / 16.0)) * 16)):02x}{min(255, max(0, int(round(g / 16.0)) * 16)):02x}{min(255, max(0, int(round(b / 16.0)) * 16)):02x}")
+            frames.append(pixels)
+        cap.release()
+        if not frames:
+            raise ValueError("Video contains no readable frames")
+        stitched = []
+        for row in range(PANEL_H):
+            for frame in frames:
+                stitched.extend(frame[row * PANEL_W:(row + 1) * PANEL_W])
+        return {"pixels": stitched, "frameDurationMs": frame_duration_ms, "frameDurationsMs": [frame_duration_ms] * len(frames)}
+    except Exception as e:
+        print(f"Error processing video: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if cap is not None:
+            cap.release()
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 @app.get("/status")
@@ -435,6 +535,7 @@ async def get_status():
     
     return {
         "connected": connected,
+        "api_version": 2,
         "address": address,
         "preview_url": preview_url,
         "preview_ts": preview_ts,
@@ -690,6 +791,14 @@ async def get_hardware_slots(mac: str = ""):
             try:
                 with open(json_path, "r") as fj:
                     slot_info["preset_data"] = _json.load(fj)
+                    # Older video uploads cached compact stitched RGB without
+                    # preview pixels. Recover those rows for the card player.
+                    cached = slot_info["preset_data"]
+                    if cached.get("pixelsRgbB64") and not cached.get("pixels"):
+                        import base64
+                        rgb = base64.b64decode(cached["pixelsRgbB64"])
+                        cached["pixels"] = ["#" + rgb[i:i + 3].hex() for i in range(0, len(rgb), 3)]
+                        cached.pop("pixelsRgbB64", None)
                     slot_info["occupied"] = True
             except Exception:
                 pass
@@ -786,6 +895,9 @@ async def _play_preset(id: int, mac: str = ""):
     print(f"[DEBUG] /preset called with id={id}, mac={mac}")
     global connected_client, connection_ready, active_scroller_task, current_display_mode, frames_sent
     import json as _json
+
+    if not connected_client or not connected_client.is_connected or not connection_ready:
+        raise HTTPException(status_code=409, detail="Sign is not connected")
 
     # Cancel any active scroller/animation task
     if active_scroller_task:
@@ -2521,6 +2633,11 @@ class SavePresetRequest(BaseModel):
     slot_id: int
     preset: PushTextRequest
     address: str = ""
+    progress_id: Optional[str] = None
+
+@app.get("/save-progress/{progress_id}")
+async def get_save_progress(progress_id: str):
+    return save_progress.get(progress_id, {"progress": 0, "phase": "Waiting to start"})
 
 def encode_var_len(val: int) -> bytes:
     if val < 128:
@@ -2529,8 +2646,29 @@ def encode_var_len(val: int) -> bytes:
         return bytes([129, val])
 @app.post("/save-preset")
 async def save_preset(req: SavePresetRequest):
+    # A complete file transfer is one transaction. Calendar saves and manual
+    # slot selections must not interleave session, chunk and play packets.
+    async with preset_switch_lock:
+        return await _save_preset(req)
+
+
+async def _save_preset(req: SavePresetRequest):
     global connected_client, connection_ready, current_speed, active_scroller_task, current_width, current_display_mode, frames_sent
+
+    if not connected_client or not connected_client.is_connected or not connection_ready:
+        raise HTTPException(status_code=409, detail="Sign is not connected")
     
+    progress_id = req.progress_id
+    written_to_sign = False
+
+    def report_progress(value: int, phase: str = "Preparing"):
+        if progress_id:
+            save_progress[progress_id] = {"progress": max(0, min(100, int(value))), "phase": phase}
+
+    # The browser uses 0–15% for uploading the preset. Begin server-side work
+    # at the same boundary so progress never appears to move backward.
+    report_progress(15, "Preparing preset")
+
     # Cancel any active scrolling or flipper task cleanly
     await cancel_active_worker()
         
@@ -2579,7 +2717,8 @@ async def save_preset(req: SavePresetRequest):
 
             current_display_mode = "clock"
             frames_sent += 1
-            return {"status": "success", "preview_url": f"/static/preset_{mac_str}_{slot_id}.gif"}
+            report_progress(100)
+            return {"status": "success", "preview_url": f"/static/preset_{mac_str}_{slot_id}.gif", "written_to_sign": bool(connected_client and connected_client.is_connected and connection_ready)}
         except Exception as clk_err:
             import traceback
             traceback.print_exc()
@@ -2595,8 +2734,22 @@ async def save_preset(req: SavePresetRequest):
         is_anim = False
         is_anim_text = False
 
+        # Video frames can arrive as compact RGB bytes instead of hundreds of
+        # thousands of JSON color strings. Decode directly into PIL frames.
+        rgb_frame_bytes = None
+        rgb_payload = getattr(preset, 'pixelsRgbB64', None)
+        if rgb_payload:
+            try:
+                import base64
+                rgb_frame_bytes = base64.b64decode(rgb_payload)
+                bytes_per_frame = PANEL_W * PANEL_H * 3
+                if not rgb_frame_bytes or len(rgb_frame_bytes) % bytes_per_frame:
+                    raise ValueError("invalid RGB frame payload")
+            except Exception as rgb_err:
+                raise HTTPException(status_code=400, detail=f"Invalid compressed video frames: {rgb_err}")
+
         # If preset is an image/media preset without pixels, extract from imgSrc or thumbnail
-        if (preset.pixels is None or len(preset.pixels) == 0) and (getattr(preset, 'imgSrc', None) or getattr(preset, 'mode', None) == 'image' or getattr(preset, 'fileType', None) in ('image', 'gif', 'video')):
+        if not rgb_frame_bytes and (preset.pixels is None or len(preset.pixels) == 0) and (getattr(preset, 'imgSrc', None) or getattr(preset, 'mode', None) == 'image' or getattr(preset, 'fileType', None) in ('image', 'gif', 'video')):
             img_src = getattr(preset, 'imgSrc', None)
             if img_src:
                 try:
@@ -2606,10 +2759,11 @@ async def save_preset(req: SavePresetRequest):
                     dw = float(getattr(preset, 'dwBase', 64) or 64) * zoom
                     dh = float(getattr(preset, 'dhBase', 20) or 20) * zoom
                     bg = preset.bgColor or "#000000"
-                    pix, spd, dur_ms = process_gif_pixels(img_src, cx, cy, dw, dh, bg)
+                    pix, spd, dur_ms, frame_durations_ms = process_gif_pixels(img_src, cx, cy, dw, dh, bg)
                     preset.pixels = pix
                     if preset.speed is None: preset.speed = spd
                     if preset.frameDurationMs is None: preset.frameDurationMs = dur_ms
+                    if not getattr(preset, 'frameDurationsMs', None): preset.frameDurationsMs = frame_durations_ms
                 except Exception as p_img_err:
                     print(f"[save_preset] Failed to process imgSrc: {p_img_err}")
             if not preset.pixels and getattr(preset, 'thumbnail', None) and str(preset.thumbnail).startswith('data:image'):
@@ -2621,6 +2775,11 @@ async def save_preset(req: SavePresetRequest):
                 except Exception as t_err:
                     print(f"[save_preset] Failed to load thumbnail: {t_err}")
 
+        if rgb_frame_bytes:
+            # Compact uploads use the same row-stitched ordering as pixels,
+            # not contiguous frame images. Feed both through extract_frames.
+            preset.pixels = ["#" + rgb_frame_bytes[i:i + 3].hex() for i in range(0, len(rgb_frame_bytes), 3)]
+            preset.pixelsRgbB64 = None
         if not pil_frames and preset.pixels is not None:
             # Drawing or animation
             is_anim = preset.fileType in ("gif", "video") or (len(preset.pixels) > 1280)
@@ -2649,7 +2808,8 @@ async def save_preset(req: SavePresetRequest):
                     return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
                 
                 bg_rgb = hex_to_rgb(preset.bgColor or "#000000")
-                for f_pixels in frames:
+                total_frames = max(1, len(frames))
+                for frame_index, f_pixels in enumerate(frames):
                     frame_rgbs = []
                     for p in f_pixels:
                         if p is None or p == 0 or p == "0" or p == "#000000" or p is False:
@@ -2661,6 +2821,11 @@ async def save_preset(req: SavePresetRequest):
                     img = Image.new("RGB", (64, 20))
                     img.putdata(frame_rgbs)
                     pil_frames.append(img)
+                    # Rendering a long video is CPU-heavy. Publish progress
+                    # while doing it and yield so the browser can poll it.
+                    report_progress(15 + (20 * (frame_index + 1) / total_frames), "Rendering frames")
+                    if frame_index % 4 == 3:
+                        await asyncio.sleep(0)
             else:
                 # Static drawing
                 def hex_to_rgb(hex_str: Optional[str]):
@@ -2739,50 +2904,37 @@ async def save_preset(req: SavePresetRequest):
         if not pil_frames:
             raise Exception("Failed to render frames for preset")
             
-        gif_io = BytesIO()
-        pil_frames[0].save(
-            gif_io,
-            format="GIF",
-            save_all=True,
-            append_images=pil_frames[1:],
-            duration=int(delay_sec * 1000),
-            loop=0
-        )
-        gif_bytes = gif_io.getvalue()
-        
-        # Cache preview files
-        try:
-            preset_json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.json")
-            preset_gif_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.gif")
-            current_gif = os.path.join(STATIC_DIR, "current.gif")
-            current_png = os.path.join(STATIC_DIR, "current.png")
+        frame_durations_ms = getattr(preset, 'frameDurationsMs', None)
+        gif_duration = frame_durations_ms if isinstance(frame_durations_ms, list) and len(frame_durations_ms) == len(pil_frames) else int(delay_sec * 1000)
+        # GIF palette generation can take a noticeable amount of time for a
+        # video. Run it outside FastAPI's event loop so /save-progress remains
+        # available while the browser waits for the encoded payload.
+        def encode_gif() -> bytes:
+            gif_io = BytesIO()
+            pil_frames[0].save(
+                gif_io,
+                format="GIF",
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=gif_duration,
+                # Match the GIF format used by the working GitHub version.
+                loop=0,
+            )
+            return gif_io.getvalue()
 
-            with open(preset_json_path, "w") as f:
-                _json.dump(preset.model_dump(), f)
-            with open(preset_gif_path, "wb") as f:
-                f.write(gif_bytes)
+        report_progress(35, "Encoding animation")
+        gif_bytes = await asyncio.to_thread(encode_gif)
+        report_progress(60, "Writing to sign")
 
-            if is_anim or (preset.mode == 'text' and preset.animation and preset.animation != 'static'):
-                shutil.copy(preset_gif_path, current_gif)
-                if os.path.exists(current_png):
-                    try: os.remove(current_png)
-                    except Exception: pass
-            else:
-                pil_frames[0].save(current_png)
-                if os.path.exists(current_gif):
-                    try: os.remove(current_gif)
-                    except Exception: pass
-        except Exception:
-            pass
-
+        if not connected_client or not connected_client.is_connected or not connection_ready:
+            raise RuntimeError("Sign disconnected before the slot transfer")
         if connected_client and connected_client.is_connected and connection_ready:
             try:
                 speed = preset.speed if preset.speed is not None else current_speed
                 speed = max(1, min(15, speed))
 
-                # Put a direct black frame in display RAM before the transfer. Stopping the
-                # playlist makes this firmware flash its ATOTO screen before a clear lands.
-                # Turning off the clock and committing an all-black bitmap avoids that fallback.
+                # Preserve the previously working sequence: blank immediately
+                # before transfer, after rendering/encoding is complete.
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
                 await asyncio.sleep(0.02)
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
@@ -2818,6 +2970,7 @@ async def save_preset(req: SavePresetRequest):
                         chunk_pkt = protocol.build_slot_file_chunk(slot_id, c_idx, total_chunks, chunk_size, c_data)
                         await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
                         await asyncio.sleep(0.035)
+                        report_progress(60 + (30 * (c_idx + 1) / total_chunks), "Writing to sign")
 
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after chunk writes")
@@ -2826,6 +2979,7 @@ async def save_preset(req: SavePresetRequest):
                     commit_pkt = protocol.build_slot_commit(slot_id, slot_payload)
                     await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
                     await asyncio.sleep(0.2)
+                    report_progress(95, "Finalizing on sign")
 
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
@@ -2873,6 +3027,7 @@ async def save_preset(req: SavePresetRequest):
                         chunk_pkt = protocol.build_slot_file_chunk(slot_id, c_idx, total_chunks, chunk_size, c_data)
                         await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
                         await asyncio.sleep(0.02)
+                        report_progress(60 + (30 * (c_idx + 1) / total_chunks), "Writing to sign")
 
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after chunk writes")
@@ -2881,6 +3036,7 @@ async def save_preset(req: SavePresetRequest):
                     commit_pkt = protocol.build_slot_commit(slot_id, ystp_bytes)
                     await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
                     await asyncio.sleep(0.1)
+                    report_progress(95, "Finalizing on sign")
 
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
@@ -2900,6 +3056,7 @@ async def save_preset(req: SavePresetRequest):
                     }
 
                 print(f"[save_preset] Done. Slot {slot_id} saved (is_anim={is_anim}).")
+                written_to_sign = True
             except Exception as e:
                 print(f"[save_preset] Error: {e}")
                 # Only attempt recovery write if still connected; skip if BLE already dropped
@@ -2910,12 +3067,19 @@ async def save_preset(req: SavePresetRequest):
                         pass
                 raise HTTPException(status_code=500, detail=str(e))
 
+        # Only publish the slot and live previews after the transfer and play
+        # commands succeeded. Failed writes must not replace the last good cache.
+        preset_json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.json")
+        preset_gif_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.gif")
+        save_preview_bytes(_json.dumps(preset.model_dump()).encode("utf-8"), preset_json_path)
+        save_preview_bytes(gif_bytes, preset_gif_path)
+
         # Update live dashboard preview files
         current_gif = os.path.join(STATIC_DIR, "current.gif")
         current_png = os.path.join(STATIC_DIR, "current.png")
         if is_anim:
             if os.path.exists(preset_gif_path):
-                shutil.copy(preset_gif_path, current_gif)
+                save_preview_bytes(gif_bytes, current_gif)
             if os.path.exists(current_png):
                 try: os.remove(current_png)
                 except Exception: pass
@@ -2936,7 +3100,8 @@ async def save_preset(req: SavePresetRequest):
         current_display_mode = f"preset-{slot_id}"
         current_width = PANEL_W
         frames_sent += 1
-        return {"status": "success", "preview_url": f"/static/preset_{mac_str}_{slot_id}.gif"}
+        report_progress(100, "Complete")
+        return {"status": "success", "preview_url": f"/static/preset_{mac_str}_{slot_id}.gif", "written_to_sign": written_to_sign}
 
     except Exception as e:
         import traceback

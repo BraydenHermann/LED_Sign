@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
+import { savePresetToSign, processVideoMedia } from './serverApi';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Power, Sun, Calendar, Image as ImageIcon, Bluetooth, Wifi,
@@ -42,8 +43,9 @@ async function savePresetsToDB(presetsList) {
     const tx = db.transaction(storeName, "readwrite");
     const store = tx.objectStore(storeName);
     const request = store.put(presetsList, keyName);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onabort = () => { db.close(); reject(tx.error || request.error); };
+    tx.onerror = () => reject(tx.error || request.error);
   });
 }
 
@@ -156,6 +158,16 @@ function isEventInWindow(ev, atTime, leadTimeMs = 5 * 60 * 1000) {
   const end = new Date(ev.end_iso);
   const earlyStart = new Date(start.getTime() - leadTimeMs);
   return atTime >= earlyStart && atTime <= end;
+}
+
+// Give an imminent meeting priority during its five-minute lead window. Once
+// every candidate is already active, the most recently started meeting wins;
+// this naturally returns to a still-active earlier event when the newer one ends.
+function selectCalendarEvent(events, atTime) {
+  const candidates = (events || []).filter(ev => isEventInWindow(ev, atTime) && ev.response_status?.toLowerCase() !== 'declined');
+  const upcoming = candidates.filter(ev => new Date(ev.start_iso) > atTime);
+  if (upcoming.length) return upcoming.sort((a, b) => new Date(a.start_iso) - new Date(b.start_iso))[0];
+  return candidates.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0] || null;
 }
 
 // Strip diacritics/accents and unsupported characters so hardware-limited signs and previews receive pure clean ASCII
@@ -552,7 +564,7 @@ const ClockPresetCardPreview = ({ preset, style }) => {
 
 const AnimatedPresetCardPreview = ({ preset }) => {
   const canvasRef = useRef(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -617,12 +629,14 @@ const AnimatedPresetCardPreview = ({ preset }) => {
     const presetSpeed = preset.speed || 8;
     const clampedSpeed = Math.max(1, Math.min(15, presetSpeed));
     // Use exact frameDurationMs if stored on preset, otherwise use speed formula
-    const delayMs = preset.frameDurationMs
+    const defaultDelayMs = preset.frameDurationMs
       ? Math.max(16, preset.frameDurationMs)
       : Math.max(50, (0.4 - (clampedSpeed * 0.025)) * 1000);
+    const frameDurationsMs = Array.isArray(preset.frameDurationsMs) ? preset.frameDurationsMs : null;
 
     const play = () => {
       ctx.putImageData(frames[currentFrameIdx], 0, 0);
+      const delayMs = Math.max(16, frameDurationsMs?.[currentFrameIdx] || defaultDelayMs);
       currentFrameIdx = (currentFrameIdx + 1) % numFrames;
       animId = setTimeout(play, delayMs);
     };
@@ -654,8 +668,17 @@ const PresetCardMedia = ({ preset, now }) => {
   if (preset.mode === 'text') {
     return <TextPresetCardPreview preset={preset} />;
   }
-  // Reuse the editor's media renderer for local/saved/live cards. It decodes
-  // every GIF frame and applies the same crop and pixelated 64×20 canvas.
+  // Saved media has the exact 64×20 frames sent to the sign. Prefer those for
+  // every card type so local, saved, and live previews have identical color,
+  // crop, and animation timing.
+  if (preset.pixels && preset.pixels.length > 1280) {
+    return <AnimatedPresetCardPreview preset={preset} />;
+  }
+  if (preset.pixels && preset.pixels.length === 1280) {
+    return <PixelPresetCardPreview preset={preset} />;
+  }
+  // Before a new media preset has been saved, fall back to the source decoder
+  // so its animation can still be previewed.
   if (preset.mode === 'image' && preset.imgSrc && (preset.fileType === 'gif' || preset.fileType === 'video')) {
     return <MediaPixelPreview
       imgSrc={preset.imgSrc}
@@ -669,12 +692,6 @@ const PresetCardMedia = ({ preset, now }) => {
       speed={preset.speed}
       frameDurationMs={preset.frameDurationMs}
     />;
-  }
-  if (preset.pixels && preset.pixels.length > 1280) {
-    return <AnimatedPresetCardPreview preset={preset} />;
-  }
-  if (preset.pixels && preset.pixels.length === 1280) {
-    return <PixelPresetCardPreview preset={preset} />;
   }
   if (preset.fileType === 'video' && preset.imgSrc) {
     return (
@@ -983,8 +1000,9 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
     }
   }, [fileType, imgSrc]);
 
-  // Canvas render loop
-  useEffect(() => {
+  // Canvas render loop. Layout timing prevents a black canvas from being
+  // painted before a stored first animation frame is available.
+  useLayoutEffect(() => {
     let animId;
     let lastFrameTime = performance.now();
     let currentFrameIdx = 0;
@@ -998,7 +1016,7 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
     const hasMultiFramePixels = pixels && pixels.length > 1280;
     let parsedPixelFrames = null;
 
-    if (hasMultiFramePixels && fileType !== 'video') {
+    if (hasMultiFramePixels) {
       const numFrames = Math.floor(pixels.length / 1280);
       const frameWidth = 64;
       const frameHeight = 20;
@@ -1050,15 +1068,13 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
         return;
       }
 
-      // Fill background
-      ctx.fillStyle = bgColor || '#000000';
-      ctx.fillRect(0, 0, 64, 20);
-
       // 2) Video playback
       if (fileType === 'video') {
         const v = videoRef.current;
         if (v && v.readyState >= 2) {
           try {
+            ctx.fillStyle = bgColor || '#000000';
+            ctx.fillRect(0, 0, 64, 20);
             ctx.drawImage(v, canvasX, canvasY, dw, dh);
           } catch {}
         }
@@ -1078,6 +1094,8 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
         const frameToDraw = frames[currentFrameIdx % frames.length];
         if (frameToDraw && frameToDraw.bitmap) {
           try {
+            ctx.fillStyle = bgColor || '#000000';
+            ctx.fillRect(0, 0, 64, 20);
             ctx.drawImage(frameToDraw.bitmap, canvasX, canvasY, dw, dh);
           } catch {}
         }
@@ -1088,6 +1106,8 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
       // 4) Single-frame pixels fallback
       if (pixels && pixels.length >= 1280) {
         const bgCol = bgColor || '#000000';
+        ctx.fillStyle = bgCol;
+        ctx.fillRect(0, 0, 64, 20);
         const bgR = parseInt(bgCol.slice(1, 3), 16) || 0;
         const bgG = parseInt(bgCol.slice(3, 5), 16) || 0;
         const bgB = parseInt(bgCol.slice(5, 7), 16) || 0;
@@ -1526,41 +1546,63 @@ export default function App() {
   const [scanOpen, setScanOpen] = useState(false);
   const [apiError, setApiError] = useState(false);
   const [hasFetchedStatus, setHasFetchedStatus] = useState(false);
+  const hadLiveConnectionRef = useRef(false);
+  const disconnectedStatusPollsRef = useRef(0);
   const [pushMessage, setPushMessage] = useState('');
   const [localPushMessage, setLocalPushMessage] = useState('');
-  const [pushing, setPushing] = useState(false);
+  const [pushing, setPushingState] = useState(false);
+  const [presetView, setPresetView] = useState('local');
+  const pushingRef = useRef(false);
+
+  const setPushing = (value) => {
+    pushingRef.current = value;
+    setPushingState(value);
+  };
+
+  useEffect(() => {
+    setPresetView(status.connected ? 'saved' : 'local');
+  }, [status.connected]);
   const autoConnectTried = useRef(false);
 
-  const pushMsgTimer = useRef(null);
+  const clearStatusOnNextInteractionRef = useRef(false);
+  const armStatusClear = (msg) => {
+    // The current click creates the message; clear it on the next interaction
+    // anywhere in the app instead of after an arbitrary timeout.
+    window.setTimeout(() => { clearStatusOnNextInteractionRef.current = Boolean(msg); }, 0);
+  };
   const handleSetPushMessage = (msg) => {
     setPushMessage(msg);
-    if (msg) {
-      setLocalPushMessage('');
-    }
-    if (pushMsgTimer.current) clearTimeout(pushMsgTimer.current);
-    if (msg && !msg.endsWith('...') && !msg.toLowerCase().includes('error')) {
-      pushMsgTimer.current = setTimeout(() => {
-        setPushMessage('');
-      }, 4000);
-    }
+    setLocalPushMessage('');
+    armStatusClear(msg);
   };
 
   const handleSetLocalPushMessage = (msg) => {
     setLocalPushMessage(msg);
-    if (msg) {
-      setPushMessage('');
-    }
-    if (pushMsgTimer.current) clearTimeout(pushMsgTimer.current);
-    if (msg && !msg.endsWith('...') && !msg.toLowerCase().includes('error')) {
-      pushMsgTimer.current = setTimeout(() => {
-        setLocalPushMessage('');
-      }, 4000);
-    }
+    setPushMessage('');
+    armStatusClear(msg);
   };
 
   const setUnifiedPushMessage = (msg) => {
     handleSetLocalPushMessage(msg);
   };
+
+  useEffect(() => {
+    const clearStatusOnNextInteraction = () => {
+      // Keep progress and its outcome readable while an operation is still
+      // running. The label itself remains directly clickable to dismiss.
+      if (pushingRef.current) return;
+      if (!clearStatusOnNextInteractionRef.current) return;
+      clearStatusOnNextInteractionRef.current = false;
+      setPushMessage('');
+      setLocalPushMessage('');
+    };
+    window.addEventListener('pointerdown', clearStatusOnNextInteraction);
+    return () => window.removeEventListener('pointerdown', clearStatusOnNextInteraction);
+  }, []);
+
+  useEffect(() => {
+    if (pushMessage || localPushMessage) armStatusClear(true);
+  }, [pushMessage, localPushMessage]);
 
   useEffect(() => {
     if (window.location.hash === '#calendar') {
@@ -1582,6 +1624,16 @@ export default function App() {
   const fetchStatus = async () => {
     try {
       const res = await axios.get(`${API_BASE}/status`);
+      // BLE can briefly report disconnected while it is recovering. Keep the
+      // last live UI state through two status polls so the page does not race
+      // the backend's reconnect worker or visibly flap on a refresh.
+      if (res.data?.connected) {
+        hadLiveConnectionRef.current = true;
+        disconnectedStatusPollsRef.current = 0;
+      } else if (hadLiveConnectionRef.current) {
+        disconnectedStatusPollsRef.current += 1;
+        if (disconnectedStatusPollsRef.current < 3) return res.data;
+      }
       setStatus(res.data);
       if (res.data && res.data.connected && res.data.address) {
         setMacAddress(res.data.address);
@@ -1589,9 +1641,6 @@ export default function App() {
           localStorage.setItem('loy_last_connected_mac', res.data.address);
           localStorage.setItem('loy_mac', res.data.address);
         } catch (e) {}
-      } else if (res.data && res.data.connected === false) {
-        setPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
-        setLocalPushMessage(prev => prev && prev.startsWith('Error') ? prev : '');
       }
       setApiError(false);
       setHasFetchedStatus(true);
@@ -1719,9 +1768,13 @@ export default function App() {
   const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
   const lastNotifiedEventIdRef = useRef(null);
+  // Retain the manually selected saved slot while a calendar event temporarily
+  // uses its dedicated calendar slot, so it can be restored when the event ends.
+  const calendarReturnPresetRef = useRef(null);
   // A transient BLE disconnect (for example while the PC is locked) must not
   // replay the default and overwrite the preset the user deliberately chose.
   const initializedConnectionMacsRef = useRef(new Set());
+  const initializingConnectionRef = useRef(false);
   const setIsManualOverride = (val) => {
     isManualOverrideRef.current = val;
     setIsManualOverrideState(val);
@@ -1739,7 +1792,7 @@ export default function App() {
   const [allSavedPresets, setAllSavedPresets] = useState({});
 
   const activeMac = status.address?.toUpperCase() || localStorage.getItem('loy_last_connected_mac') || 'DEFAULT';
-  const savedPresets = normalizeSavedPresets(allSavedPresets[activeMac]);
+  const savedPresets = useMemo(() => normalizeSavedPresets(allSavedPresets[activeMac]), [allSavedPresets, activeMac]);
 
   const setSavedPresets = (nextSaved) => {
     if (typeof nextSaved === 'function') {
@@ -1807,17 +1860,15 @@ export default function App() {
         if (savedLegacy) {
           try {
             const parsed = JSON.parse(savedLegacy);
-            if (Array.isArray(parsed) && parsed.length > 0) {
+            if (!dbSavedPresets[DEFAULT_MAC] && Array.isArray(parsed) && parsed.length > 0) {
               dbSavedPresets = { ...dbSavedPresets, [DEFAULT_MAC]: parsed };
             }
-          } catch (e) {}
-        }
-
-        // Clean any accidental slots 2..11 for FF:24:10:29:44:9B if they were cloned from the other sign
-        if (dbSavedPresets && dbSavedPresets['FF:24:10:29:44:9B']) {
-          const list = normalizeSavedPresets(dbSavedPresets['FF:24:10:29:44:9B']);
-          const cleaned = list.map((item, idx) => idx < 2 ? item : { ...item, preset: null });
-          dbSavedPresets['FF:24:10:29:44:9B'] = cleaned;
+          } catch (e) {
+            console.warn('Ignoring unreadable legacy saved preset cache:', e);
+          }
+          // Saved presets now live in IndexedDB. Remove this duplicate legacy
+          // copy so a video cannot exhaust the small localStorage quota.
+          localStorage.removeItem('savedPresets');
         }
 
         if (dbSavedPresets && Object.keys(dbSavedPresets).length > 0) {
@@ -2139,6 +2190,10 @@ export default function App() {
 
   // Window focus listener to refresh hardware slots when returning to tab
   useEffect(() => {
+    if (status.connected && dbLoaded) syncHardwareSlots();
+  }, [status.connected, activeMac, dbLoaded]);
+
+  useEffect(() => {
     const onFocus = () => {
       if (status?.connected) {
         syncHardwareSlots();
@@ -2150,13 +2205,13 @@ export default function App() {
 
   // Auto-push / Blanking / Default logic based on the local clock
   useEffect(() => {
-    if (!status?.connected) return;
+    if (!status?.connected || !dbLoaded || pushingRef.current || initializingConnectionRef.current ||
+        !initializedConnectionMacsRef.current.has(status.address?.toUpperCase())) return;
 
     // Check for calendar event transitions to clear manual override (5 min early)
     try {
       if (events) {
-        const inWindowEvents = events.filter(ev => isEventInWindow(ev, now) && ev.response_status?.toLowerCase() !== 'declined');
-        const nextEvent = inWindowEvents.sort((a, b) => new Date(a.start_iso) - new Date(b.start_iso))[0];
+        const nextEvent = selectCalendarEvent(events, now);
         const nextEventId = nextEvent ? `${nextEvent.id}-${nextEvent.start_iso}` : null;
         if (nextEventId !== lastActiveEventIdRef.current) {
           console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current} -> ${nextEventId}. Clearing manual override.`);
@@ -2172,8 +2227,7 @@ export default function App() {
 
     try {
       // Find event in current 5-min window [start - 5min, end]
-      const inWindowEvents = events ? events.filter(ev => isEventInWindow(ev, now) && ev.response_status?.toLowerCase() !== 'declined') : [];
-      const currentEvent = inWindowEvents.sort((a, b) => new Date(a.start_iso) - new Date(b.start_iso))[0];
+      const currentEvent = selectCalendarEvent(events, now);
 
       let targetContent = null;
       let targetId = null;
@@ -2188,7 +2242,25 @@ export default function App() {
       }
 
       if (targetId !== lastPushedId) {
+        // Calendar/default transitions operate on hardware slots, so expose
+        // that source immediately instead of leaving the UI on Local.
+        setPresetView('saved');
         if (targetContent.type === 'event') {
+          // Only capture once for a calendar run. Moving from one calendar
+          // event directly into another must keep the original return target.
+          if (!calendarReturnPresetRef.current && !String(lastPushedId || '').startsWith('event-')) {
+            const slotFromLastPush = String(lastPushedId || '').match(/^hw-slot-(\d+)$/);
+            const slotFromDisplay = String(status.display_mode || '').match(/^preset-(\d+)$/);
+            const savedSlotId = slotFromLastPush ? Number(slotFromLastPush[1]) : (slotFromDisplay ? Number(slotFromDisplay[1]) : null);
+            if (Number.isInteger(savedSlotId) && savedSlotId > 0) {
+              const savedSlot = (savedPresetsRef.current || []).find(slot =>
+                slot?.hwSlotId === savedSlotId || (slot?.slotNumber - 1) === savedSlotId
+              );
+              if (savedSlot?.preset && !savedSlot.preset.isDefault) {
+                calendarReturnPresetRef.current = { slotId: savedSlotId };
+              }
+            }
+          }
           const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
           const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
           const targetCleanText = targetContent.summary.includes('|||') 
@@ -2233,14 +2305,24 @@ export default function App() {
           }
 
           console.log(`[auto-push] Auto-applying event 5m before start: "${currentEvent.summary}"`);
-          handlePush(targetContent.summary, false);
+          handlePush(targetContent.summary, false, false, targetId).catch(() => {});
         } else {
-          // Play hardware slot 1 — the reserved default
-          console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
-          setLastPushedId('hw-slot-1');
-          axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => {
-            console.warn("[auto-push] No default saved to slot 1 yet:", e);
-          });
+          const returnPreset = calendarReturnPresetRef.current;
+          calendarReturnPresetRef.current = null;
+          if (returnPreset) {
+            console.log(`[auto-push] Event window ended, restoring saved slot ${returnPreset.slotId}`);
+            setLastPushedId(`hw-slot-${returnPreset.slotId}`);
+            axios.post(`${API_BASE}/preset?id=${returnPreset.slotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => {
+              console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
+            });
+          } else {
+            // Play hardware slot 1 — the reserved default
+            console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
+            setLastPushedId('hw-slot-1');
+            axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => {
+              console.warn("[auto-push] No default saved to slot 1 yet:", e);
+            });
+          }
           return;
         }
         setLastPushedId(targetId);
@@ -2256,7 +2338,11 @@ export default function App() {
       setScanOpen(false);
       const targetMac = status.address.toUpperCase();
       if (initializedConnectionMacsRef.current.has(targetMac)) return;
+      if (pushingRef.current) return;
       initializedConnectionMacsRef.current.add(targetMac);
+      initializingConnectionRef.current = true;
+      setPushing(true);
+      setPresetView('saved');
       setIsManualOverride(false);
       isManualOverrideRef.current = false;
 
@@ -2267,7 +2353,7 @@ export default function App() {
         if (def && !isDefaultSynced) {
           console.log("[connect] Pushing local default preset to new sign default slot (slot 1)...");
           try {
-            const resSave = await axios.post(`${API_BASE}/save-preset`, {
+            const resSave = await savePresetToSign({
               slot_id: 1,
               address: targetMac,
               preset: def
@@ -2302,7 +2388,7 @@ export default function App() {
         if (active) {
           const activeStr = getEventDisplayString(active);
           console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
-          await handlePush(activeStr, false);
+          await handlePush(activeStr, false, true, `event-${active.id}-${activeStr}`);
           localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         } else {
           // If no active event right now: check if this sign has had its calendar preset initialized on hardware
@@ -2324,7 +2410,7 @@ export default function App() {
             if (prevCal) {
               console.log("[connect] Pushing cached calendar preset to new sign slot 0:", prevCal.text || prevCal.name);
               try {
-                const resCal = await axios.post(`${API_BASE}/save-preset`, {
+                const resCal = await savePresetToSign({
                   slot_id: 0,
                   address: targetMac,
                   preset: prevCal
@@ -2360,22 +2446,26 @@ export default function App() {
 
         if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
       };
-      pushDefaultOrActive();
+      pushDefaultOrActive().catch(e => handleSetPushMessage(`Error: ${e.message}`)).finally(() => {
+        initializingConnectionRef.current = false;
+        setPushing(false);
+        fetchStatus();
+      });
     } else if (!status.connected) {
-      setPushMessage(prev => prev && prev.toLowerCase().includes('error') ? prev : '');
       // Keep the chosen preset across temporary disconnects. The next
       // connection is initialized only once per sign during this app session.
     }
-  }, [status.connected, status.address, dbLoaded, presets]);
+  }, [status.connected, status.address, dbLoaded, presets, pushing]);
 
   // Regular poll
   useEffect(() => {
     fetchEvents();
-    const id = setInterval(fetchEvents, 900000); // 15 minutes
+    const id = setInterval(fetchEvents, 60000); // Check for last-minute additions every minute
     return () => clearInterval(id);
   }, [status.calendar_connected]);
 
-  const handlePush = async (payload, manual = false, skipMessages = false) => {
+  const handlePush = async (payload, manual = false, skipMessages = false, autoTargetId = null) => {
+    if (pushingRef.current && !skipMessages) return;
     if (manual) setIsManualOverride(true);
     setPushing(true);
     
@@ -2389,6 +2479,7 @@ export default function App() {
       // Extract just the display portion (before the "|||" separator)
       const signText = normalizeForSign(payload.includes('|||') ? payload.split('|||')[0].trim() : payload);
       data = {
+        mode: 'text',
         name: signText,
         text: signText,
         textColor: '#ffffff',
@@ -2466,6 +2557,7 @@ export default function App() {
         }
       } else if (isEvent) {
         if (status.connected) {
+          setPresetView('saved');
           const eventPresetCopy = { ...data };
           delete eventPresetCopy.pixels;
 
@@ -2478,17 +2570,18 @@ export default function App() {
           // Skip re-saving if hardware slot 1 already has this event text (auto OR manual)
           if (isCalSynced && currentSlot1Text && currentSlot1Text === targetEventText) {
             console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
-            handleSetPushMessage('Playing from Slot 1');
+            handleSetPushMessage('Playing from Slot 1...');
             await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
-            setLastPushedId('hw-slot-0');
-            fetchStatus();
+            setLastPushedId(autoTargetId || 'hw-slot-0');
+            await fetchStatus();
+            handleSetPushMessage('Pushed Slot 1 to sign!');
             return;
           }
 
           handleSetPushMessage('Saving event to Slot 1...');
 
           try {
-            const saveRes = await axios.post(`${API_BASE}/save-preset`, {
+            const saveRes = await savePresetToSign({
               slot_id: 0,
               address: targetMac,
               preset: eventPresetCopy
@@ -2506,14 +2599,14 @@ export default function App() {
               };
               return next;
             });
-            setLastPushedId('hw-slot-0');
+            setLastPushedId(autoTargetId || 'hw-slot-0');
             localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
             try {
               localStorage.setItem('loy_last_calendar_preset', JSON.stringify({ ...eventPresetCopy, id: 'hw-slot-0', thumbnail: savedThumb || eventPresetCopy.thumbnail }));
             } catch (e) {}
           } catch (saveErr) {
             console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
-            handleSetPushMessage('Error saving to Slot 1');
+            handleSetPushMessage(`Error saving to Slot 1: ${saveErr.response?.data?.detail || saveErr.message}`);
           }
         } else {
           handleSetPushMessage('Error: Sign not connected');
@@ -2532,8 +2625,8 @@ export default function App() {
       const errorMsg = typeof detail === 'string' ? detail : (Array.isArray(detail) ? detail[0]?.msg : JSON.stringify(detail));
       const isDisconnectError = !status.connected || 
         (errorMsg && (errorMsg.includes('-2147023673') || errorMsg.toLowerCase().includes('canceled') || errorMsg.toLowerCase().includes('cancelled') || errorMsg.toLowerCase().includes('disconnected') || errorMsg.toLowerCase().includes('not connected')));
-      if (!isEvent && !skipMessages && !isDisconnectError) {
-        handleSetLocalPushMessage('Error: ' + (errorMsg || e.message));
+      if (!skipMessages) {
+        (isEvent ? handleSetPushMessage : handleSetLocalPushMessage)('Error: ' + (errorMsg || e.message));
       }
       throw e;
     } finally {
@@ -2592,7 +2685,7 @@ export default function App() {
               savedDragOverIdx={savedDragOverIdx}
               setSavedDragOverIdx={setSavedDragOverIdx}
               now={now}
-              pushMessage={pushMessage}
+              pushMessage={pushMessage || localPushMessage}
               setPushMessage={handleSetPushMessage}
               pushing={pushing}
               setPushing={setPushing}
@@ -2600,6 +2693,8 @@ export default function App() {
               setScanOpen={setScanOpen}
               syncHardwareSlots={syncHardwareSlots}
               fetchStatus={fetchStatus}
+              presetView={presetView}
+              setPresetView={setPresetView}
             />
           </div>
           <MediaView 
@@ -2621,6 +2716,8 @@ export default function App() {
             setSavedPresets={setSavedPresets}
             syncHardwareSlots={syncHardwareSlots}
             setLastPushedId={setLastPushedId}
+            presetView={presetView}
+            setPresetView={setPresetView}
           />
         </div>
         <div className="right-column">
@@ -2649,7 +2746,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus, presetView, setPresetView }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -2678,8 +2775,10 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [nameEditMode, setNameEditMode] = useState(false);
   const [nameEditValue, setNameEditValue] = useState('');
   const [assigningSlotIndex, setAssigningSlotIndex] = useState(null);
-  const [isSavedCollapsed, setIsSavedCollapsed] = useState(false);
+  const [slotSaveProgress, setSlotSaveProgress] = useState(null);
+  const [slotSavePhase, setSlotSavePhase] = useState('');
   const [savedPage, setSavedPage] = useState(0);
+  const isAssignmentReminder = pushMessage === 'Please assign animated text, GIFs, and videos to a Saved Preset before pushing.';
   const previewRef = useRef(null);
   const pendingConnectRef = useRef(null); // stores { addr, name } of the device being connected
 
@@ -2803,6 +2902,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const totalSavedPages = Math.ceil((savedPresets || []).length / slotsPerPage);
 
   const assignPresetToSlot = async (globalIdx, preset) => {
+    if (pushing) return;
     console.log('[assignPresetToSlot] Called with globalIdx:', globalIdx, 'preset:', preset);
     if (!preset) {
       console.warn('[assignPresetToSlot] No preset provided');
@@ -2841,10 +2941,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         if (typeof onPush === 'function') {
           await onPush(preset, true, true);
         }
-        // Only update preview and localStorage after successful push
+        // IndexedDB persists the slot; do not duplicate video frames in localStorage.
         setPushMessage(`Assigned Clock to Slot ${globalIdx + 1}!`);
         setSavedPresets(nextSaved);
-        localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
         setIsManualOverride(true);
         setLastPushedId(preset.id || `saved-clock-${globalIdx}`);
       } catch (err) {
@@ -2881,7 +2980,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         }
         setPushMessage(`Assigned to App Slot ${globalIdx + 1}!`);
         setSavedPresets(nextSaved);
-        localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
         setIsManualOverride(true);
         setLastPushedId(`saved-${Date.now()}-${globalIdx}`);
       } catch (err) {
@@ -2893,17 +2991,52 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
 
     setPushing(true);
+    setIsManualOverride(true);
     setPushMessage(`Saving to slot ${globalIdx + 1}...`);
+    setSlotSaveProgress(0);
+    setSlotSavePhase('Uploading preset');
+    const progressId = `slot-save-${Date.now()}-${globalIdx}`;
+    let pollActive = true;
+    let highestProgress = 0;
+    const updateProgress = (progress, phase) => {
+      if (!pollActive || progress < highestProgress) return;
+      highestProgress = progress;
+      setSlotSaveProgress(progress);
+      setSlotSavePhase(phase);
+    };
+    const progressPoll = window.setInterval(() => {
+      axios.get(`${API_BASE}/save-progress/${encodeURIComponent(progressId)}`)
+        .then(res => {
+          updateProgress(res.data?.progress ?? 0, res.data?.phase || 'Preparing preset');
+        })
+        .catch(() => {});
+    }, 300);
     try {
       const slotObj = savedPresets[globalIdx];
       const hwSlotId = slotObj?.hwSlotId !== undefined 
         ? slotObj.hwSlotId 
         : (slotObj?.slotNumber ? slotObj.slotNumber - 1 : globalIdx);
 
-      const res = await axios.post(`${API_BASE}/save-preset`, {
+      // Keep the same stitched-row layout used by local GIF/video previews.
+      // The former compact conversion was read as contiguous frames on the
+      // server, scrambling the video and discarding cached preview pixels.
+      const presetForUpload = { ...presetCopy };
+      delete presetForUpload.pixelsRgbB64;
+      // Pixels already contain the crop; omit the large original source from
+      // the upload. The local preset retains it for editing/exporting.
+      if (presetForUpload.pixels?.length) delete presetForUpload.imgSrc;
+
+      const res = await savePresetToSign({
         slot_id: hwSlotId,
         address: status.address || DEFAULT_MAC,
-        preset: presetCopy
+        preset: presetForUpload,
+        progress_id: progressId
+      }, {
+        onUploadProgress: (event) => {
+          if (event.total) {
+            updateProgress(Math.min(15, Math.round((event.loaded / event.total) * 15)), 'Uploading preset');
+          }
+        }
       });
 
       const savedThumbnail = res.data?.preview_url 
@@ -2923,22 +3056,25 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       };
       setPushMessage(`Saved to slot ${globalIdx + 1}!`);
       setSavedPresets(nextSaved);
-      localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
       setIsManualOverride(true);
       setLastPushedId(`hw-slot-${hwSlotId}`);
-      if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
+      if (typeof syncHardwareSlots === 'function') await syncHardwareSlots();
+      if (typeof fetchStatus === 'function') await fetchStatus();
     } catch (err) {
       const detail = err.response?.data?.detail || err.message || '';
       const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
-      if (!isDisconnectError) {
-        setPushMessage(`Error: ${detail || 'Failed to save preset'}`);
-      }
+      setPushMessage(`Error: ${detail || 'Failed to save preset'}`);
     } finally {
+      pollActive = false;
+      window.clearInterval(progressPoll);
+      setSlotSaveProgress(null);
+      setSlotSavePhase('');
       setPushing(false);
     }
   };
 
   const playSavedPreset = async (globalIdx, preset) => {
+    if (pushing) return;
     if (!preset) return; // Do nothing when clicking empty slots!
 
     if (preset.mode === 'clock' || preset.id === 'clock-default') {
@@ -2975,6 +3111,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       if (hwSlotId < 12) {
         // Notify server to switch active hardware preset slot and update live preview
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
+        if (typeof fetchStatus === 'function') await fetchStatus();
         setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
         setLastPushedId(`hw-slot-${hwSlotId}`);
       } else {
@@ -2986,9 +3123,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       console.error('Failed to trigger hardware preset play:', err);
       const detail = err.response?.data?.detail || err.message || '';
       const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
-      if (!isDisconnectError) {
-        setPushMessage(`Error: ${detail || err.message}`);
-      }
+      setPushMessage(`Error: ${detail || err.message}`);
     } finally {
       setPushing(false);
     }
@@ -3015,7 +3150,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       nextSaved.splice(slotGlobalIndex, 0, draggedItem);
 
       setSavedPresets(nextSaved);
-      localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
       return;
     } else {
       if (presets) {
@@ -3463,42 +3597,73 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         </AnimatePresence>
       </div>
 
-      {/* Saved Presets Panel */}
-      {status.connected && (
-        <div className="flex flex-col items-center pt-12 w-full" style={{ borderTop: '1px solid rgba(255,255,255,0.05)', marginTop: '48px' }}>
-          <div 
-            onClick={() => setIsSavedCollapsed(!isSavedCollapsed)}
-            style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%', maxWidth: 1100, marginBottom: 8, cursor: 'pointer' }}
+      {/* Presets: one shared header, with Saved and Local views. */}
+      {(
+        <div className="flex flex-col items-center pt-16 w-full" style={{ borderTop: '1px solid rgba(255,255,255,0.05)', marginTop: '24px' }}>
+          <div
+            style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%', maxWidth: 1100, marginBottom: 4 }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <ImageIcon className="text-emerald-400 shrink-0" size={24} />
-              <h3 className="text-2xl font-black" style={{ margin: 0 }}>Saved Presets</h3>
+              <h3 className="text-2xl font-black" style={{ margin: 0 }}>Presets</h3>
               {pushMessage && (
-                <span 
-                  className="text-xs font-bold ml-4 flex items-center gap-1.5" 
-                  style={{ color: pushMessage.startsWith('Error') ? '#f87171' : (pushing ? '#38bdf8' : '#34d399') }} 
-                  onClick={(e) => e.stopPropagation()}
+                <div
+                  role="status"
+                  className="text-xs font-bold"
+                  style={{
+                    color: isAssignmentReminder || pushMessage.startsWith('Error') ? '#f87171' : (/^(Saved|Pushed|Assigned|Deleted)\b/.test(pushMessage) ? '#34d399' : '#38bdf8'),
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    marginLeft: 16, flex: '0 0 auto', whiteSpace: 'nowrap'
+                  }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!pushing && !window.getSelection()?.toString()) setPushMessage('');
+                  }}
                 >
-                  {pushing && <RefreshCw size={12} className="animate-spin text-sky-400" />}
-                  {!pushing && !pushMessage.startsWith('Error') && <Check size={12} className="text-emerald-400" />}
-                  {pushMessage}
-                </span>
+                  {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && <RefreshCw size={12} className="animate-spin" aria-label="Saving" />}
+                  {!pushing && /^(Saved|Pushed|Assigned|Deleted)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400" />}
+                  <span>{pushMessage}</span>
+                  {pushing && slotSaveProgress !== null && (
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flex: '0 0 auto' }}>
+                      <div
+                        aria-label={`Slot save progress: ${slotSaveProgress}%`}
+                        style={{ width: 72, height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.25)', overflow: 'hidden' }}
+                      >
+                        <span style={{ display: 'block', width: `${slotSaveProgress}%`, height: '100%', background: '#38bdf8', borderRadius: 'inherit', transition: 'width 0.2s ease' }} />
+                      </div>
+                      <span>{slotSaveProgress}% {slotSavePhase}</span>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
-            {/* Controls and Collapse Chevron in Top Right */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center' }}>
-                <ChevronRight 
-                  size={18} 
-                  className="text-slate-400 transition-transform duration-200 hover:text-white" 
-                  style={{ transform: isSavedCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }} 
-                />
-              </div>
+            <div role="tablist" aria-label="Preset source" onPointerDown={(e) => e.stopPropagation()} style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 12, background: 'rgba(255,255,255,0.05)' }}>
+              <button
+                role="tab"
+                aria-selected={presetView === 'saved'}
+                disabled={!status.connected}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => status.connected && setPresetView('saved')}
+                className={`btn-styled ${presetView === 'saved' && status.connected ? '' : 'inactive'}`}
+                style={{ height: 34, padding: '0 14px', fontSize: 14, opacity: status.connected ? 1 : 0.4, cursor: status.connected ? 'pointer' : 'not-allowed' }}
+                title={status.connected ? 'View saved sign presets' : 'Connect to a sign to view saved presets'}
+              >Saved</button>
+              <button
+                role="tab"
+                aria-selected={presetView === 'local'}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => setPresetView('local')}
+                className={`btn-styled ${presetView === 'local' ? '' : 'inactive'}`}
+                style={{ height: 34, padding: '0 14px', fontSize: 14 }}
+              >Local</button>
             </div>
           </div>
           
 
-          {!isSavedCollapsed && (
+          {presetView === 'saved' && status.connected && (
             <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '24px', width: '100%' }}>
                 {savedPresets.slice(savedPage * slotsPerPage, (savedPage + 1) * slotsPerPage).map((slot, localIdx) => {
@@ -3694,7 +3859,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                                 const nextSaved = [...savedPresets];
                                 nextSaved[assigningSlotIndex] = { ...nextSaved[assigningSlotIndex], preset: null };
                                 setSavedPresets(nextSaved);
-                                localStorage.setItem('savedPresets', JSON.stringify(nextSaved));
                                 if (typeof syncHardwareSlots === 'function') {
                                   await syncHardwareSlots();
                                 }
@@ -3730,7 +3894,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     </div>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px', marginBottom: '24px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '24px' }}>
                     {presets?.filter(p => {
                       if (!p?.id) return false;
                       // Dynamic event titles with ||| shouldn't be assigned
@@ -4230,9 +4394,8 @@ function HslColorSlider({ label, value, onChange }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, savedPresets, setSavedPresets, syncHardwareSlots, setLastPushedId }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, savedPresets, setSavedPresets, syncHardwareSlots, setLastPushedId, presetView, setPresetView }) {
   const fontReady = useFontReady();
-  const [isLocalCollapsed, setIsLocalCollapsed] = useState(!!status.connected);
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
 
@@ -4262,10 +4425,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
     dragStartPos.current = null;
   };
-
-  useEffect(() => {
-    setIsLocalCollapsed(!!status.connected);
-  }, [status.connected]);
 
   const handleDragStart = (e, id) => {
     const preset = presets.find(p => p.id === id);
@@ -4323,6 +4482,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   // Form State for Modal
   const [editingId, setEditingId] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [saveProgress, setSaveProgress] = useState(null);
+  const processedMediaSignatureRef = useRef('');
   const [animDropdownOpen, setAnimDropdownOpen] = useState(false);
   const fileInputRef = useRef(null);
   const [showGrid, setShowGrid] = useState(true);
@@ -4358,6 +4520,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
   const handleMediaFile = (file) => {
     if (!file) return;
+    setSaveError('');
 
     // Tear down the previous source before loading the replacement. This is
     // especially important for GIFs: otherwise a decoded frame cache can keep
@@ -4741,14 +4904,54 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       return { pixels: pixels || form.pixels };
     }
 
-    const numFrames = 8;
+    // Keep motion faithful to the uploaded video instead of reducing every
+    // clip to eight snapshots. Gemini videos are commonly 24 fps, and this
+    // cap still keeps long clips practical for browser memory and BLE storage.
+    let numFrames = 8;
     const frames = [];
 
     if (form.fileType === 'video') {
+      // Decoding locally in the server is substantially faster than seeking
+      // through every frame in a browser video element.
+      if (form.imgSrc) {
+        const sourceResponse = await fetch(form.imgSrc);
+        if (!sourceResponse.ok) throw new Error('Video source is unavailable. Please replace the media.');
+        const sourceBlob = await sourceResponse.blob();
+        const bytes = new Uint8Array(await sourceBlob.arrayBuffer());
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+        }
+        setSaveProgress(10);
+        const response = await processVideoMedia({
+          videoB64: btoa(binary),
+          canvasX: form.canvasX,
+          canvasY: form.canvasY,
+          zoom: form.zoom,
+          dwBase: form.dwBase,
+          dhBase: form.dhBase,
+          bgColor: form.bgColor || '#000000'
+        });
+        if (!Array.isArray(response.data?.pixels) || !response.data.pixels.length) {
+          throw new Error('Video processing returned no frames. Restart LED Sign and try again.');
+        }
+        setSaveProgress(85);
+        return {
+          imgSrc: `data:${sourceBlob.type || 'video/mp4'};base64,${btoa(binary)}`,
+          pixels: response.data.pixels,
+          frameDurationMs: response.data.frameDurationMs,
+          frameDurationsMs: response.data.frameDurationsMs
+        };
+      }
       const video = imageObjRef.current;
       if (!video) return form.pixels;
       
-      const duration = video.duration || 2;
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 2;
+      const targetVideoFps = 24;
+      const maxVideoFrames = 300;
+      numFrames = Math.max(1, Math.min(Math.ceil(duration * targetVideoFps), maxVideoFrames));
+      setSaveProgress(0);
       const originalTime = video.currentTime;
       
       const wasPlaying = !video.paused;
@@ -4778,6 +4981,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           form.bgColor || '#000000'
         );
         frames.push(framePixels);
+        // Reserve the final portion for packaging/saving the generated preset.
+        setSaveProgress(Math.round(((i + 1) / numFrames) * 85));
       }
 
       video.currentTime = originalTime;
@@ -4786,6 +4991,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       }
     } else if (form.fileType === 'gif') {
       try {
+        setSaveProgress(10);
         const response = await axios.post(`${API_BASE}/process-gif`, {
           imgSrc: form.imgSrc,
           canvasX: form.canvasX,
@@ -4796,10 +5002,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           bgColor: form.bgColor || '#000000'
         });
         // Return exact frame duration from GIF metadata for precise sign timing
-        return { pixels: response.data.pixels, speed: response.data.speed, frameDurationMs: response.data.frameDurationMs };
+        setSaveProgress(85);
+        return { pixels: response.data.pixels, speed: response.data.speed, frameDurationMs: response.data.frameDurationMs, frameDurationsMs: response.data.frameDurationsMs };
       } catch (err) {
         console.error('GIF backend processing failed:', err);
-        return { pixels: form.pixels };
+        throw err;
       }
     }
 
@@ -4820,6 +5027,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   const handleSave = async () => {
+    if (isSaving || pushing) return;
+    setSaveError('');
     const drawingHasContent = Array.isArray(form.pixels) && form.pixels.some(pixel => pixel && pixel !== 0);
     if (form.mode === 'image' && !form.imgSrc) {
       setUnifiedPushMessage('Add image or video media before saving.');
@@ -4834,20 +5043,36 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       return;
     }
     setIsSaving(true);
+    setPushing(true);
+    setSaveProgress(0);
     try {
       let finalPixels = form.pixels;
+      let finalImgSrc = form.imgSrc;
       if (form.mode === 'image') {
-        const res = await getAnimationStitchedPixels();
-        if (res && res.pixels) {
-          finalPixels = res.pixels;
-          if (res.speed !== undefined) {
-            form.speed = res.speed;
-          }
-          if (res.frameDurationMs !== undefined) {
-            form.frameDurationMs = res.frameDurationMs;
+        const mediaSignature = JSON.stringify([form.imgSrc, form.fileType, form.canvasX, form.canvasY, form.zoom, form.dwBase, form.dhBase, form.bgColor]);
+        const canReuseProcessedFrames = (form.fileType === 'gif' || form.fileType === 'video') &&
+          processedMediaSignatureRef.current === mediaSignature && Array.isArray(form.pixels) && form.pixels.length > 1280;
+        if (canReuseProcessedFrames) {
+          setSaveProgress(85);
+        } else {
+          const res = await getAnimationStitchedPixels();
+          if (res && res.pixels) {
+            finalPixels = res.pixels;
+            if (res.imgSrc) finalImgSrc = res.imgSrc;
+            processedMediaSignatureRef.current = mediaSignature;
+            if (res.speed !== undefined) {
+              form.speed = res.speed;
+            }
+            if (res.frameDurationMs !== undefined) {
+              form.frameDurationMs = res.frameDurationMs;
+            }
+            if (res.frameDurationsMs !== undefined) {
+              form.frameDurationsMs = res.frameDurationsMs;
+            }
           }
         }
       }
+      setSaveProgress(90);
       
       const thumbCanvas = document.createElement('canvas');
       thumbCanvas.width = 64;
@@ -4880,7 +5105,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           
           if (form.mode === 'drawing' || form.mode === 'image') {
             if (p && p !== 0) {
-              const color = p.startsWith('#') ? p : (form.textColor || '#ffffff');
+              const color = typeof p === 'string' && p.startsWith('#') ? p : (form.textColor || '#ffffff');
               const r = parseInt(color.slice(1, 3), 16) || 0;
               const g = parseInt(color.slice(3, 5), 16) || 0;
               const b = parseInt(color.slice(5, 7), 16) || 0;
@@ -4927,6 +5152,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       const textVal = form.mode === 'text' ? normalizeForSign(form.text || '') : form.text;
       const presetData = { 
         ...form, 
+        imgSrc: finalImgSrc,
         text: textVal,
         pixels: finalPixels,
         thumbnail,
@@ -4947,7 +5173,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       } else {
         nextPresets = [...nextPresets, savedPreset];
       }
+      // Close only once IndexedDB has committed, so quota or clone errors are
+      // shown without losing the user's editor contents.
+      await savePresetsToDB(nextPresets);
       setPresets(nextPresets);
+      setSaveProgress(100);
 
       // Close the modal and reset form immediately so UI is snappy!
       setIsModalOpen(false);
@@ -4983,9 +5213,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
         if (status?.connected) {
           try {
+            if (typeof setPresetView === 'function') setPresetView('saved');
             if (typeof setPushing === 'function') setPushing(true);
             if (typeof setPushMessage === 'function') setPushMessage('Saving default to Slot 2...');
-            const saveRes = await axios.post(`${API_BASE}/save-preset`, {
+            const saveRes = await savePresetToSign({
               slot_id: 1,
               address: status.address || DEFAULT_MAC,
               preset: defaultPresetCopy
@@ -5017,8 +5248,12 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       // Do not push saved preset automatically to the sign
     } catch (err) {
       console.error('Error saving preset:', err);
+      setUnifiedPushMessage(`Error saving preset: ${err.response?.data?.detail || err.message || 'Unable to process media'}`);
+      setSaveError(err.response?.data?.detail || err.message || 'Unable to process media');
     } finally {
       setIsSaving(false);
+      setPushing(false);
+      setSaveProgress(null);
     }
   };
 
@@ -5041,6 +5276,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   const startEdit = (p, e) => {
+    setSaveError('');
     if (e) e.stopPropagation();
     editingModeRef.current = p.mode;
     setEditingId(p.id);
@@ -5056,6 +5292,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
     
     const fileType = p.fileType || (p.name.includes('GIF') || (p.imgSrc && p.imgSrc.startsWith('data:image/gif')) ? 'gif' : (p.imgSrc ? 'image' : null));
+    // Existing media pixels are already the rendered crop. Keep them unless
+    // the user changes a crop setting or replaces the source.
+    processedMediaSignatureRef.current = JSON.stringify([
+      p.imgSrc, fileType, p.canvasX, p.canvasY, p.zoom, p.dwBase, p.dhBase, p.bgColor
+    ]);
     setForm({ ...p, fileType, pixels: normalizedPixels, animation: p.animation || 'continuous left shift' });
     setIsModalOpen(true);
   };
@@ -5083,7 +5324,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   const pushPreset = async (p) => {
     if (!canPushLocalPresetDirectly(p)) {
       if (typeof setLocalPushMessage === 'function') {
-        setLocalPushMessage('Save animated text, GIFs, and videos to Saved Presets before pushing.');
+        setLocalPushMessage('Please assign animated text, GIFs, and videos to a Saved Preset before pushing.');
       }
       return;
     }
@@ -5132,38 +5373,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   return (
-    <div className="flex flex-col items-center py-12 w-full">
-      <div 
-        onClick={() => setIsLocalCollapsed(!isLocalCollapsed)}
-        style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%', maxWidth: 1100, marginBottom: 8, cursor: 'pointer' }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <ImageIcon className="text-emerald-400 shrink-0" size={24} />
-          <h3 className="text-2xl font-black" style={{ margin: 0 }}>Local Presets</h3>
-          {pushMessage && (
-            <span
-              className="text-xs font-bold ml-4 flex items-center gap-1.5"
-              style={{ color: pushMessage.startsWith('Error') ? '#f87171' : (pushing ? '#38bdf8' : '#34d399') }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              {pushing && <RefreshCw size={12} className="animate-spin text-sky-400" />}
-              {!pushing && !pushMessage.startsWith('Error') && <Check size={12} className="text-emerald-400" />}
-              {pushMessage}
-            </span>
-          )}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <ChevronRight 
-            size={18} 
-            className="text-slate-400 transition-transform duration-200 hover:text-white"
-            style={{ transform: isLocalCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}
-          />
-        </div>
-      </div>
-      
- 
-      {!isLocalCollapsed && (
-        <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
+    <div className="flex flex-col items-center pb-12 w-full">
+      {presetView === 'local' && (
+        <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100, marginTop: 0 }}>
           <div style={{ 
             display: 'grid', 
             gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', 
@@ -5202,7 +5414,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 onDragEnd={handleDragEnd}
                 style={{
                   cursor: p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'not-allowed'),
-                  opacity: p.id === draggedId ? 0.4 : (canPushDirectly ? 1 : 0.65),
+                  // Keep media previews true to their saved-preset colors. The
+                  // direct-push restriction is communicated by the cursor and
+                  // tooltip, not by dimming the artwork itself.
+                  opacity: p.id === draggedId ? 0.4 : 1,
                   transform: p.id === draggedId ? 'scale(0.98)' : 'none',
                   border: p.id === dragOverId ? '2px dashed var(--accent-primary)' : (p.isDefault ? '1px solid #facc1544' : '1px solid var(--glass-border)'),
                   boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : (p.isDefault ? '0 0 12px #facc1522' : 'none'),
@@ -5217,7 +5432,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     setMsg('Error: Sign is not connected');
                   }
                 })}
-                title={canPushDirectly ? undefined : 'Save animated text, GIFs, and videos to Saved Presets before pushing'}
+                title={canPushDirectly ? undefined : 'Please assign animated text, GIFs, and videos to a Saved Preset before pushing.'}
               >
                 {p.isDefault && (
                   <div className="preset-card-badge">
@@ -5256,9 +5471,17 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               initial={{ scale: 0.9, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className="relative glass-panel"
+              className={`relative glass-panel ${isSaving ? 'media-processing-lock' : ''}`}
               style={{ position: 'relative', padding: '32px', width: '100%', maxWidth: '768px', overflowY: 'auto', maxHeight: '90vh' }}
             >
+              {isSaving && (
+                <div
+                  aria-label="Media processing in progress"
+                  onPointerDown={e => e.preventDefault()}
+                  onWheel={e => e.preventDefault()}
+                  style={{ position: 'absolute', inset: 0, zIndex: 20, background: 'transparent' }}
+                />
+              )}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
                 <h3 style={{ fontSize: '24px', fontWeight: 900, margin: 0 }}>{editingId ? 'Edit Preset' : 'Create Preset'}</h3>
                 <button onClick={() => { setIsModalOpen(false); setAnimDropdownOpen(false); }} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }} onMouseOver={e => e.currentTarget.style.color='#fff'} onMouseOut={e => e.currentTarget.style.color='#64748b'}><X size={24} /></button>
@@ -5663,7 +5886,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'image' ? 'inactive' : ''}`}
                         style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
                       >
-                        IMAGE/VIDEO
+                        MEDIA
                       </button>
                       <button 
                         onClick={() => { editingModeRef.current = 'clock'; setForm({...form, mode: 'clock'}); }}
@@ -6253,6 +6476,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
 
 
+                {saveError && <div role="alert" style={{ color: '#f87171', marginTop: 16 }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => { if (!isSaving && !window.getSelection()?.toString()) setSaveError(''); }}>
+                  Error saving preset: {saveError}
+                </div>}
                 <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
                   <button 
                     className="btn-styled py-4" 
@@ -6260,7 +6488,16 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     onClick={handleSave}
                     disabled={isSaving || !hasRequiredPresetContent}
                   >
-                    <Save size={16} /> {isSaving ? 'Processing...' : (editingId ? 'Update Preset' : 'Save Preset')}
+                    <Save size={16} /> {isSaving ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <span>Processing...</span>
+                      <span
+                        aria-label={`Saving progress: ${saveProgress ?? 0}%`}
+                        style={{ width: 72, height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.28)', overflow: 'hidden' }}
+                      >
+                        <span style={{ display: 'block', width: `${saveProgress ?? 0}%`, height: '100%', background: '#ffffff', borderRadius: 'inherit', transition: 'width 0.15s ease' }} />
+                      </span>
+                      <span>{saveProgress ?? 0}%</span>
+                    </span> : (editingId ? 'Update Preset' : 'Save Preset')}
                   </button>
                   {editingId && (
                     <button 

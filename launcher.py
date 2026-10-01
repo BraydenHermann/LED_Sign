@@ -17,6 +17,7 @@ import threading
 import time
 import webbrowser
 import socket
+import json
 import urllib.request
 
 # Windows: CREATE_NO_WINDOW prevents ANY console window from appearing for child processes
@@ -121,8 +122,24 @@ def launcher_log(message: str):
 def start_backend():
     global _backend_proc, _backend_log
     if port_open(8000):
-        launcher_log("Backend already listening on port 8000.")
-        return
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:8000/status', timeout=3) as response:
+                current = json.load(response).get('api_version', 0) >= 2
+        except Exception:
+            current = False
+        if current:
+            launcher_log("Current backend already listening on port 8000.")
+            return
+        launcher_log("Replacing an outdated LED Sign backend.")
+        stop_project_server(8000, os.path.join(BASE_DIR, 'server', 'main.py'))
+        # Windows may take a moment to release the listener after taskkill
+        # returns, even though the process has already exited.
+        deadline = time.monotonic() + 5
+        while port_open(8000) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if port_open(8000):
+            launcher_log("Port 8000 is still occupied; refusing to start a second backend.")
+            return
     with _lock:
         command = [*background_python_command(), os.path.join(BASE_DIR, "server", "main.py")]
         try:
@@ -151,9 +168,44 @@ def start_frontend():
         )
 
 
+def stop_project_server(port: int, source_path: str):
+    """Stop only a listener whose command line contains this project's path.
+
+    The Python launcher and cmd/npm are parents of the real servers. Killing
+    only those parents leaves Python/Vite running, including across EXE launches.
+    """
+    expected_path = os.path.abspath(source_path).replace("'", "''")
+    script = (
+        f"$expected = '{expected_path}'; "
+        f"Get-NetTCPConnection -LocalPort {int(port)} -State Listen -ErrorAction SilentlyContinue | "
+        "Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { "
+        "$server = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $_); "
+        "if ($server.CommandLine -and $server.CommandLine.Replace('/', '\\').IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -ge 0) { "
+        "$server.ProcessId } }"
+    )
+    try:
+        found = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+            capture_output=True, text=True, timeout=15, **hidden_process_kwargs(),
+        )
+        for value in found.stdout.splitlines():
+            if not value.strip().isdigit():
+                continue
+            pid = int(value.strip())
+            launcher_log(f"Stopping project server on port {port} (PID {pid}).")
+            subprocess.run(['taskkill.exe', '/PID', str(pid), '/T', '/F'],
+                           capture_output=True, timeout=10, **hidden_process_kwargs())
+    except Exception as error:
+        launcher_log(f"Could not stop project server on port {port}: {error}")
+
+
 def stop_servers():
     global _backend_proc, _frontend_proc
     with _lock:
+        stop_project_server(8000, os.path.join(BASE_DIR, 'server', 'main.py'))
+        # npm can spell the entry point as .bin/../vite/bin/vite.js; the
+        # project-specific modules path still identifies the listener safely.
+        stop_project_server(5173, os.path.join(BASE_DIR, 'client', 'node_modules'))
         for proc in (_backend_proc, _frontend_proc):
             if proc and proc.poll() is None:
                 try:
@@ -260,6 +312,8 @@ def main():
     # Only create a tab after the servers are ready and no existing LED Sign
     # page is reporting itself open. This works across separate browser windows.
     def open_if_needed():
+        if '--background' in sys.argv:
+            return
         if wait_for_port(5173) and wait_for_port(8000) and not browser_tab_is_open():
             webbrowser.open("http://localhost:5173/")
     threading.Thread(target=open_if_needed, daemon=True).start()
