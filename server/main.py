@@ -265,9 +265,20 @@ def notification_handler(sender, data: bytearray):
 
 
 # Enable CORS for frontend Vite dev server (port 5173) to backend communication
+cors_origins_env = os.getenv("LED_SIGN_CORS_ORIGINS", "")
+if cors_origins_env:
+    allow_origins = [o.strip() for o in cors_origins_env.split(",")]
+else:
+    allow_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000"
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -3150,4 +3161,5 @@ async def delete_preset(slot_id: int, mac: str = "", was_active: Optional[bool] 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    host = os.getenv("LED_SIGN_HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=8000)

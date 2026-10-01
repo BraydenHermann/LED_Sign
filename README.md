@@ -17,11 +17,12 @@ This configuration is ideal if you are distributing the app (e.g., as a desktop 
 - **Redirect URI:** Defaults to http://localhost:8000/auth/callback (you must add this as an authorized redirect URI in your Google Cloud OAuth client).
 - **Token Storage:** The user token is saved locally to the default server/token.json or to the path specified in GOOGLE_TOKEN_PATH.
 
-### C. Hosted/production deployment
-This configuration is for deploying the application to a cloud server (e.g., by another organization like ATOTO) where the backend is hosted centrally.
-- **Credentials:** Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables using the deployer's own Google Cloud credentials.
-- **Redirect URI:** Set GOOGLE_REDIRECT_URI to your hosted deployment's callback URL (e.g., https://atoto.example.com/auth/callback). Ensure this exact URI is authorized in your Google Cloud console.
-- **Token Storage:** Set GOOGLE_TOKEN_PATH to an appropriate persistent storage location for the deployment environment.
+### C. Hosted/production deployment (Future/Hybrid Architecture)
+This configuration applies if parts of the application (such as Google Calendar syncing or user management) are deployed to a centralized cloud server.
+- **Local Bluetooth Requirement:** The application communicates with physical LED signs over Bluetooth Low Energy (BLE). Therefore, a backend service or agent *must* run on a machine with local Bluetooth access to the sign. A remote cloud server cannot communicate directly with nearby Bluetooth devices without a local bridge.
+- **Credentials:** Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` environment variables using the deployer's own Google Cloud credentials.
+- **Redirect URI:** Set `GOOGLE_REDIRECT_URI` to your hosted deployment's callback URL (e.g., `https://atoto.example.com/auth/callback`). Ensure this exact URI is authorized in your Google Cloud console.
+- **Token Storage:** Set `GOOGLE_TOKEN_PATH` to an appropriate persistent storage location for the deployment environment.
 
 ---
 **Note:** The redirect URI configured in the application (GOOGLE_REDIRECT_URI) must exactly correspond to an authorized redirect URI configured for that OAuth client in Google Cloud.

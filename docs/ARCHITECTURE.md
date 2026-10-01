@@ -15,7 +15,7 @@ This application consists of a decoupled frontend and backend that communicate v
 - Runs locally and acts as the bridge between the web browser and the Bluetooth hardware.
 - **Key Subsystems:**
   - **Bluetooth Manager (`main.py`):** Uses the `bleak` library to handle background scanning, connection persistence, and asynchronous command queuing.
-  - **Media Pipeline:** Uses Pillow and OpenCV to rasterize, resize, crop, and quantize images, GIFs, and videos into raw RGB565 byte arrays suitable for hardware transmission.
+  - **Media Pipeline:** Uses Pillow and OpenCV to rasterize, resize, crop, and process images, GIFs, and videos into 64x20 frame/pixel representations, which are then encoded into protocol-appropriate bitmap commands or saved payloads.
   - **LOY Protocol Layer (`loy_web_protocol.py`):** Encodes the raw media and text payloads into the proprietary byte protocol (including chunking, CRC checksums, and framing) required by the target hardware.
   - **Calendar Integration (`calendar_service.py`):** Integrates with the Google Calendar API via OAuth to fetch upcoming events. It dynamically extracts event titles and cleans them for automated pushes to the sign.
 

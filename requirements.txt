@@ -1,5 +1,9 @@
+fastapi
+uvicorn
 bleak
+Pillow
 opencv-python-headless
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
+pystray
