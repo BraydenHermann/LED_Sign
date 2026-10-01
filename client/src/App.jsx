@@ -3618,10 +3618,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   onPointerDown={(e) => {
                     e.stopPropagation();
                   }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!pushing && !window.getSelection()?.toString()) setPushMessage('');
-                  }}
                 >
                   {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && <RefreshCw size={12} className="animate-spin" aria-label="Saving" />}
                   {!pushing && /^(Saved|Pushed|Assigned|Deleted)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400" />}
@@ -4950,7 +4946,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 2;
       const targetVideoFps = 24;
       const maxVideoFrames = 300;
-      numFrames = Math.max(1, Math.min(Math.ceil(duration * targetVideoFps), maxVideoFrames));
+      numFrames = Math.max(1, Math.ceil(duration * targetVideoFps));
+      if (numFrames > maxVideoFrames) {
+        throw new Error(`Video is too long (${numFrames} frames). Maximum supported is ${maxVideoFrames} frames.`);
+      }
       setSaveProgress(0);
       const originalTime = video.currentTime;
       
@@ -6476,9 +6475,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
 
 
-                {saveError && <div role="alert" style={{ color: '#f87171', marginTop: 16 }}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={() => { if (!isSaving && !window.getSelection()?.toString()) setSaveError(''); }}>
+                {saveError && <div role="alert" style={{ color: '#f87171', marginTop: 16 }}>
                   Error saving preset: {saveError}
                 </div>}
                 <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>

@@ -95,7 +95,8 @@ async def write_large_gatt_char(client: BleakClient, char_uuid: str, data: bytes
                 return
             for i in range(0, len(data), chunk_size):
                 chunk = data[i:i+chunk_size]
-                await client.write_gatt_char(char_uuid, bytearray(chunk), response=response)
+                is_last = (i + chunk_size >= len(data))
+                await client.write_gatt_char(char_uuid, bytearray(chunk), response=(response and is_last))
                 if delay > 0:
                     await asyncio.sleep(delay)
     except Exception as e:
@@ -350,6 +351,8 @@ def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_
     actual_duration_ms = gif_duration_ms
     
     num_frames = getattr(img, "n_frames", 1)
+    if num_frames > 300:
+        raise ValueError(f"GIF is too long ({num_frames} frames). Maximum supported is 300 frames.")
     
     def hex_to_rgb(hex_str: Optional[str]):
         if not hex_str:
@@ -377,6 +380,8 @@ def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_
             break
             
     num_frames = len(extracted_frames)
+    if num_frames > 300:
+        raise ValueError(f"GIF is too long ({num_frames} frames). Maximum supported is 300 frames.")
     
     frames_list = []
     for f in range(num_frames):
@@ -450,18 +455,18 @@ def process_video(req: ProcessVideoRequest):
         fps = max(1.0, min(60.0, fps))
         frame_duration_ms = max(16, int(round(1000 / fps)))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        step = max(1.0, total_frames / 300)
-        frame_duration_ms = 1000 * step / fps
+        if total_frames > 300:
+            raise ValueError(f"Video is too long ({total_frames} frames). Maximum supported is 300 frames.")
+        step = 1.0
         bg_rgb = hex_to_rgb_global(req.bgColor or "#000000")
         width = max(1, int(round(req.dwBase * req.zoom)))
         height = max(1, int(round(req.dhBase * req.zoom)))
         x = int(round(req.canvasX))
         y = int(round(req.canvasY))
         frames = []
-        # Preserve native-frame motion for clips up to 300 frames, matching
-        # the old 24 fps client limit without 240 browser seek operations.
+        # Extract all frames up to the hardware limit
         source_index = 0
-        while len(frames) < 300:
+        while len(frames) < total_frames:
             ok, bgr = cap.read()
             if not ok:
                 break

@@ -23,7 +23,7 @@ async function postToCurrentServer(path, payload, options) {
     return await axios.post(path, payload, options);
   } catch (error) {
     if (axios.isAxiosError(error) && !error.response) {
-      throw new Error('Cannot reach the local LED Sign server. Restart Servers from the tray menu. The Bluetooth sign connection is separate from this server connection.');
+      throw new Error('Cannot reach the server');
     }
     throw error;
   }
