@@ -18,21 +18,22 @@ export function requireCompletedWrite(result) {
 
 async function postToCurrentServer(path, payload, options) {
   try {
-    const { data: status } = await axios.get('/status', { timeout: 5000 });
+    const { data: status } = await axios.get('/status', { timeout: 15000 });
     requireCurrentServer(status);
     return await axios.post(path, payload, options);
   } catch (error) {
     if (axios.isAxiosError(error) && !error.response) {
-      throw new Error('Cannot reach the server');
+      throw new Error(`Cannot reach the server (${error.code || error.message})`);
     }
     throw error;
   }
 }
 
-export async function savePresetToSign(payload, options) {
+export async function savePresetToSign(payload, options = {}) {
+  options.timeout = 300000;
   const response = await postToCurrentServer('/save-preset', payload, options);
   requireCompletedWrite(response.data);
   return response;
 }
 
-export const processVideoMedia = (payload) => postToCurrentServer('/process-video', payload);
+export const processVideoMedia = (payload) => postToCurrentServer('/process-video', payload, { timeout: 0 });

@@ -3009,7 +3009,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       // The former compact conversion was read as contiguous frames on the
       // server, scrambling the video and discarding cached preview pixels.
       const presetForUpload = { ...presetCopy };
-      delete presetForUpload.pixelsRgbB64;
+      if (presetForUpload.pixelsRgbB64) {
+        delete presetForUpload.pixels;
+      }
       // Pixels already contain the crop; omit the large original source from
       // the upload. The local preset retains it for editing/exporting.
       if (presetForUpload.pixels?.length) delete presetForUpload.imgSrc;
@@ -3020,6 +3022,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         preset: presetForUpload,
         progress_id: progressId
       }, {
+        timeout: 300000,
         onUploadProgress: (event) => {
           if (event.total) {
             updateProgress(Math.min(15, Math.round((event.loaded / event.total) * 15)), 'Uploading preset');
@@ -4551,6 +4554,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         video.play().catch(err => console.log('Video play error:', err));
         initializeMediaCrop(video, url, 'video');
       };
+      video.onerror = () => {
+        setUnifiedPushMessage('Unsupported video format or corrupt file. Try converting to MP4/H.264.');
+        setSaveError('Unsupported video format or corrupt file.');
+      };
     } else {
       const reader = new FileReader();
       reader.onload = (re) => {
@@ -4558,6 +4565,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         img.onload = () => {
           imageObjRef.current = img;
           initializeMediaCrop(img, re.target.result, fileType);
+        };
+        img.onerror = () => {
+          setUnifiedPushMessage('Unsupported image format or corrupt file.');
+          setSaveError('Unsupported image format or corrupt file.');
         };
         img.src = re.target.result;
       };
@@ -4732,6 +4743,45 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     return () => window.removeEventListener('paste', handlePaste);
   }, [isModalOpen, form.mode]);
 
+  // Global arrow key support for cropping (no need to click to focus first)
+  useEffect(() => {
+    if (!isModalOpen || form.mode !== 'image' || !form.imgSrc) return;
+
+    const handleKeyDown = (e) => {
+      // Don't intercept if user is typing in an input
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      
+      const step = e.shiftKey ? 5 : 1;
+      let newX = form.canvasX;
+      let newY = form.canvasY;
+      
+      if (e.key === 'ArrowUp') newY -= step;
+      else if (e.key === 'ArrowDown') newY += step;
+      else if (e.key === 'ArrowLeft') newX -= step;
+      else if (e.key === 'ArrowRight') newX += step;
+      else return;
+
+      e.preventDefault();
+      
+      let nextPixels = form.pixels;
+      if (imageObjRef.current) {
+        nextPixels = runCropRender(
+          imageObjRef.current,
+          newX,
+          newY,
+          (form.dwBase || 64) * (form.zoom || 1),
+          (form.dhBase || 20) * (form.zoom || 1),
+          form.bgColor || '#000000'
+        );
+      }
+      
+      setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY, pixels: nextPixels }));
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isModalOpen, form.mode, form.imgSrc, form.canvasX, form.canvasY, form.dwBase, form.dhBase, form.zoom, form.bgColor, form.pixels]);
+
   useEffect(() => {
     if (isModalOpen && form.mode === 'image' && form.imgSrc) {
       if (!imageObjRef.current || imageObjRef.current.src !== form.imgSrc) {
@@ -4747,6 +4797,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
             if (form.canvasX === undefined || form.dwBase === undefined) {
               initializeMediaCrop(video, form.imgSrc, 'video');
             }
+          };
+          video.onerror = () => {
+            setSaveError('Unsupported video format or corrupt file.');
           };
         } else {
           const img = new Image();
@@ -5577,6 +5630,21 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           onDragLeave={handleMediaDragLeave}
                           onDrop={handleMediaDrop}
                           className="preview-box"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (!form.imgSrc || !imageObjRef.current) return;
+                            const step = e.shiftKey ? 5 : 1;
+                            let newX = form.canvasX;
+                            let newY = form.canvasY;
+                            if (e.key === 'ArrowUp') newY -= step;
+                            else if (e.key === 'ArrowDown') newY += step;
+                            else if (e.key === 'ArrowLeft') newX -= step;
+                            else if (e.key === 'ArrowRight') newX += step;
+                            else return;
+                            
+                            e.preventDefault();
+                            updateForm({ canvasX: newX, canvasY: newY });
+                          }}
                           style={{
                             backgroundColor: form.bgColor || '#000000',
                             userSelect: 'none',
@@ -5587,6 +5655,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           }}
                           onMouseDown={(e) => {
                             e.preventDefault();
+                            e.currentTarget.focus();
                             if (!form.imgSrc || !imageObjRef.current) return;
                             
                             const container = e.currentTarget;

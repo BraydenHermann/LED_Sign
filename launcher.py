@@ -201,6 +201,10 @@ def stop_project_server(port: int, source_path: str):
 
 def stop_servers():
     global _backend_proc, _frontend_proc
+    try:
+        urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/disconnect", method="POST"), timeout=2)
+    except Exception:
+        pass
     with _lock:
         stop_project_server(8000, os.path.join(BASE_DIR, 'server', 'main.py'))
         # npm can spell the entry point as .bin/../vite/bin/vite.js; the

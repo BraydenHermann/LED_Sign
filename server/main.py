@@ -441,7 +441,7 @@ async def process_gif(req: ProcessGifRequest):
         # Return the RGB pixels directly — process_gif_pixels() already renders full-color
         # RGB frames. Applying quantize_frames() here (MAXCOVERAGE → 3 colors) was causing
         # drastic color corruption (e.g. beer mug GIF turning mostly yellow on re-save).
-        return {"pixels": pixels, "speed": speed, "frameDurationMs": duration_ms, "frameDurationsMs": frame_durations_ms}
+        import base64; b = bytearray(); [b.extend((int(p[1:3],16),int(p[3:5],16),int(p[5:7],16)) if p and isinstance(p, str) and p.startswith("#") else (0,0,0)) for p in pixels]; rgb64 = base64.b64encode(b).decode("ascii"); return {"pixels": pixels, "pixelsRgbB64": rgb64, "speed": speed, "frameDurationMs": duration_ms, "frameDurationsMs": frame_durations_ms}
     except Exception as e:
         print(f"Error processing GIF: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -502,7 +502,7 @@ def process_video(req: ProcessVideoRequest):
         for row in range(PANEL_H):
             for frame in frames:
                 stitched.extend(frame[row * PANEL_W:(row + 1) * PANEL_W])
-        return {"pixels": stitched, "frameDurationMs": frame_duration_ms, "frameDurationsMs": [frame_duration_ms] * len(frames)}
+        import base64; b = bytearray(); [b.extend((int(p[1:3],16),int(p[3:5],16),int(p[5:7],16)) if p and isinstance(p, str) and p.startswith("#") else (0,0,0)) for p in stitched]; rgb64 = base64.b64encode(b).decode("ascii"); return {"pixels": stitched, "pixelsRgbB64": rgb64, "frameDurationMs": frame_duration_ms, "frameDurationsMs": [frame_duration_ms] * len(frames)}
     except Exception as e:
         print(f"Error processing video: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -710,7 +710,7 @@ async def _connect_internal(req: ConnectRequest):
             raise Exception(
                 f"Could not connect to sign after {max_attempts} attempts. "
                 f"Last error: {last_connect_error or 'Device not found in range'}. "
-                "Try: 1) Power cycle the sign, 2) Remove the sign from Windows Bluetooth settings and re-pair."
+                "Try: 1) Toggle your PC Bluetooth off and on, 2) Power cycle the sign, 3) Remove the sign from Windows Bluetooth settings and re-pair."
             )
 
         client_address = client.address
@@ -3163,3 +3163,6 @@ if __name__ == "__main__":
     import uvicorn
     host = os.getenv("LED_SIGN_HOST", "127.0.0.1")
     uvicorn.run(app, host=host, port=8000)
+
+
+

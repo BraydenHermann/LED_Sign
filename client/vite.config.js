@@ -17,10 +17,22 @@ export default defineConfig({
       '/clear': 'http://127.0.0.1:8000',
       '/calendar': 'http://127.0.0.1:8000',
       '/auth': 'http://127.0.0.1:8000',
-      '/process-gif': 'http://127.0.0.1:8000',
-      '/process-video': 'http://127.0.0.1:8000',
+      '/process-gif': {
+        target: 'http://127.0.0.1:8000',
+        proxyTimeout: 300000,
+        timeout: 300000
+      },
+      '/process-video': {
+        target: 'http://127.0.0.1:8000',
+        proxyTimeout: 300000,
+        timeout: 300000
+      },
       '/ui-heartbeat': 'http://127.0.0.1:8000',
-      '/save-preset': 'http://127.0.0.1:8000',
+      '/save-preset': {
+        target: 'http://127.0.0.1:8000',
+        proxyTimeout: 300000,
+        timeout: 300000
+      },
       '/save-progress': 'http://127.0.0.1:8000',
       '/preset': 'http://127.0.0.1:8000',
       '/delete-preset': 'http://127.0.0.1:8000',
