@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { savePresetToSign, processVideoMedia } from './serverApi';
@@ -2393,7 +2393,7 @@ export default function App() {
         } else if (active) {
           const activeStr = getEventDisplayString(active);
           console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
-          await handlePush(activeStr, false, true, \event-\-\\);
+          await handlePush(activeStr, false, true, `event-${active.id}-${activeStr}`);
           localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         } else {
           // If no active event right now: check if this sign has had its calendar preset initialized on hardware
@@ -2421,7 +2421,7 @@ export default function App() {
                   preset: prevCal
                 });
                 const calThumb = resCal.data?.preview_url
-                  ? \\\?t=\\
+                  ? `${API_BASE}${resCal.data.preview_url}?t=${Date.now()}`
                   : prevCal.thumbnail;
                 setAllSavedPresets(prev => {
                   const curList = normalizeSavedPresets(prev[targetMac]);
@@ -2442,7 +2442,7 @@ export default function App() {
           console.log("[connect] Playing hardware default slot (slot 1)");
           setLastPushedId('hw-slot-1');
           try {
-            await axios.post(\\/preset?id=1&mac=\\);
+            await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
           } catch (e) {
             console.warn("[connect] No default saved to slot 1 yet:", e);
           }
