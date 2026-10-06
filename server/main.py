@@ -142,6 +142,80 @@ async def stop_all_playback(blank: bool = False):
             print(f"[stop_all_playback error] {e}")
 
 app = FastAPI()
+_calendar_bg_task = None
+last_notified_event_id = None
+last_pushed_event_id = None
+
+async def calendar_background_loop():
+    global current_display_mode, last_notified_event_id, last_pushed_event_id
+    
+    while True:
+        await asyncio.sleep(10)
+        
+        if preset_switch_lock.locked():
+            continue
+            
+        try:
+            if not (os.path.exists(calendar_service.token_path) or (calendar_service.creds is not None and calendar_service.creds.valid)):
+                continue
+
+            events = calendar_service.get_today_events(clean_name=True)
+            if not events:
+                continue
+                
+            now_local = datetime.datetime.now().astimezone()
+            
+            target_event = None
+            for ev in events:
+                if ev.get('response_status', '').lower() == 'declined':
+                    continue
+                start_iso = ev.get('start_iso')
+                end_iso = ev.get('end_iso')
+                if not start_iso or not end_iso:
+                    continue
+                
+                try:
+                    start_dt = datetime.datetime.fromisoformat(start_iso)
+                    end_dt = datetime.datetime.fromisoformat(end_iso)
+                except ValueError:
+                    continue
+                
+                if start_dt - datetime.timedelta(minutes=5) <= now_local <= end_dt:
+                    target_event = ev
+                    break
+                    
+            if target_event:
+                event_id = target_event['id']
+                summary = target_event.get('summary', 'Event')
+                time_str = target_event.get('time', '')
+                
+                if last_notified_event_id != event_id:
+                    last_notified_event_id = event_id
+                    try:
+                        from win11toast import toast
+                        start_dt = datetime.datetime.fromisoformat(target_event['start_iso'])
+                        minutes_until = max(0, round((start_dt - now_local).total_seconds() / 60.0))
+                        time_label = 'now' if minutes_until <= 1 else f'in {minutes_until} min'
+                        icon_path = os.path.abspath(os.path.join(STATIC_DIR, '..', '..', 'client', 'public', 'favicon.ico'))
+                        toast('Upcoming Meeting', f'{summary} starts {time_label}', duration='short', icon=icon_path if os.path.exists(icon_path) else None)
+                    except Exception as e:
+                        print(f"[calendar] Notification error: {e}")
+                
+                if last_pushed_event_id != event_id:
+                    last_pushed_event_id = event_id
+                    try:
+                        req = PushTextRequest(text=f"{summary} ||| {time_str}")
+                        await push_text(req)
+                        print(f"[auto-push] Pushed calendar event to sign: {summary}")
+                    except Exception as e:
+                        print(f"[auto-push] Failed to push calendar event: {e}")
+        except Exception as e:
+            print(f"[calendar] Background loop error: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    global _calendar_bg_task
+    _calendar_bg_task = asyncio.create_task(calendar_background_loop())
 protocol = LOYWebProtocol()
 calendar_service = CalendarService()
 
@@ -593,13 +667,6 @@ async def _connect_internal(req: ConnectRequest):
         await asyncio.sleep(0.5)
 
     client = None
-    try:
-        if os.path.exists(os.path.join(STATIC_DIR, "current.gif")):
-            os.remove(os.path.join(STATIC_DIR, "current.gif"))
-        if os.path.exists(os.path.join(STATIC_DIR, "current.png")):
-            os.remove(os.path.join(STATIC_DIR, "current.png"))
-    except Exception:
-        pass
 
     try:
         target_mac = (req.address or "").strip().upper()
@@ -773,14 +840,7 @@ async def disconnect():
         connected_client = None
         await asyncio.sleep(0.5)
         
-    try:
-        if os.path.exists(os.path.join(STATIC_DIR, "current.gif")):
-            os.remove(os.path.join(STATIC_DIR, "current.gif"))
-        if os.path.exists(os.path.join(STATIC_DIR, "current.png")):
-            os.remove(os.path.join(STATIC_DIR, "current.png"))
-        current_display_mode = "none"
-    except Exception:
-        pass
+    current_display_mode = "none"
         
     return {"status": "success"}
 
@@ -3163,6 +3223,8 @@ if __name__ == "__main__":
     import uvicorn
     host = os.getenv("LED_SIGN_HOST", "127.0.0.1")
     uvicorn.run(app, host=host, port=8000)
+
+
 
 
 
