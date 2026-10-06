@@ -1,4 +1,4 @@
-"""
+﻿"""
 LED Sign Launcher -- Windows system tray application.
 
 Starts the Python FastAPI backend and Vite frontend dev server,
@@ -73,6 +73,51 @@ _backend_proc = None
 _frontend_proc = None
 _backend_log = None
 _lock = threading.Lock()
+_calendar_proc = None
+_quit_flag = False
+
+def start_calendar_agent():
+    global _calendar_proc
+    with _lock:
+        if _calendar_proc and _calendar_proc.poll() is None:
+            return
+        command = [*background_python_command(), os.path.join(BASE_DIR, "server", "calendar_agent.py")]
+        try:
+            _calendar_proc = subprocess.Popen(
+                command,
+                cwd=BASE_DIR,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **hidden_process_kwargs(),
+            )
+            launcher_log(f"Started calendar agent (PID {_calendar_proc.pid})")
+        except OSError as error:
+            launcher_log(f"Could not start calendar agent: {error}")
+
+def guardian_loop():
+    global _backend_proc, _calendar_proc, _quit_flag
+    while not _quit_flag:
+        time.sleep(2)
+        if _quit_flag:
+            break
+        with _lock:
+            # Check backend
+            if _backend_proc is not None:
+                ret = _backend_proc.poll()
+                if ret is not None:
+                    launcher_log(f"Backend crashed with exit code {ret}! Restarting...")
+                    _backend_proc = None
+            # Check calendar agent
+            if _calendar_proc is not None:
+                ret = _calendar_proc.poll()
+                if ret is not None:
+                    launcher_log(f"Calendar agent crashed with exit code {ret}! Restarting...")
+                    _calendar_proc = None
+
+        if _backend_proc is None and not _quit_flag:
+            start_backend()
+        if _calendar_proc is None and not _quit_flag:
+            start_calendar_agent()
 
 
 # ---------------------------------------------------------------------------
@@ -200,17 +245,16 @@ def stop_project_server(port: int, source_path: str):
 
 
 def stop_servers():
-    global _backend_proc, _frontend_proc
+    global _backend_proc, _frontend_proc, _calendar_proc, _quit_flag
+    _quit_flag = True
     try:
         urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/disconnect", method="POST"), timeout=2)
     except Exception:
         pass
     with _lock:
         stop_project_server(8000, os.path.join(BASE_DIR, 'server', 'main.py'))
-        # npm can spell the entry point as .bin/../vite/bin/vite.js; the
-        # project-specific modules path still identifies the listener safely.
         stop_project_server(5173, os.path.join(BASE_DIR, 'client', 'node_modules'))
-        for proc in (_backend_proc, _frontend_proc):
+        for proc in (_backend_proc, _frontend_proc, _calendar_proc):
             if proc and proc.poll() is None:
                 try:
                     proc.terminate()
@@ -218,18 +262,14 @@ def stop_servers():
                     pass
         _backend_proc = None
         _frontend_proc = None
-
-
+        _calendar_proc = None
 def restart_servers(icon=None, item=None):
+    global _quit_flag
     stop_servers()
     time.sleep(1)
-    threading.Thread(target=start_backend, daemon=True).start()
+    _quit_flag = False
+    threading.Thread(target=guardian_loop, daemon=True).start()
     threading.Thread(target=start_frontend, daemon=True).start()
-
-
-# ---------------------------------------------------------------------------
-# Tray icon
-# ---------------------------------------------------------------------------
 
 def make_icon_image():
     """Load the application artwork for the system-tray icon."""
@@ -307,10 +347,10 @@ def run_tray():
 # ---------------------------------------------------------------------------
 
 def main():
-    global BASE_DIR
+    global BASE_DIR, _quit_flag
     BASE_DIR = find_base_dir()
-    # Start servers
-    threading.Thread(target=start_backend, daemon=True).start()
+    _quit_flag = False
+    threading.Thread(target=guardian_loop, daemon=True).start()
     threading.Thread(target=start_frontend, daemon=True).start()
 
     # Only create a tab after the servers are ready and no existing LED Sign
@@ -328,3 +368,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
