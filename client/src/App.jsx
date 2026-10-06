@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
+﻿import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { savePresetToSign, processVideoMedia } from './serverApi';
@@ -82,7 +82,7 @@ async function getSavedPresetsFromDB() {
   });
 }
 
-// Stable preview URL â€” only regenerated when fetchStatus sees a new image
+// Stable preview URL Ã¢â‚¬â€ only regenerated when fetchStatus sees a new image
 let _lastFrames = -1;
 
 function formatMac(raw) {
@@ -171,16 +171,16 @@ function selectCalendarEvent(events, atTime) {
 }
 
 // Strip diacritics/accents and unsupported characters so hardware-limited signs and previews receive pure clean ASCII
-// e.g. "SÃ©bastien" â†’ "Sebastien", "naÃ¯ve" â†’ "naive", "Å“" â†’ "oe", "â€”" â†’ "-"
+// e.g. "SÃƒÂ©bastien" Ã¢â€ â€™ "Sebastien", "naÃƒÂ¯ve" Ã¢â€ â€™ "naive", "Ã…â€œ" Ã¢â€ â€™ "oe", "Ã¢â‚¬â€" Ã¢â€ â€™ "-"
 function normalizeForSign(str) {
   if (!str) return str;
   return str
-    .replace(/[Å“Å’]/g, m => m === 'Å“' ? 'oe' : 'OE')
-    .replace(/[Ã¦Ã†]/g, m => m === 'Ã¦' ? 'ae' : 'AE')
-    .replace(/[â€˜â€™]/g, "'")
-    .replace(/[â€œâ€Â«Â»]/g, '"')
-    .replace(/[â€“â€”]/g, '-')
-    .replace(/â€¦/g, '...')
+    .replace(/[Ã…â€œÃ…â€™]/g, m => m === 'Ã…â€œ' ? 'oe' : 'OE')
+    .replace(/[ÃƒÂ¦Ãƒâ€ ]/g, m => m === 'ÃƒÂ¦' ? 'ae' : 'AE')
+    .replace(/[Ã¢â‚¬ËœÃ¢â‚¬â„¢]/g, "'")
+    .replace(/[Ã¢â‚¬Å“Ã¢â‚¬ÂÃ‚Â«Ã‚Â»]/g, '"')
+    .replace(/[Ã¢â‚¬â€œÃ¢â‚¬â€]/g, '-')
+    .replace(/Ã¢â‚¬Â¦/g, '...')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 }
@@ -210,7 +210,7 @@ function getEventDisplayString(ev) {
       // Otherwise, do not include it
       signText = withShort;
     } else {
-      // Need to truncate title â€” do not include am/pm to save characters
+      // Need to truncate title Ã¢â‚¬â€ do not include am/pm to save characters
       const suffix = `... ${shortEndTimeStr}`;
       const maxTitleLen = maxLen - suffix.length;
       const truncTitle = summary.slice(0, Math.max(0, maxTitleLen)).trimEnd();
@@ -657,7 +657,7 @@ const PresetCardMedia = ({ preset, now }) => {
   if (preset.mode === 'text') {
     return <TextPresetCardPreview preset={preset} />;
   }
-  // Saved media has the exact 64Ã—20 frames sent to the sign. Prefer those for
+  // Saved media has the exact 64Ãƒâ€”20 frames sent to the sign. Prefer those for
   // every card type so local, saved, and live previews have identical color,
   // crop, and animation timing.
   if (preset.pixels && preset.pixels.length > 1280) {
@@ -1517,7 +1517,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [status, setStatus] = useState({
     connected: false, address: null, preview_url: null,
-    calendar_connected: false, uptime: 'â€”', frames: 0
+    calendar_connected: false, uptime: 'Ã¢â‚¬â€', frames: 0
   });
   const [brightness, setBrightness] = useState(15);
   const [speed, setSpeed] = useState(8);
@@ -1664,7 +1664,7 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Dedicated Auto-Connect Effect â€” only reconnect to the most recently connected sign
+  // Dedicated Auto-Connect Effect Ã¢â‚¬â€ only reconnect to the most recently connected sign
   useEffect(() => {
     const lastConnected = localStorage.getItem('loy_last_connected_mac');
     if (hasFetchedStatus && !status.connected && lastConnected && !autoConnectTried.current && !isConnecting && !apiError) {
@@ -2135,7 +2135,7 @@ export default function App() {
               }
 
               if (s.occupied) {
-                // The sign is write-only â€” hardware slot state cannot be reliably read back.
+                // The sign is write-only Ã¢â‚¬â€ hardware slot state cannot be reliably read back.
                 // Only show a preset card if we have locally cached data (preset_data / preview_url).
                 const pData = s.preset_data;
                 const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
@@ -2171,7 +2171,7 @@ export default function App() {
                   currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], hwSlotId: idx, preset: hwPreset };
                 }
               } else if (idx >= 2 && currentList[targetSlotIndex]?.preset) {
-                // Slot no longer occupied on hardware â€” clear card
+                // Slot no longer occupied on hardware Ã¢â‚¬â€ clear card
                 updated = true;
                 currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], preset: null };
               }
@@ -2233,7 +2233,7 @@ export default function App() {
         targetContent = { type: 'event', data: currentEvent, summary: getEventDisplayString(currentEvent) };
         targetId = `event-${currentEvent.id}-${targetContent.summary}`;
       } else {
-        // No active or upcoming event â€” target hardware slot 1 (the reserved default slot)
+        // No active or upcoming event Ã¢â‚¬â€ target hardware slot 1 (the reserved default slot)
         targetContent = { type: 'hw-default' };
         targetId = 'hw-slot-1';
       }
@@ -2313,7 +2313,7 @@ export default function App() {
               console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
             });
           } else {
-            // Play hardware slot 1 â€” the reserved default
+            // Play hardware slot 1 Ã¢â‚¬â€ the reserved default
             console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
             setLastPushedId('hw-slot-1');
             axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => {
@@ -2546,7 +2546,7 @@ export default function App() {
           setLastPushedId('hw-slot-1');
         } catch (defErr) {
           if (defErr.response?.status === 404) {
-            // Hardware slot not saved yet for this sign â€” push the local preset data directly
+            // Hardware slot not saved yet for this sign Ã¢â‚¬â€ push the local preset data directly
             console.log('[handlePush] Default HW slot not found, pushing local preset data directly');
             const fallbackData = { ...data };
             if (fallbackData.mode === 'text') delete fallbackData.pixels;
@@ -2751,7 +2751,7 @@ function NavButton({ icon, label, active, onClick }) {
   );
 }
 
-/* â”€â”€â”€ Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Dashboard Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
 function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus, presetView, setPresetView }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -2879,11 +2879,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     if (status.connected && status.address) {
       const pending = pendingConnectRef.current;
       if (pending && pending.addr.toLowerCase() === status.address.toLowerCase()) {
-        // Connection succeeded â€” now it's safe to record
+        // Connection succeeded Ã¢â‚¬â€ now it's safe to record
         addRecent(pending.addr, pending.name);
         pendingConnectRef.current = null;
       } else {
-        // App restarted / reconnected automatically â€” update existing entry only
+        // App restarted / reconnected automatically Ã¢â‚¬â€ update existing entry only
         addRecent(status.address);
       }
     }
@@ -2910,7 +2910,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       return;
     }
 
-    // Slots 0 and 1 are reserved (Calendar and Default) â€” block manual assignment
+    // Slots 0 and 1 are reserved (Calendar and Default) Ã¢â‚¬â€ block manual assignment
     if (globalIdx === 0 || globalIdx === 1) {
       setPushMessage(`Slot ${globalIdx + 1} is reserved and cannot be manually assigned.`);
       return;
@@ -2950,7 +2950,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       } catch (err) {
         console.warn('Failed to push clock on assign:', err);
         const detail = err.response?.data?.detail || err.message || '';
-        setPushMessage(`Error: Failed to assign Clock to Slot ${globalIdx + 1}${detail ? ` â€” ${detail}` : ''}`);
+        setPushMessage(`Error: Failed to assign Clock to Slot ${globalIdx + 1}${detail ? ` Ã¢â‚¬â€ ${detail}` : ''}`);
       }
       return;
     }
@@ -3244,7 +3244,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   return (
     <div className="flex flex-col items-center">
       <div className="dashboard-hero">
-        {/* Power btn â€” top aligned */}
+        {/* Power btn Ã¢â‚¬â€ top aligned */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
           <div onClick={togglePower} className={`power-btn ${power ? 'on' : 'off'} ${!status.connected ? 'disabled' : ''}`} title={power ? 'Turn Off' : 'Turn On'}>
             <Power size={26} />
@@ -3327,7 +3327,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   className="input-field"
                   style={{ height: '36px', width: '180px', fontSize: 13 }}
                   value={nameEditValue}
-                  placeholder="Enter device nameâ€¦"
+                  placeholder="Enter device nameÃ¢â‚¬Â¦"
                   onChange={e => setNameEditValue(e.target.value)}
                   onKeyDown={e => {
                     if (e.key === 'Enter') {
@@ -3401,14 +3401,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.25)',
                 borderRadius: '8px', padding: '6px 10px', whiteSpace: 'nowrap'
               }}>
-                <span>âš </span>
-                <span>{apiError ? 'Server offline' : 'Connection failed â€” power cycle the sign and retry'}</span>
+                  <span>⚠</span>
+                  <span>{apiError ? 'Server offline' : 'Connection failed — power cycle the sign and retry'}</span>
               </div>
             )}
           </div>
         )}
 
-        {/* Scan popup â€” floats above, doesn't push layout */}
+        {/* Scan popup Ã¢â‚¬â€ floats above, doesn't push layout */}
         <AnimatePresence>
           {scanOpen && (
             <>
@@ -3695,10 +3695,10 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         {isReserved ? (
                           <>
                             <div style={{ fontSize: 22, marginBottom: 4, display: 'flex', justifyContent: 'center' }}>
-                              {isReservedCalendar ? 'ðŸ“…' : <Star size={22} fill="#facc15" color="#facc15" />}
+                              {isReservedCalendar ? 'Ã°Å¸â€œâ€¦' : <Star size={22} fill="#facc15" color="#facc15" />}
                             </div>
                             <p style={{ fontSize: '10px', fontWeight: 900, color: reservedColor, textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                              {isReservedCalendar ? 'ðŸ“… Calendar' : (
+                              {isReservedCalendar ? 'Ã°Å¸â€œâ€¦ Calendar' : (
                                 <>
                                   <Star size={10} fill="#facc15" color="#facc15" /> Default
                                 </>
@@ -3775,7 +3775,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         >
                           {isReservedCalendar ? (
                             <>
-                              <span>ðŸ“…</span> Calendar
+                              <span>Ã°Å¸â€œâ€¦</span> Calendar
                             </>
                           ) : (
                             <>
@@ -3835,8 +3835,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 >
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px', flexWrap: 'nowrap' }}>
                     <h3 style={{ fontSize: '20px', fontWeight: 900, margin: 0, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {assigningSlotIndex === 0 ? 'ðŸ“… Calendar Slot (Reserved)' :
-                       assigningSlotIndex === 1 ? 'â­ Default Slot (Reserved)' :
+                      {assigningSlotIndex === 0 ? 'Ã°Å¸â€œâ€¦ Calendar Slot (Reserved)' :
+                       assigningSlotIndex === 1 ? 'Ã¢Â­Â Default Slot (Reserved)' :
                        `Assign Local Preset to Slot ${savedPresets[assigningSlotIndex]?.slotNumber}`}
                     </h3>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0, flexWrap: 'nowrap' }}>
@@ -3936,7 +3936,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   );
 }
 
-/* â”€â”€â”€ Calendar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Calendar Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
 function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName }) {
   const [calError, setCalError] = useState('');
 
@@ -4417,7 +4417,7 @@ function HslColorSlider({ label, value, onChange }) {
   );
 }
 
-/* â”€â”€â”€ Media â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Media Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ */
 function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, savedPresets, setSavedPresets, syncHardwareSlots, setLastPushedId, presetView, setPresetView }) {
   const fontReady = useFontReady();
   const [draggedId, setDraggedId] = useState(null);
@@ -5421,7 +5421,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       } catch (err) {
         console.error('Failed to trigger default hardware preset:', err);
         if (err.response?.status === 404) {
-          // Hardware slot not yet saved for this sign â€” fall back to pushing local preset data directly
+          // Hardware slot not yet saved for this sign Ã¢â‚¬â€ fall back to pushing local preset data directly
           console.log('[pushPreset] Hardware slot not found, falling back to local push');
           try {
             await onPush(p, true);
