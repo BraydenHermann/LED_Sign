@@ -214,8 +214,8 @@ async def calendar_background_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    global _calendar_bg_task
-    _calendar_bg_task = 
+    print("LED Sign Server running!")
+
 protocol = LOYWebProtocol()
 calendar_service = CalendarService()
 
@@ -3220,6 +3220,8 @@ if __name__ == "__main__":
     import uvicorn
     host = os.getenv("LED_SIGN_HOST", "127.0.0.1")
     uvicorn.run(app, host=host, port=8000)
+
+
 
 
 
