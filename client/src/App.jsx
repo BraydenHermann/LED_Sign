@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
+﻿import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { savePresetToSign, processVideoMedia } from './serverApi';
@@ -82,7 +82,7 @@ async function getSavedPresetsFromDB() {
   });
 }
 
-// Stable preview URL — only regenerated when fetchStatus sees a new image
+// Stable preview URL â€” only regenerated when fetchStatus sees a new image
 let _lastFrames = -1;
 
 function formatMac(raw) {
@@ -171,16 +171,16 @@ function selectCalendarEvent(events, atTime) {
 }
 
 // Strip diacritics/accents and unsupported characters so hardware-limited signs and previews receive pure clean ASCII
-// e.g. "Sébastien" → "Sebastien", "naïve" → "naive", "œ" → "oe", "—" → "-"
+// e.g. "SÃ©bastien" â†’ "Sebastien", "naÃ¯ve" â†’ "naive", "Å“" â†’ "oe", "â€”" â†’ "-"
 function normalizeForSign(str) {
   if (!str) return str;
   return str
-    .replace(/[œŒ]/g, m => m === 'œ' ? 'oe' : 'OE')
-    .replace(/[æÆ]/g, m => m === 'æ' ? 'ae' : 'AE')
-    .replace(/[‘’]/g, "'")
-    .replace(/[“”«»]/g, '"')
-    .replace(/[–—]/g, '-')
-    .replace(/…/g, '...')
+    .replace(/[Å“Å’]/g, m => m === 'Å“' ? 'oe' : 'OE')
+    .replace(/[Ã¦Ã†]/g, m => m === 'Ã¦' ? 'ae' : 'AE')
+    .replace(/[â€˜â€™]/g, "'")
+    .replace(/[â€œâ€Â«Â»]/g, '"')
+    .replace(/[â€“â€”]/g, '-')
+    .replace(/â€¦/g, '...')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 }
@@ -210,7 +210,7 @@ function getEventDisplayString(ev) {
       // Otherwise, do not include it
       signText = withShort;
     } else {
-      // Need to truncate title — do not include am/pm to save characters
+      // Need to truncate title â€” do not include am/pm to save characters
       const suffix = `... ${shortEndTimeStr}`;
       const maxTitleLen = maxLen - suffix.length;
       const truncTitle = summary.slice(0, Math.max(0, maxTitleLen)).trimEnd();
@@ -657,7 +657,7 @@ const PresetCardMedia = ({ preset, now }) => {
   if (preset.mode === 'text') {
     return <TextPresetCardPreview preset={preset} />;
   }
-  // Saved media has the exact 64×20 frames sent to the sign. Prefer those for
+  // Saved media has the exact 64Ã—20 frames sent to the sign. Prefer those for
   // every card type so local, saved, and live previews have identical color,
   // crop, and animation timing.
   if (preset.pixels && preset.pixels.length > 1280) {
@@ -1517,7 +1517,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [status, setStatus] = useState({
     connected: false, address: null, preview_url: null,
-    calendar_connected: false, uptime: '—', frames: 0
+    calendar_connected: false, uptime: 'â€”', frames: 0
   });
   const [brightness, setBrightness] = useState(15);
   const [speed, setSpeed] = useState(8);
@@ -1664,7 +1664,7 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Dedicated Auto-Connect Effect — only reconnect to the most recently connected sign
+  // Dedicated Auto-Connect Effect â€” only reconnect to the most recently connected sign
   useEffect(() => {
     const lastConnected = localStorage.getItem('loy_last_connected_mac');
     if (hasFetchedStatus && !status.connected && lastConnected && !autoConnectTried.current && !isConnecting && !apiError) {
@@ -2135,7 +2135,7 @@ export default function App() {
               }
 
               if (s.occupied) {
-                // The sign is write-only — hardware slot state cannot be reliably read back.
+                // The sign is write-only â€” hardware slot state cannot be reliably read back.
                 // Only show a preset card if we have locally cached data (preset_data / preview_url).
                 const pData = s.preset_data;
                 const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
@@ -2171,7 +2171,7 @@ export default function App() {
                   currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], hwSlotId: idx, preset: hwPreset };
                 }
               } else if (idx >= 2 && currentList[targetSlotIndex]?.preset) {
-                // Slot no longer occupied on hardware — clear card
+                // Slot no longer occupied on hardware â€” clear card
                 updated = true;
                 currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], preset: null };
               }
@@ -2233,7 +2233,7 @@ export default function App() {
         targetContent = { type: 'event', data: currentEvent, summary: getEventDisplayString(currentEvent) };
         targetId = `event-${currentEvent.id}-${targetContent.summary}`;
       } else {
-        // No active or upcoming event — target hardware slot 1 (the reserved default slot)
+        // No active or upcoming event â€” target hardware slot 1 (the reserved default slot)
         targetContent = { type: 'hw-default' };
         targetId = 'hw-slot-1';
       }
@@ -2313,7 +2313,7 @@ export default function App() {
               console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
             });
           } else {
-            // Play hardware slot 1 — the reserved default
+            // Play hardware slot 1 â€” the reserved default
             console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
             setLastPushedId('hw-slot-1');
             axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => {
@@ -2373,7 +2373,7 @@ export default function App() {
           }
         }
 
-        // 2. Calendar Slot (hardware slot 0, slot 1 in UI)
+                // 2. Calendar Slot (hardware slot 0, slot 1 in UI)
         let evs = [];
         try {
           evs = await fetchEvents();
@@ -2382,10 +2382,18 @@ export default function App() {
         const activeEvents = (evs || []).filter(ev => isEventInWindow(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined');
         const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
 
-        if (active) {
+        const savedLastPushedId = localStorage.getItem('loy_last_pushed_id_' + targetMac);
+        const isManualResume = savedLastPushedId && savedLastPushedId !== 'hw-slot-1';
+
+        if (isManualResume) {
+          console.log('[connect] Resuming previously pushed preset: ' + savedLastPushedId);
+          setLastPushedId(savedLastPushedId);
+          // If we are resuming a manual preset, we intentionally skip auto-pushing the active calendar event
+          // and skip pushing the default slot, so the sign continues playing what it was playing.
+        } else if (active) {
           const activeStr = getEventDisplayString(active);
           console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
-          await handlePush(activeStr, false, true, `event-${active.id}-${activeStr}`);
+          await handlePush(activeStr, false, true, \event-\-\\);
           localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         } else {
           // If no active event right now: check if this sign has had its calendar preset initialized on hardware
@@ -2413,7 +2421,7 @@ export default function App() {
                   preset: prevCal
                 });
                 const calThumb = resCal.data?.preview_url
-                  ? `${API_BASE}${resCal.data.preview_url}?t=${Date.now()}`
+                  ? \\\?t=\\
                   : prevCal.thumbnail;
                 setAllSavedPresets(prev => {
                   const curList = normalizeSavedPresets(prev[targetMac]);
@@ -2431,18 +2439,12 @@ export default function App() {
             }
           }
 
-          const savedLastPushedId = localStorage.getItem(`loy_last_pushed_id_${targetMac}`);
-          if (savedLastPushedId && savedLastPushedId !== 'hw-slot-1' && savedLastPushedId !== 'hw-slot-0') {
-            console.log(`[connect] Resuming previously pushed preset: ${savedLastPushedId}`);
-            setLastPushedId(savedLastPushedId);
-          } else {
-            console.log("[connect] Playing hardware default slot (slot 1)");
-            setLastPushedId('hw-slot-1');
-            try {
-              await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
-            } catch (e) {
-              console.warn("[connect] No default saved to slot 1 yet:", e);
-            }
+          console.log("[connect] Playing hardware default slot (slot 1)");
+          setLastPushedId('hw-slot-1');
+          try {
+            await axios.post(\\/preset?id=1&mac=\\);
+          } catch (e) {
+            console.warn("[connect] No default saved to slot 1 yet:", e);
           }
         }
 
@@ -2544,7 +2546,7 @@ export default function App() {
           setLastPushedId('hw-slot-1');
         } catch (defErr) {
           if (defErr.response?.status === 404) {
-            // Hardware slot not saved yet for this sign — push the local preset data directly
+            // Hardware slot not saved yet for this sign â€” push the local preset data directly
             console.log('[handlePush] Default HW slot not found, pushing local preset data directly');
             const fallbackData = { ...data };
             if (fallbackData.mode === 'text') delete fallbackData.pixels;
@@ -2749,7 +2751,7 @@ function NavButton({ icon, label, active, onClick }) {
   );
 }
 
-/* ─── Dashboard ─────────────────────────────────────────────────────── */
+/* â”€â”€â”€ Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus, presetView, setPresetView }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -2877,11 +2879,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     if (status.connected && status.address) {
       const pending = pendingConnectRef.current;
       if (pending && pending.addr.toLowerCase() === status.address.toLowerCase()) {
-        // Connection succeeded — now it's safe to record
+        // Connection succeeded â€” now it's safe to record
         addRecent(pending.addr, pending.name);
         pendingConnectRef.current = null;
       } else {
-        // App restarted / reconnected automatically — update existing entry only
+        // App restarted / reconnected automatically â€” update existing entry only
         addRecent(status.address);
       }
     }
@@ -2908,7 +2910,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       return;
     }
 
-    // Slots 0 and 1 are reserved (Calendar and Default) — block manual assignment
+    // Slots 0 and 1 are reserved (Calendar and Default) â€” block manual assignment
     if (globalIdx === 0 || globalIdx === 1) {
       setPushMessage(`Slot ${globalIdx + 1} is reserved and cannot be manually assigned.`);
       return;
@@ -2948,7 +2950,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       } catch (err) {
         console.warn('Failed to push clock on assign:', err);
         const detail = err.response?.data?.detail || err.message || '';
-        setPushMessage(`Error: Failed to assign Clock to Slot ${globalIdx + 1}${detail ? ` — ${detail}` : ''}`);
+        setPushMessage(`Error: Failed to assign Clock to Slot ${globalIdx + 1}${detail ? ` â€” ${detail}` : ''}`);
       }
       return;
     }
@@ -3242,7 +3244,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   return (
     <div className="flex flex-col items-center">
       <div className="dashboard-hero">
-        {/* Power btn — top aligned */}
+        {/* Power btn â€” top aligned */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
           <div onClick={togglePower} className={`power-btn ${power ? 'on' : 'off'} ${!status.connected ? 'disabled' : ''}`} title={power ? 'Turn Off' : 'Turn On'}>
             <Power size={26} />
@@ -3325,7 +3327,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   className="input-field"
                   style={{ height: '36px', width: '180px', fontSize: 13 }}
                   value={nameEditValue}
-                  placeholder="Enter device name…"
+                  placeholder="Enter device nameâ€¦"
                   onChange={e => setNameEditValue(e.target.value)}
                   onKeyDown={e => {
                     if (e.key === 'Enter') {
@@ -3399,14 +3401,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 background: 'rgba(239,68,68,0.10)', border: '1px solid rgba(239,68,68,0.25)',
                 borderRadius: '8px', padding: '6px 10px', whiteSpace: 'nowrap'
               }}>
-                <span>⚠</span>
-                <span>{apiError ? 'Server offline' : 'Connection failed — power cycle the sign and retry'}</span>
+                <span>âš </span>
+                <span>{apiError ? 'Server offline' : 'Connection failed â€” power cycle the sign and retry'}</span>
               </div>
             )}
           </div>
         )}
 
-        {/* Scan popup — floats above, doesn't push layout */}
+        {/* Scan popup â€” floats above, doesn't push layout */}
         <AnimatePresence>
           {scanOpen && (
             <>
@@ -3693,10 +3695,10 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         {isReserved ? (
                           <>
                             <div style={{ fontSize: 22, marginBottom: 4, display: 'flex', justifyContent: 'center' }}>
-                              {isReservedCalendar ? '📅' : <Star size={22} fill="#facc15" color="#facc15" />}
+                              {isReservedCalendar ? 'ðŸ“…' : <Star size={22} fill="#facc15" color="#facc15" />}
                             </div>
                             <p style={{ fontSize: '10px', fontWeight: 900, color: reservedColor, textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                              {isReservedCalendar ? '📅 Calendar' : (
+                              {isReservedCalendar ? 'ðŸ“… Calendar' : (
                                 <>
                                   <Star size={10} fill="#facc15" color="#facc15" /> Default
                                 </>
@@ -3773,7 +3775,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         >
                           {isReservedCalendar ? (
                             <>
-                              <span>📅</span> Calendar
+                              <span>ðŸ“…</span> Calendar
                             </>
                           ) : (
                             <>
@@ -3833,8 +3835,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 >
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px', flexWrap: 'nowrap' }}>
                     <h3 style={{ fontSize: '20px', fontWeight: 900, margin: 0, flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {assigningSlotIndex === 0 ? '📅 Calendar Slot (Reserved)' :
-                       assigningSlotIndex === 1 ? '⭐ Default Slot (Reserved)' :
+                      {assigningSlotIndex === 0 ? 'ðŸ“… Calendar Slot (Reserved)' :
+                       assigningSlotIndex === 1 ? 'â­ Default Slot (Reserved)' :
                        `Assign Local Preset to Slot ${savedPresets[assigningSlotIndex]?.slotNumber}`}
                     </h3>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0, flexWrap: 'nowrap' }}>
@@ -3934,7 +3936,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   );
 }
 
-/* ─── Calendar ───────────────────────────────────────────────────────── */
+/* â”€â”€â”€ Calendar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName }) {
   const [calError, setCalError] = useState('');
 
@@ -4415,7 +4417,7 @@ function HslColorSlider({ label, value, onChange }) {
   );
 }
 
-/* ─── Media ──────────────────────────────────────────────────────────── */
+/* â”€â”€â”€ Media â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, savedPresets, setSavedPresets, syncHardwareSlots, setLastPushedId, presetView, setPresetView }) {
   const fontReady = useFontReady();
   const [draggedId, setDraggedId] = useState(null);
@@ -5419,7 +5421,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       } catch (err) {
         console.error('Failed to trigger default hardware preset:', err);
         if (err.response?.status === 404) {
-          // Hardware slot not yet saved for this sign — fall back to pushing local preset data directly
+          // Hardware slot not yet saved for this sign â€” fall back to pushing local preset data directly
           console.log('[pushPreset] Hardware slot not found, falling back to local push');
           try {
             await onPush(p, true);
@@ -6607,3 +6609,5 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     </div>
   );
 }
+
+
