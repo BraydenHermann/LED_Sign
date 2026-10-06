@@ -3001,6 +3001,25 @@ async def _save_preset(req: SavePresetRequest):
         report_progress(35, "Encoding animation")
         gif_bytes = await asyncio.to_thread(encode_gif)
         report_progress(60, "Writing to sign")
+        
+        # Update live dashboard preview files immediately so the UI reflects what's being uploaded
+        current_gif = os.path.join(STATIC_DIR, "current.gif")
+        current_png = os.path.join(STATIC_DIR, "current.png")
+        if is_anim:
+            save_preview_bytes(gif_bytes, current_gif)
+            if os.path.exists(current_png):
+                try: os.remove(current_png)
+                except Exception: pass
+        else:
+            if pil_frames:
+                try:
+                    im = pil_frames[0].copy()
+                    im.thumbnail((PANEL_W, PANEL_H))
+                    im.convert("RGB").save(current_png)
+                except Exception: pass
+            if os.path.exists(current_gif):
+                try: os.remove(current_gif)
+                except Exception: pass
 
         if not connected_client or not connected_client.is_connected or not connection_ready:
             raise RuntimeError("Sign disconnected before the slot transfer")
@@ -3149,28 +3168,6 @@ async def _save_preset(req: SavePresetRequest):
         preset_gif_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.gif")
         save_preview_bytes(_json.dumps(preset.model_dump()).encode("utf-8"), preset_json_path)
         save_preview_bytes(gif_bytes, preset_gif_path)
-
-        # Update live dashboard preview files
-        current_gif = os.path.join(STATIC_DIR, "current.gif")
-        current_png = os.path.join(STATIC_DIR, "current.png")
-        if is_anim:
-            if os.path.exists(preset_gif_path):
-                save_preview_bytes(gif_bytes, current_gif)
-            if os.path.exists(current_png):
-                try: os.remove(current_png)
-                except Exception: pass
-        else:
-            if pil_frames:
-                pil_frames[0].convert("RGB").save(current_png)
-            elif os.path.exists(preset_gif_path):
-                try:
-                    im = Image.open(preset_gif_path)
-                    im.seek(0)
-                    im.convert("RGB").save(current_png)
-                except Exception: pass
-            if os.path.exists(current_gif):
-                try: os.remove(current_gif)
-                except Exception: pass
 
         # Increment frames sent to signal status updates
         current_display_mode = f"preset-{slot_id}"

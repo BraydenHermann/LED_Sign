@@ -1753,6 +1753,12 @@ export default function App() {
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [lastPushedId, setLastPushedId] = useState(null);
+
+  useEffect(() => {
+    if (lastPushedId && status?.address) {
+      localStorage.setItem(`loy_last_pushed_id_${status.address}`, lastPushedId);
+    }
+  }, [lastPushedId, status?.address]);
   const [isManualOverride, setIsManualOverrideState] = useState(false);
   const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
@@ -2425,13 +2431,18 @@ export default function App() {
             }
           }
 
-          // Play hardware slot 1 (0-indexed) — the reserved default slot
-          console.log("[connect] Playing hardware default slot (slot 1)");
-          setLastPushedId('hw-slot-1');
-          try {
-            await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
-          } catch (e) {
-            console.warn("[connect] No default saved to slot 1 yet:", e);
+          const savedLastPushedId = localStorage.getItem(`loy_last_pushed_id_${targetMac}`);
+          if (savedLastPushedId && savedLastPushedId !== 'hw-slot-1' && savedLastPushedId !== 'hw-slot-0') {
+            console.log(`[connect] Resuming previously pushed preset: ${savedLastPushedId}`);
+            setLastPushedId(savedLastPushedId);
+          } else {
+            console.log("[connect] Playing hardware default slot (slot 1)");
+            setLastPushedId('hw-slot-1');
+            try {
+              await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
+            } catch (e) {
+              console.warn("[connect] No default saved to slot 1 yet:", e);
+            }
           }
         }
 
