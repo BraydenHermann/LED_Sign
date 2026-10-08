@@ -359,6 +359,24 @@ img.scrolling-preview {
   pointer-events: auto;
 }
 
+.preview-push-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  backface-visibility: hidden;
+  z-index: 20;
+  border-radius: inherit;
+  color: #ffffff;
+}
+
 .preset-card-edit-btn {
   padding: 8px 16px !important;
   font-size: 12px !important;

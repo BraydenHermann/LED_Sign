@@ -1542,12 +1542,18 @@ export default function App() {
   const [pushMessage, setPushMessage] = useState('');
   const [localPushMessage, setLocalPushMessage] = useState('');
   const [pushing, setPushingState] = useState(false);
+  const [pushingPresetTarget, setPushingPresetTarget] = useState(null);
   const [presetView, setPresetView] = useState('local');
   const pushingRef = useRef(false);
 
-  const setPushing = (value) => {
+  const setPushing = (value, target = null) => {
     pushingRef.current = value;
     setPushingState(value);
+    if (!value) {
+      setPushingPresetTarget(null);
+    } else if (target) {
+      setPushingPresetTarget(target);
+    }
   };
 
   useEffect(() => {
@@ -2470,6 +2476,7 @@ export default function App() {
 
   const handlePush = async (payload, manual = false, skipMessages = false, autoTargetId = null) => {
     if (pushingRef.current && !skipMessages) return;
+    pushingRef.current = true;
     if (manual) setIsManualOverride(true);
     setPushing(true);
     
@@ -2497,6 +2504,11 @@ export default function App() {
     } else {
       pushName = payload.name;
       data = { ...payload };
+      setPushingPresetTarget({
+        type: 'local',
+        id: data.id,
+        isDefault: Boolean(data.isDefault)
+      });
       if (data.id) {
         setLastPushedId(data.id);
       } else {
@@ -2634,7 +2646,9 @@ export default function App() {
       }
       throw e;
     } finally {
+      pushingRef.current = false;
       setPushing(false);
+      setPushingPresetTarget(null);
     }
   };
 
@@ -2693,6 +2707,9 @@ export default function App() {
               setPushMessage={handleSetPushMessage}
               pushing={pushing}
               setPushing={setPushing}
+              pushingRef={pushingRef}
+              pushingPresetTarget={pushingPresetTarget}
+              setPushingPresetTarget={setPushingPresetTarget}
               scanOpen={scanOpen}
               setScanOpen={setScanOpen}
               syncHardwareSlots={syncHardwareSlots}
@@ -2716,6 +2733,9 @@ export default function App() {
             setUnifiedPushMessage={setUnifiedPushMessage}
             pushing={pushing}
             setPushing={setPushing}
+            pushingRef={pushingRef}
+            pushingPresetTarget={pushingPresetTarget}
+            setPushingPresetTarget={setPushingPresetTarget}
             savedPresets={savedPresets}
             setSavedPresets={setSavedPresets}
             syncHardwareSlots={syncHardwareSlots}
@@ -2752,7 +2772,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus, presetView, setPresetView }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus, presetView, setPresetView }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -2903,7 +2923,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const totalSavedPages = Math.ceil((savedPresets || []).length / slotsPerPage);
 
   const assignPresetToSlot = async (globalIdx, preset) => {
-    if (pushing) return;
+    if (pushingRef?.current || pushing) return;
+    if (pushingRef) pushingRef.current = true;
     console.log('[assignPresetToSlot] Called with globalIdx:', globalIdx, 'preset:', preset);
     if (!preset) {
       console.warn('[assignPresetToSlot] No preset provided');
@@ -2938,6 +2959,16 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           hwSlotId: hwSlotId
         }
       };
+      if (typeof setPushingPresetTarget === 'function') {
+        setPushingPresetTarget({
+          type: 'saved',
+          globalIdx,
+          hwSlotId,
+          id: preset.id || `saved-clock-${globalIdx}`,
+          isDefault: false
+        });
+      }
+      setPushing(true);
       try {
         if (typeof onPush === 'function') {
           await onPush(preset, true, true);
@@ -2951,6 +2982,10 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         console.warn('Failed to push clock on assign:', err);
         const detail = err.response?.data?.detail || err.message || '';
         setPushMessage(`Error: Failed to assign Clock to Slot ${globalIdx + 1}${detail ? ` — ${detail}` : ''}`);
+      } finally {
+        if (pushingRef) pushingRef.current = false;
+        setPushing(false);
+        if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
       }
       return;
     }
@@ -2961,6 +2996,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
 
     if (globalIdx >= 12) {
+      if (typeof setPushingPresetTarget === 'function') {
+        setPushingPresetTarget({
+          type: 'saved',
+          globalIdx,
+          id: presetCopy.id || `saved-${Date.now()}-${globalIdx}`,
+          isDefault: false
+        });
+      }
       setPushing(true);
       setPushMessage(`Saving to App Slot ${globalIdx + 1}...`);
       
@@ -2986,11 +3029,26 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       } catch (err) {
         setPushMessage(`Assigned to App Slot ${globalIdx + 1}, but failed to preview on sign.`);
       } finally {
+        if (pushingRef) pushingRef.current = false;
         setPushing(false);
+        if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
       }
       return;
     }
 
+    const slotObjForPush = savedPresets[globalIdx];
+    const hwSlotIdForPush = slotObjForPush?.hwSlotId !== undefined 
+      ? slotObjForPush.hwSlotId 
+      : (slotObjForPush?.slotNumber ? slotObjForPush.slotNumber - 1 : globalIdx);
+    if (typeof setPushingPresetTarget === 'function') {
+      setPushingPresetTarget({
+        type: 'saved',
+        globalIdx,
+        hwSlotId: hwSlotIdForPush,
+        id: presetCopy.id,
+        isDefault: Boolean(globalIdx === 1 || hwSlotIdForPush === 1 || presetCopy.isDefault)
+      });
+    }
     setPushing(true);
     setIsManualOverride(true);
     setPushMessage(`Saving to slot ${globalIdx + 1}...`);
@@ -3073,15 +3131,26 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       window.clearInterval(progressPoll);
       setSlotSaveProgress(null);
       setSlotSavePhase('');
+      if (pushingRef) pushingRef.current = false;
       setPushing(false);
+      if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
     }
   };
 
   const playSavedPreset = async (globalIdx, preset) => {
-    if (pushing) return;
+    if (pushingRef?.current || pushing) return;
     if (!preset) return; // Do nothing when clicking empty slots!
+    if (pushingRef) pushingRef.current = true;
 
     if (preset.mode === 'clock' || preset.id === 'clock-default') {
+      if (typeof setPushingPresetTarget === 'function') {
+        setPushingPresetTarget({
+          type: 'saved',
+          globalIdx,
+          id: preset.id || `saved-clock-${globalIdx}`,
+          isDefault: false
+        });
+      }
       setPushing(true);
       setPushMessage(`Pushing Clock to sign...`);
       setIsManualOverride(true);
@@ -3093,7 +3162,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         console.error('Failed to trigger clock play:', err);
         setPushMessage(`Error: ${err.message}`);
       } finally {
+        if (pushingRef) pushingRef.current = false;
         setPushing(false);
+        if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
       }
       return;
     }
@@ -3107,6 +3178,15 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           ? parseInt(preset.id.split('-')[2], 10) 
           : globalIdx));
 
+    if (typeof setPushingPresetTarget === 'function') {
+      setPushingPresetTarget({
+        type: 'saved',
+        globalIdx,
+        hwSlotId,
+        id: preset.id || `hw-slot-${hwSlotId}`,
+        isDefault: Boolean(globalIdx === 1 || hwSlotId === 1 || preset.isDefault)
+      });
+    }
     setPushing(true);
     setPushMessage(preset.name ? `Pushing "${preset.name}" to sign...` : `Pushing slot ${globalIdx + 1} to sign...`);
     setIsManualOverride(true);
@@ -3129,7 +3209,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
       setPushMessage(`Error: ${detail || err.message}`);
     } finally {
+      if (pushingRef) pushingRef.current = false;
       setPushing(false);
+      if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
     }
   };
 
@@ -3171,16 +3253,21 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   };
 
   const pushPreset = async (p) => {
+    if (pushingRef?.current || pushing) return;
+    if (pushingRef) pushingRef.current = true;
     try {
       await onPush(p, true, true);
     } catch (err) {
       console.error('[push] Failed:', err);
       throw err;
+    } finally {
+      if (pushingRef) pushingRef.current = false;
     }
   };
 
   const dragStartPos = useRef({ x: 0, y: 0, time: 0 });
   const handlePointerDown = (e) => {
+    if (pushingRef?.current || pushing) return;
     dragStartPos.current = { 
       x: e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0] ? e.touches[0].clientX : 0), 
       y: e.clientY !== undefined ? e.clientY : (e.touches && e.touches[0] ? e.touches[0].clientY : 0), 
@@ -3188,6 +3275,10 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     };
   };
   const handlePointerUp = (e, callback) => {
+    if (pushingRef?.current || pushing) {
+      dragStartPos.current = null;
+      return;
+    }
     if (!dragStartPos.current) {
       callback();
       return;
@@ -3250,12 +3341,13 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             <Power size={26} />
           </div>
           <div onClick={() => {
+            if (pushingRef?.current || pushing) return;
             const defPreset = (presets || []).find(p => p.isDefault);
             if (defPreset && status?.connected) {
               setIsManualOverride(true);
               pushPreset(defPreset);
             }
-          }} className={`power-btn off ${!status.connected ? 'disabled' : ''}`} style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#f8fafc', opacity: status.connected ? 1 : 0.2, pointerEvents: status.connected ? 'auto' : 'none' }} title="Trigger Default Preset" onMouseOver={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)'; e.currentTarget.style.transform = 'scale(1.05)'; }} onMouseOut={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.transform = 'none'; }}>
+          }} className={`power-btn off ${(!status.connected || pushing) ? 'disabled' : ''}`} style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#f8fafc', opacity: (status.connected && !pushing) ? 1 : 0.2, pointerEvents: (status.connected && !pushing) ? 'auto' : 'none' }} title="Trigger Default Preset" onMouseOver={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)'; e.currentTarget.style.transform = 'scale(1.05)'; }} onMouseOut={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.transform = 'none'; }}>
             <img src="https://static.thenounproject.com/png/5507757-200.png" alt="Default" width="34" height="34" style={{ filter: 'invert(100%)', opacity: status.connected ? 0.9 : 0.4 }} />
           </div>
         </div>
@@ -3294,6 +3386,27 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             ) : (
               <div style={{width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '12px'}}>
                 Disconnected
+              </div>
+            )}
+
+            {Boolean(pushing && pushingPresetTarget) && (
+              <div
+                className="preview-push-overlay"
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'rgba(0, 0, 0, 0.4)',
+                  backdropFilter: 'blur(2px)',
+                  WebkitBackdropFilter: 'blur(2px)',
+                  zIndex: 20,
+                  pointerEvents: 'none',
+                  borderRadius: 'inherit'
+                }}
+              >
+                <RefreshCw size={28} className="animate-spin text-white" aria-label="Pushing to sign" style={{ color: '#ffffff' }} />
               </div>
             )}
           </div>
@@ -3689,7 +3802,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         style={{
                           border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : (isReserved ? `1px solid ${reservedColor}22` : undefined),
                           boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : undefined,
-                          opacity: isReserved ? 0.7 : 1,
+                          opacity: pushing ? (isReserved ? 0.4 : 0.3) : (isReserved ? 0.7 : 1),
+                          cursor: pushing ? 'not-allowed' : 'pointer',
+                          pointerEvents: pushing ? 'none' : undefined,
                         }}
                       >
                         {isReserved ? (
@@ -3717,20 +3832,42 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                           </>
                         )}
                         {!isReserved && (
-                          <div className="preset-card-overlay flex gap-2">
-                            <button
-                              onPointerDown={(e) => e.stopPropagation()}
-                              onPointerUp={(e) => e.stopPropagation()}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setAssigningSlotIndex(globalIdx);
+                          (pushing && pushingPresetTarget && pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) ? (
+                            <div
+                              className="preview-push-overlay"
+                              style={{
+                                position: 'absolute',
+                                inset: 0,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                background: 'rgba(0, 0, 0, 0.4)',
+                                backdropFilter: 'blur(2px)',
+                                WebkitBackdropFilter: 'blur(2px)',
+                                zIndex: 20,
+                                pointerEvents: 'auto',
+                                cursor: 'wait',
+                                borderRadius: 'inherit'
                               }}
-                              className="btn-styled preset-card-edit-btn"
-                              title="Assign Preset"
                             >
-                              <Plus size={14} className="mr-2" /> Assign
-                            </button>
-                          </div>
+                              <RefreshCw size={24} className="animate-spin text-white" aria-label="Pushing to sign" style={{ color: '#ffffff' }} />
+                            </div>
+                          ) : (
+                            <div className="preset-card-overlay flex gap-2">
+                              <button
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onPointerUp={(e) => e.stopPropagation()}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setAssigningSlotIndex(globalIdx);
+                                }}
+                                className="btn-styled preset-card-edit-btn"
+                                title="Assign Preset"
+                              >
+                                <Plus size={14} className="mr-2" /> Assign
+                              </button>
+                            </div>
+                          )
                         )}
                       </div>
                     );
@@ -3756,11 +3893,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                       onDragLeave={!isReserved ? () => setSavedDragOverIdx(null) : undefined}
                       onDrop={!isReserved ? (e) => handleDropOnSlot(e, globalIdx) : undefined}
                       style={{
-                        cursor: isReserved ? 'pointer' : 'grab',
-                        opacity: globalIdx === savedDraggedIdx ? 0.4 : 1,
+                        cursor: pushing ? (isReserved ? 'not-allowed' : 'not-allowed') : (isReserved ? 'pointer' : 'grab'),
+                        opacity: globalIdx === savedDraggedIdx ? 0.4 : (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) || (isReservedDefault && pushingPresetTarget.isDefault))) ? 0.6 : 1),
                         transform: globalIdx === savedDraggedIdx ? 'scale(0.98)' : 'none',
                         border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : (isReserved ? `1px solid ${reservedColor}44` : undefined),
                         boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : (isReserved ? `0 0 12px ${reservedColor}22` : undefined),
+                        pointerEvents: (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) || (isReservedDefault && pushingPresetTarget.isDefault)))) ? 'none' : undefined,
                         userSelect: 'none'
                       }}
                     >
@@ -3787,29 +3925,54 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                       )}
                       <PresetCardMedia preset={p} now={now} />
 
-                      <div 
-                        className="preset-card-overlay flex gap-2" 
-                        onPointerDown={handlePointerDown}
-                        onPointerUp={(e) => {
-                          e.stopPropagation();
-                          handlePointerUp(e, () => playSavedPreset(globalIdx, p));
-                        }}
-                      >
-                        {!isReserved && (
-                          <button
-                            onPointerDown={(e) => e.stopPropagation()}
-                            onPointerUp={(e) => e.stopPropagation()}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setAssigningSlotIndex(globalIdx);
-                            }}
-                            className="btn-styled preset-card-edit-btn"
-                            title="Update Preset"
-                          >
-                            <RefreshCw size={14} className="mr-2" /> Update
-                          </button>
-                        )}
-                      </div>
+                      {(pushing && pushingPresetTarget && (
+                        (pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) ||
+                        (isReservedDefault && pushingPresetTarget.isDefault)
+                      )) ? (
+                        <div
+                          className="preview-push-overlay"
+                          style={{
+                            position: 'absolute',
+                            inset: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: 'rgba(0, 0, 0, 0.4)',
+                            backdropFilter: 'blur(2px)',
+                            WebkitBackdropFilter: 'blur(2px)',
+                            zIndex: 20,
+                            pointerEvents: 'auto',
+                            cursor: 'wait',
+                            borderRadius: 'inherit'
+                          }}
+                        >
+                          <RefreshCw size={24} className="animate-spin text-white" aria-label="Pushing to sign" style={{ color: '#ffffff' }} />
+                        </div>
+                      ) : (
+                        <div 
+                          className="preset-card-overlay flex gap-2" 
+                          onPointerDown={handlePointerDown}
+                          onPointerUp={(e) => {
+                            e.stopPropagation();
+                            handlePointerUp(e, () => playSavedPreset(globalIdx, p));
+                          }}
+                        >
+                          {!isReserved && (
+                            <button
+                              onPointerDown={(e) => e.stopPropagation()}
+                              onPointerUp={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setAssigningSlotIndex(globalIdx);
+                              }}
+                              className="btn-styled preset-card-edit-btn"
+                              title="Update Preset"
+                            >
+                              <RefreshCw size={14} className="mr-2" /> Update
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -4418,13 +4581,14 @@ function HslColorSlider({ label, value, onChange }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, savedPresets, setSavedPresets, syncHardwareSlots, setLastPushedId, presetView, setPresetView }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, setLastPushedId, presetView, setPresetView }) {
   const fontReady = useFontReady();
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
 
   const dragStartPos = useRef({ x: 0, y: 0, time: 0 });
   const handlePointerDown = (e) => {
+    if (pushingRef?.current || pushing) return;
     dragStartPos.current = { 
       x: e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0] ? e.touches[0].clientX : 0), 
       y: e.clientY !== undefined ? e.clientY : (e.touches && e.touches[0] ? e.touches[0].clientY : 0), 
@@ -4432,6 +4596,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     };
   };
   const handlePointerUp = (e, callback) => {
+    if (pushingRef?.current || pushing) {
+      dragStartPos.current = null;
+      return;
+    }
     if (!dragStartPos.current) {
       callback();
       return;
@@ -5391,14 +5559,33 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   const canPushLocalPresetDirectly = (preset) => {
     if (!preset) return false;
     if (preset.mode === 'clock' || preset.id === 'clock-default') return true;
-    if (preset.mode === 'drawing') return true;
-    if (preset.mode === 'image') {
-      return preset.fileType !== 'gif' && preset.fileType !== 'video';
+
+    // Multi-frame pixels (> 1280) indicates animation, which must be assigned to hardware
+    if (Array.isArray(preset.pixels) && preset.pixels.length > 1280) return false;
+
+    // Animated GIF or video must be assigned to hardware
+    if (preset.fileType === 'gif' || preset.fileType === 'video') return false;
+
+    // Animated text must be assigned to hardware; static / show now text is supported directly
+    if (preset.mode === 'text' || preset.text) {
+      const anim = (preset.animation || '').trim().toLowerCase();
+      return anim === 'show now' || anim === 'static' || anim === '';
     }
-    return preset.mode === 'text' && (preset.animation || '').trim().toLowerCase() === 'show now';
+
+    if (preset.mode === 'drawing') return true;
+    if (preset.mode === 'image') return true;
+
+    // Static pixel preset fallback
+    if (Array.isArray(preset.pixels) && preset.pixels.length <= 1280) return true;
+
+    // Static image source
+    if (preset.imgSrc && preset.fileType !== 'gif' && preset.fileType !== 'video') return true;
+
+    return false;
   };
 
   const pushPreset = async (p) => {
+    if (pushingRef?.current || pushing) return;
     if (!canPushLocalPresetDirectly(p)) {
       if (typeof setLocalPushMessage === 'function') {
         setLocalPushMessage('Please assign animated text, GIFs, and videos to a Saved Preset before pushing.');
@@ -5407,7 +5594,15 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
 
     if (p.isDefault && status?.connected) {
+      if (pushingRef) pushingRef.current = true;
       try {
+        if (typeof setPushingPresetTarget === 'function') {
+          setPushingPresetTarget({
+            type: 'local',
+            id: p.id,
+            isDefault: true
+          });
+        }
         if (typeof setPushing === 'function') setPushing(true);
         if (typeof setLocalPushMessage === 'function') {
           setLocalPushMessage(`Pushing "${p.name || 'Default'}" to sign...`);
@@ -5424,6 +5619,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           // Hardware slot not yet saved for this sign — fall back to pushing local preset data directly
           console.log('[pushPreset] Hardware slot not found, falling back to local push');
           try {
+            if (pushingRef) pushingRef.current = false;
             await onPush(p, true);
             if (onPushSuccess) onPushSuccess();
           } catch (e) {
@@ -5436,7 +5632,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           }
         }
       } finally {
+        if (pushingRef) pushingRef.current = false;
         if (typeof setPushing === 'function') setPushing(false);
+        if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
       }
       return;
     }
@@ -5490,14 +5688,15 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 onDrop={(e) => handleDrop(e, p.id)}
                 onDragEnd={handleDragEnd}
                 style={{
-                  cursor: p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'not-allowed'),
+                  cursor: pushing ? 'not-allowed' : (p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'not-allowed')),
                   // Keep media previews true to their saved-preset colors. The
                   // direct-push restriction is communicated by the cursor and
                   // tooltip, not by dimming the artwork itself.
-                  opacity: p.id === draggedId ? 0.4 : 1,
+                  opacity: p.id === draggedId ? 0.4 : (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'local' && pushingPresetTarget.id === p.id) || (p.isDefault && pushingPresetTarget.isDefault))) ? 0.6 : 1),
                   transform: p.id === draggedId ? 'scale(0.98)' : 'none',
                   border: p.id === dragOverId ? '2px dashed var(--accent-primary)' : (p.isDefault ? '1px solid #facc1544' : '1px solid var(--glass-border)'),
                   boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : (p.isDefault ? '0 0 12px #facc1522' : 'none'),
+                  pointerEvents: (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'local' && pushingPresetTarget.id === p.id) || (p.isDefault && pushingPresetTarget.isDefault)))) ? 'none' : undefined,
                   transition: 'all 0.15s ease',
                   userSelect: 'none'
                 }}
@@ -5518,17 +5717,42 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                   </div>
                 )}
                 <PresetCardMedia preset={p} now={now} />
-                <div className="preset-card-overlay flex gap-2">
-                  <button
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onPointerUp={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); startEdit(p, e); }}
-                    className="btn-styled preset-card-edit-btn"
-                    title="Edit Preset"
+                {(pushing && pushingPresetTarget && (
+                  (pushingPresetTarget.type === 'local' && pushingPresetTarget.id === p.id) ||
+                  (p.isDefault && pushingPresetTarget.isDefault)
+                )) ? (
+                  <div
+                    className="preview-push-overlay"
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      background: 'rgba(0, 0, 0, 0.4)',
+                      backdropFilter: 'blur(2px)',
+                      WebkitBackdropFilter: 'blur(2px)',
+                      zIndex: 20,
+                      pointerEvents: 'auto',
+                      cursor: 'wait',
+                      borderRadius: 'inherit'
+                    }}
                   >
-                    <Pencil size={14} className="mr-2" /> Edit
-                  </button>
-                </div>
+                    <RefreshCw size={24} className="animate-spin text-white" aria-label="Pushing to sign" style={{ color: '#ffffff' }} />
+                  </div>
+                ) : (
+                  <div className="preset-card-overlay flex gap-2">
+                    <button
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onPointerUp={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); startEdit(p, e); }}
+                      className="btn-styled preset-card-edit-btn"
+                      title="Edit Preset"
+                    >
+                      <Pencil size={14} className="mr-2" /> Edit
+                    </button>
+                  </div>
+                )}
               </div>
               );
             })}

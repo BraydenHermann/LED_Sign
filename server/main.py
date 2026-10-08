@@ -765,7 +765,7 @@ async def _connect_internal(req: ConnectRequest):
                     break
             except Exception as ce:
                 last_connect_error = ce
-                print(f"[connect] Attempt {attempt + 1} connection failed: {ce}")
+                import traceback; traceback.print_exc(); print(f"[connect] Attempt {attempt + 1} connection failed: {ce}")
                 try:
                     await c.disconnect()
                 except Exception:
@@ -3220,6 +3220,7 @@ if __name__ == "__main__":
     import uvicorn
     host = os.getenv("LED_SIGN_HOST", "127.0.0.1")
     uvicorn.run(app, host=host, port=8000)
+
 
 
 
