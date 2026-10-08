@@ -209,6 +209,8 @@ function getEventDisplayString(ev) {
     } else if (withShort.length <= maxLen) {
       // Otherwise, do not include it
       signText = withShort;
+    } else if (summary.length + 1 + shortEndTimeStr.length <= maxLen) {
+      signText = `${summary} ${shortEndTimeStr}`;
     } else {
       // Need to truncate title — do not include am/pm to save characters
       const suffix = `... ${shortEndTimeStr}`;
