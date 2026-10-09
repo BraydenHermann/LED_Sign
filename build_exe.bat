@@ -37,15 +37,17 @@ if %errorlevel% neq 0 (
     pause & exit /b 1
 )
 
-if exist "LED Sign.spec" del "LED Sign.spec"
+if exist "dist\LED Sign.exe" (
+    echo Copying updated LED Sign.exe to project root...
+    copy /y "dist\LED Sign.exe" "LED Sign.exe" >nul 2>&1
+)
 
 echo.
 echo ==================================================
 echo  Done!
 echo.
-echo  Run the app:  dist\LED Sign.exe
-echo.
-echo  IMPORTANT: Keep LED Sign.exe next to the project
-echo  folder (it finds server\ and client\ automatically)
+echo  App updated in root and dist:
+echo    - .\LED Sign.exe
+echo    - dist\LED Sign.exe
 echo ==================================================
 pause

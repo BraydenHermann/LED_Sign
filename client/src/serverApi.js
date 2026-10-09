@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-export const SERVER_API_VERSION = 2;
+export const SERVER_API_VERSION = 3;
 
 export function requireCurrentServer(status) {
   if (!(status?.api_version >= SERVER_API_VERSION)) {
@@ -37,3 +37,26 @@ export async function savePresetToSign(payload, options = {}) {
 }
 
 export const processVideoMedia = (payload) => postToCurrentServer('/process-video', payload, { timeout: 0 });
+
+export const getGeminiStatus = async () => {
+  try {
+    return await axios.get('/gemini-status');
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      return await axios.get('/api/gemini/status');
+    }
+    throw err;
+  }
+};
+
+export const generateGeminiMedia = async (payload) => {
+  try {
+    return await axios.post('/gemini-generate', payload, { timeout: 180000 });
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      return await axios.post('/api/gemini/generate', payload, { timeout: 180000 });
+    }
+    throw err;
+  }
+};
+

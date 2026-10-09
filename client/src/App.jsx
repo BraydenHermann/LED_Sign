@@ -2,13 +2,15 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 're
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { savePresetToSign, processVideoMedia } from './serverApi';
+import GeminiMediaGenerator from './GeminiMediaGenerator';
+
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Power, Sun, Calendar, Image as ImageIcon, Bluetooth, Wifi,
   Activity, Upload, Clock, ExternalLink, Link2Off, Link2,
   FileSearch, Search, RefreshCw, RotateCcw, StretchHorizontal, StretchVertical, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
-  Trash2, Pipette, Save, Send, Star, Download, Crosshair, Grid3X3, ScanLine
+  Trash2, Pipette, Save, Send, Star, Download, Crosshair, Grid3X3, ScanLine, Type
 } from 'lucide-react';
 
 const API_BASE = '';
@@ -1710,7 +1712,9 @@ export default function App() {
       }
     } catch (e) {
       console.error(`[connect] ${isRetry ? 'Retry' : 'Attempt 1'} failed:`, e.message);
-      if (!e.response) setApiError(true);
+      if (!e.response) {
+        axios.get(`${API_BASE}/status`).then(() => setApiError(false)).catch(() => setApiError(true));
+      }
       if (!isRetry && !isAuto) {
         // Silent first-failure retry for manual user connection
         console.log('[connect] Auto-retrying once...');
@@ -2664,8 +2668,11 @@ export default function App() {
         <div className="logo-group"></div>
         
         {apiError && (
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/20 text-red-400 rounded-full border border-red-500/20 animate-pulse">
-            <Wifi size={14} />
+          <div 
+            className="px-3 py-1.5 bg-red-500/20 text-red-400 rounded-full border border-red-500/20 animate-pulse"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+          >
+            <span>⚠</span>
             <span className="text-[10px] font-black uppercase tracking-widest">Server Offline</span>
           </div>
         )}
@@ -3515,7 +3522,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 borderRadius: '8px', padding: '6px 10px', whiteSpace: 'nowrap'
               }}>
                 <span>⚠</span>
-                <span>{apiError ? 'Server offline' : 'Connection failed — power cycle the sign and retry'}</span>
+                <span>{apiError ? 'Server Offline' : 'Connection failed — power cycle the sign and retry'}</span>
               </div>
             )}
           </div>
@@ -4147,7 +4154,16 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
         </p>
         {status.calendar_connected && (
           <div 
-            style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
+            style={{ 
+              fontSize: '13px', 
+              fontWeight: 700, 
+              color: '#cbd5e1', 
+              cursor: 'pointer', 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: '8px',
+              userSelect: 'none'
+            }}
             onClick={() => {
               const val = !cleanName;
               setCleanName(val);
@@ -4155,14 +4171,29 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
               setTimeout(() => fetchEvents(), 0);
             }}
           >
-            <div style={{
-              width: '18px', height: '18px', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              background: cleanName ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' : 'rgba(255,255,255,0.05)',
-              border: cleanName ? 'none' : '1px solid rgba(255,255,255,0.2)'
-            }}>
-              {cleanName && <Check size={14} color="white" strokeWidth={3} />}
+            <div
+              style={{
+                width: '18px',
+                height: '18px',
+                borderRadius: '6px',
+                background: cleanName 
+                  ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' 
+                  : 'rgba(255, 255, 255, 0.08)',
+                border: cleanName 
+                  ? '1px solid rgba(255, 255, 255, 0.3)' 
+                  : '1px solid rgba(255, 255, 255, 0.2)',
+                boxShadow: cleanName ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 0.2s ease',
+                color: '#ffffff',
+                flexShrink: 0
+              }}
+            >
+              {cleanName && <Check size={13} strokeWidth={3.5} />}
             </div>
-            <span style={{ fontSize: '14px', color: '#cbd5e1', userSelect: 'none' }}>
+            <span>
               Remove my name from event titles
             </span>
           </div>
@@ -6163,9 +6194,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                       <button 
                         onClick={() => { editingModeRef.current = 'text'; setForm({...form, mode: 'text'}); }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'text' ? 'inactive' : ''}`}
-                        style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
+                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                       >
-                        TEXT
+                        <Type size={12} />
+                        <span>TEXT</span>
                       </button>
                       <button 
                         onClick={() => {
@@ -6194,37 +6226,68 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           }
                         }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'drawing' ? 'inactive' : ''}`}
-                        style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
+                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                       >
-                        DRAW
+                        <Pencil size={12} />
+                        <span>DRAW</span>
                       </button>
                       <button 
                         onClick={() => { editingModeRef.current = 'image'; setForm({...form, mode: 'image'}); }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'image' ? 'inactive' : ''}`}
-                        style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
+                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                       >
-                        MEDIA
+                        <ImageIcon size={12} />
+                        <span>MEDIA</span>
                       </button>
                       <button 
                         onClick={() => { editingModeRef.current = 'clock'; setForm({...form, mode: 'clock'}); }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'clock' ? 'inactive' : ''}`}
-                        style={{ fontSize: 10, fontWeight: 900, flex: 1 }}
+                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                       >
-                        CLOCK
+                        <Clock size={12} />
+                        <span>CLOCK</span>
                       </button>
                     </div>
                     
                     {/* Default Toggle */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingRight: '4px', paddingTop: '12px', paddingBottom: '12px' }}>
-                      <label style={{ fontSize: '13px', fontWeight: 700, color: '#cbd5e1', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <input 
-                          type="checkbox" 
-                          checked={form.isDefault} 
-                          onChange={(e) => setForm({...form, isDefault: e.target.checked})}
-                          style={{ margin: 0, width: '16px', height: '16px', accentColor: 'var(--accent-primary)', cursor: 'pointer' }}
-                        />
-                        Use as Default
-                      </label>
+                      <div 
+                        onClick={() => setForm(prev => ({ ...prev, isDefault: !prev.isDefault }))}
+                        style={{ 
+                          fontSize: '13px', 
+                          fontWeight: 700, 
+                          color: '#cbd5e1', 
+                          cursor: 'pointer', 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          gap: '8px',
+                          userSelect: 'none'
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: '18px',
+                            height: '18px',
+                            borderRadius: '6px',
+                            background: form.isDefault 
+                              ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' 
+                              : 'rgba(255, 255, 255, 0.08)',
+                            border: form.isDefault 
+                              ? '1px solid rgba(255, 255, 255, 0.3)' 
+                              : '1px solid rgba(255, 255, 255, 0.2)',
+                            boxShadow: form.isDefault ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            transition: 'all 0.2s ease',
+                            color: '#ffffff',
+                            flexShrink: 0
+                          }}
+                        >
+                          {form.isDefault && <Check size={13} strokeWidth={3.5} />}
+                        </div>
+                        <span>Use as Default</span>
+                      </div>
                     </div>
                   </div>
 
@@ -6410,6 +6473,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           onClick={() => fileInputRef.current?.click()}
                           className="btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5"
                           style={{ borderRadius: '12px' }}
+                          title="Upload image or video"
                         >
                           <Upload size={13} />
                         </button>
@@ -6686,6 +6750,13 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         />
                       </div>
                     )}
+
+                    <GeminiMediaGenerator 
+                      form={form} 
+                      setForm={setForm} 
+                      imageObjRef={imageObjRef} 
+                      onNotify={setUnifiedPushMessage} 
+                    />
                   </div>
                 )}
 

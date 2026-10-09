@@ -1,4 +1,4 @@
-﻿"""
+"""
 LED Sign Launcher -- Windows system tray application.
 
 Starts the Python FastAPI backend and Vite frontend dev server,
@@ -81,7 +81,7 @@ def start_calendar_agent():
     with _lock:
         if _calendar_proc and _calendar_proc.poll() is None:
             return
-        command = [*background_python_command(), os.path.join(BASE_DIR, "server", "calendar_agent.py")]
+        command = [*background_python_command(), "-u", os.path.join(BASE_DIR, "server", "calendar_agent.py")]
         try:
             _calendar_proc = subprocess.Popen(
                 command,
@@ -164,29 +164,50 @@ def launcher_log(message: str):
 # Server lifecycle
 # ---------------------------------------------------------------------------
 
+def force_kill_port(port: int):
+    """Fast, reliable port killer using pure Python netstat parsing and direct taskkill."""
+    try:
+        output = subprocess.check_output("netstat -ano", shell=True, text=True, stderr=subprocess.DEVNULL)
+        target = f":{port}"
+        pids = set()
+        for line in output.splitlines():
+            if target in line and "LISTENING" in line:
+                parts = line.strip().split()
+                if len(parts) >= 5 and parts[-1].isdigit():
+                    pids.add(parts[-1])
+        for pid in pids:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True, **hidden_process_kwargs())
+            launcher_log(f"Killed PID {pid} listening on port {port}.")
+    except Exception as err:
+        launcher_log(f"Could not kill port {port}: {err}")
+
+
 def start_backend():
     global _backend_proc, _backend_log
     if port_open(8000):
         try:
             with urllib.request.urlopen('http://127.0.0.1:8000/status', timeout=3) as response:
-                current = json.load(response).get('api_version', 0) >= 2
+                current = json.load(response).get('api_version', 0) >= 4
         except Exception:
             current = False
         if current:
             launcher_log("Current backend already listening on port 8000.")
             return
         launcher_log("Replacing an outdated LED Sign backend.")
-        stop_project_server(8000, os.path.join(BASE_DIR, 'server', 'main.py'))
+        force_kill_port(8000)
         # Windows may take a moment to release the listener after taskkill
-        # returns, even though the process has already exited.
         deadline = time.monotonic() + 5
         while port_open(8000) and time.monotonic() < deadline:
             time.sleep(0.1)
         if port_open(8000):
-            launcher_log("Port 8000 is still occupied; refusing to start a second backend.")
-            return
+            launcher_log("Port 8000 is still occupied; force killing again.")
+            force_kill_port(8000)
+            time.sleep(0.5)
+            if port_open(8000):
+                launcher_log("Port 8000 is still occupied; refusing to start a second backend.")
+                return
     with _lock:
-        command = [*background_python_command(), os.path.join(BASE_DIR, "server", "main.py")]
+        command = [*background_python_command(), "-u", os.path.join(BASE_DIR, "server", "main.py")]
         try:
             _backend_log = open(os.path.join(BASE_DIR, "led-sign-server.log"), "a", encoding="utf-8")
             _backend_proc = subprocess.Popen(
@@ -213,47 +234,17 @@ def start_frontend():
         )
 
 
-def stop_project_server(port: int, source_path: str):
-    """Stop only a listener whose command line contains this project's path.
-
-    The Python launcher and cmd/npm are parents of the real servers. Killing
-    only those parents leaves Python/Vite running, including across EXE launches.
-    """
-    expected_path = os.path.abspath(source_path).replace("'", "''")
-    script = (
-        f"$expected = '{expected_path}'; "
-        f"Get-NetTCPConnection -LocalPort {int(port)} -State Listen -ErrorAction SilentlyContinue | "
-        "Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { "
-        "$server = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $_); "
-        "if ($server.CommandLine -and $server.CommandLine.Replace('/', '\\').IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -ge 0) { "
-        "$server.ProcessId } }"
-    )
-    try:
-        found = subprocess.run(
-            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
-            capture_output=True, text=True, timeout=15, **hidden_process_kwargs(),
-        )
-        for value in found.stdout.splitlines():
-            if not value.strip().isdigit():
-                continue
-            pid = int(value.strip())
-            launcher_log(f"Stopping project server on port {port} (PID {pid}).")
-            subprocess.run(['taskkill.exe', '/PID', str(pid), '/T', '/F'],
-                           capture_output=True, timeout=10, **hidden_process_kwargs())
-    except Exception as error:
-        launcher_log(f"Could not stop project server on port {port}: {error}")
-
-
 def stop_servers():
     global _backend_proc, _frontend_proc, _calendar_proc, _quit_flag
     _quit_flag = True
+    launcher_log("Stopping LED Sign servers...")
     try:
-        urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/disconnect", method="POST"), timeout=2)
+        urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/disconnect", method="POST"), timeout=1.5)
     except Exception:
         pass
     with _lock:
-        stop_project_server(8000, os.path.join(BASE_DIR, 'server', 'main.py'))
-        stop_project_server(5173, os.path.join(BASE_DIR, 'client', 'node_modules'))
+        force_kill_port(8000)
+        force_kill_port(5173)
         for proc in (_backend_proc, _frontend_proc, _calendar_proc):
             if proc and proc.poll() is None:
                 try:
@@ -263,8 +254,11 @@ def stop_servers():
         _backend_proc = None
         _frontend_proc = None
         _calendar_proc = None
+
+
 def restart_servers(icon=None, item=None):
     global _quit_flag
+    launcher_log("Restart Servers requested.")
     stop_servers()
     time.sleep(1)
     _quit_flag = False
@@ -349,6 +343,9 @@ def run_tray():
 def main():
     global BASE_DIR, _quit_flag
     BASE_DIR = find_base_dir()
+    launcher_log("LED Sign launcher started: stopping any existing servers first...")
+    stop_servers()
+    time.sleep(1)
     _quit_flag = False
     threading.Thread(target=guardian_loop, daemon=True).start()
     threading.Thread(target=start_frontend, daemon=True).start()

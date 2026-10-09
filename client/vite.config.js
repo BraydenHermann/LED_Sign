@@ -41,7 +41,19 @@ export default defineConfig({
       '/clock': 'http://127.0.0.1:8000',
       '/static': 'http://127.0.0.1:8000',
       '/disconnect': 'http://127.0.0.1:8000',
-      '/hardware-slots': 'http://127.0.0.1:8000'
+      '/hardware-slots': 'http://127.0.0.1:8000',
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        proxyTimeout: 300000,
+        timeout: 300000
+      },
+      '/gemini-generate': {
+        target: 'http://127.0.0.1:8000',
+        proxyTimeout: 300000,
+        timeout: 300000
+      },
+      '/gemini-status': 'http://127.0.0.1:8000',
+      '/gemini-config': 'http://127.0.0.1:8000'
     }
   }
 })

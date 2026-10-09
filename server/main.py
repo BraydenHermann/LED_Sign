@@ -1,4 +1,4 @@
-﻿import os
+import os
 import io
 import json as _json
 import asyncio
@@ -20,6 +20,7 @@ from bleak import BleakClient, BleakScanner
 from PIL import Image, ImageDraw, ImageFont
 from loy_web_protocol import LOYWebProtocol
 from calendar_service import CalendarService
+import gemini_service
 
 
 def hex_to_rgb_global(hex_str: Optional[str], default=(0,0,0)):
@@ -415,6 +416,23 @@ class ProcessVideoRequest(BaseModel):
     dhBase: float
     bgColor: Optional[str] = "#000000"
 
+class GeminiAttachment(BaseModel):
+    data: str
+    mimeType: Optional[str] = "image/png"
+
+class GeminiGenerateRequest(BaseModel):
+    prompt: str
+    mediaType: Optional[str] = "gif"
+    attachments: Optional[List[GeminiAttachment]] = None
+    apiKey: Optional[str] = None
+    style: Optional[str] = None
+
+class GeminiConfigRequest(BaseModel):
+    apiKey: Optional[str] = None
+    model: Optional[str] = None
+    imageModel: Optional[str] = None
+    defaultMode: Optional[str] = None
+
 def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_color: str) -> tuple:
     import base64
     from io import BytesIO
@@ -590,6 +608,55 @@ def process_video(req: ProcessVideoRequest):
                 pass
 
 
+@app.get("/api/gemini/status")
+@app.get("/gemini-status")
+async def gemini_status():
+    try:
+        return gemini_service.check_status()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/gemini/config")
+@app.post("/gemini-config")
+async def gemini_config(req: GeminiConfigRequest):
+    try:
+        data = {}
+        if req.apiKey is not None:
+            data["api_key"] = req.apiKey
+        if req.model is not None:
+            data["model"] = req.model
+        if req.imageModel is not None:
+            data["image_model"] = req.imageModel
+        if req.defaultMode is not None:
+            data["default_mode"] = req.defaultMode
+        return gemini_service.save_config(data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/gemini/generate")
+@app.post("/gemini-generate")
+async def gemini_generate(req: GeminiGenerateRequest):
+    try:
+        prompt = req.prompt.strip()
+        if not prompt:
+            raise ValueError("Prompt cannot be empty.")
+        media_type = (req.mediaType or "gif").lower()
+        attachments = [{"data": a.data, "mimeType": a.mimeType or "image/png"} for a in (req.attachments or [])]
+        
+        def _run_gen():
+            if media_type == "image":
+                return gemini_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey)
+            elif media_type == "video":
+                return gemini_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey)
+            else:
+                return gemini_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey)
+
+        return await asyncio.to_thread(_run_gen)
+    except Exception as e:
+        print(f"Error in gemini_generate: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/status")
 async def get_status():
     global connected_client, connection_ready, frames_sent, current_display_mode, current_width, current_speed, brightness, power
@@ -625,7 +692,7 @@ async def get_status():
     
     return {
         "connected": connected,
-        "api_version": 2,
+        "api_version": 4,
         "address": address,
         "preview_url": preview_url,
         "preview_ts": preview_ts,
@@ -687,7 +754,7 @@ async def _connect_internal(req: ConnectRequest):
 
         client = None
         last_connect_error = None
-        max_attempts = 3 if target_mac else 2
+        max_attempts = 2
 
         for attempt in range(max_attempts):
             found_device = None
@@ -720,7 +787,7 @@ async def _connect_internal(req: ConnectRequest):
             try:
                 await scanner.start()
                 try:
-                    scan_wait = 5.0 if target_mac else 8.0
+                    scan_wait = 4.0 if target_mac else 6.0
                     await asyncio.wait_for(stop_event.wait(), timeout=scan_wait)
                 except asyncio.TimeoutError:
                     pass
@@ -742,7 +809,7 @@ async def _connect_internal(req: ConnectRequest):
 
             try:
                 c = BleakClient(found_device, disconnected_callback=on_disconnect)
-                await c.connect(timeout=15.0)
+                await c.connect(timeout=8.0)
                 if c.is_connected:
                     # Validate that the connected device actually has the LOY WRITE characteristic!
                     write_char = None

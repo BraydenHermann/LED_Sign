@@ -9,3 +9,5 @@ google-auth-oauthlib
 pystray
 pydantic
 google-auth
+google-genai
+requests
