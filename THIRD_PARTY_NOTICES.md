@@ -57,6 +57,18 @@ This project uses various third-party open source dependencies and assets. Below
   - Purpose: Video processing
   - Source: https://github.com/opencv/opencv-python
   - License: Requires Manual Verification (Typically Apache 2.0 or BSD depending on version)
+* **Google GenAI SDK (google-genai)**
+  - Purpose: AI media generation via Google Gemini and Imagen APIs
+  - Source: https://github.com/googleapis/python-genai
+  - License: Apache License 2.0
+* **Requests**
+  - Purpose: HTTP client used by the OpenAI service for API communication
+  - Source: https://github.com/psf/requests
+  - License: Apache License 2.0
+* **pystray**
+  - Purpose: Windows system-tray icon for the desktop launcher
+  - Source: https://github.com/moses-palmer/pystray
+  - License: LGPL v3
 
 ## Fonts and Assets
 * **Unifont** (`server/unifont.otf`, `client/public/UnifontMedium16.woff2`)
