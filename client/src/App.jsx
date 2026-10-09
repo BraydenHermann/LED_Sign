@@ -3492,7 +3492,18 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <button 
               className="btn-styled flex items-center justify-center gap-2" 
-              style={{ whiteSpace: 'nowrap', minWidth: '140px', height: '42px', padding: '0 18px' }} 
+              style={{
+                whiteSpace: 'nowrap',
+                minWidth: '140px',
+                height: '42px',
+                padding: '0 18px',
+                backgroundRepeat: 'no-repeat',
+                backgroundOrigin: 'border-box',
+                backgroundClip: 'padding-box',
+                border: 'none',
+                outline: 'none',
+                overflow: 'hidden',
+              }} 
               onClick={() => {
                 if (isConnecting) onDisconnect();
                 else if (macAddress) onConnect(macAddress);
@@ -3508,7 +3519,17 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             </button>
             <button
               className="btn-styled flex items-center justify-center"
-              style={{ height: '42px', width: '42px', padding: 0 }}
+              style={{
+                height: '42px',
+                width: '42px',
+                padding: 0,
+                backgroundRepeat: 'no-repeat',
+                backgroundOrigin: 'border-box',
+                backgroundClip: 'padding-box',
+                border: 'none',
+                outline: 'none',
+                overflow: 'hidden',
+              }}
               onClick={handleScanOpen}
               title="Change Sign / Scan Nearby"
             >
@@ -4293,14 +4314,19 @@ function EventCard({ ev, now, onPush }) {
         display: 'flex',
         alignItems: 'center',
         gap: 16,
-        padding: '14px 20px',
+        padding: isActive && !isDeclined ? '15px 21px' : '14px 20px',
         cursor: 'pointer',
         opacity: isDeclined ? 0.5 : 1,
         filter: isDeclined ? 'grayscale(0.8)' : 'none',
         position: 'relative',
+        overflow: 'hidden',
         ...(isActive && !isDeclined ? {
           background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
-          borderColor: 'transparent',
+          backgroundRepeat: 'no-repeat',
+          backgroundOrigin: 'border-box',
+          backgroundClip: 'padding-box',
+          border: 'none',
+          outline: 'none',
           boxShadow: 'var(--neon-shadow)',
         } : {})
       }}

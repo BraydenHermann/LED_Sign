@@ -73,6 +73,9 @@ _backend_proc = None
 _frontend_proc = None
 _backend_log = None
 _lock = threading.Lock()
+# Serializes concurrent start_backend() calls (e.g. two launcher instances
+# opening simultaneously, or guardian_loop racing with restart_servers).
+_start_backend_lock = threading.Lock()
 _calendar_proc = None
 _quit_flag = False
 
@@ -106,6 +109,13 @@ def guardian_loop():
                 ret = _backend_proc.poll()
                 if ret is not None:
                     launcher_log(f"Backend crashed with exit code {ret}! Restarting...")
+                    # Wait up to 5 s for the OS to release port 8000 before
+                    # clearing _backend_proc. Without this delay the next
+                    # start_backend() call races in while the socket is still
+                    # bound, causing the [Errno 10048] restart cascade.
+                    deadline = time.monotonic() + 5.0
+                    while port_open(8000) and time.monotonic() < deadline:
+                        time.sleep(0.25)
                     _backend_proc = None
             # Check calendar agent
             if _calendar_proc is not None:
@@ -114,7 +124,7 @@ def guardian_loop():
                     launcher_log(f"Calendar agent crashed with exit code {ret}! Restarting...")
                     _calendar_proc = None
 
-        if _backend_proc is None and not _quit_flag:
+        if _backend_proc is None and not port_open(8000) and not _quit_flag:
             start_backend()
         if _calendar_proc is None and not _quit_flag:
             start_calendar_agent()
@@ -184,42 +194,50 @@ def force_kill_port(port: int):
 
 def start_backend():
     global _backend_proc, _backend_log
-    if port_open(8000):
-        try:
-            with urllib.request.urlopen('http://127.0.0.1:8000/status', timeout=3) as response:
-                current = json.load(response).get('api_version', 0) >= 4
-        except Exception:
-            current = False
-        if current:
-            launcher_log("Current backend already listening on port 8000.")
-            return
-        launcher_log("Replacing an outdated LED Sign backend.")
-        force_kill_port(8000)
-        # Windows may take a moment to release the listener after taskkill
-        deadline = time.monotonic() + 5
-        while port_open(8000) and time.monotonic() < deadline:
-            time.sleep(0.1)
+    # Only allow one start_backend() to run at a time. This prevents the cascade
+    # where two launcher instances both see port 8000 as free, both kill the old
+    # process, and then both try to start a new one — causing [Errno 10048] crashes.
+    with _start_backend_lock:
         if port_open(8000):
-            launcher_log("Port 8000 is still occupied; force killing again.")
-            force_kill_port(8000)
-            time.sleep(0.5)
-            if port_open(8000):
-                launcher_log("Port 8000 is still occupied; refusing to start a second backend.")
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:8000/status', timeout=3) as response:
+                    data = json.load(response)
+                    if data.get('api_version', 0) >= 4:
+                        launcher_log("Current backend already listening on port 8000.")
+                        return
+                    launcher_log(f"Replacing an outdated backend (version {data.get('api_version')}).")
+            except Exception as err:
+                # If port 8000 is open and listening, do not kill it just because
+                # the server was momentarily busy servicing a Bluetooth/preset request.
+                launcher_log(f"Backend is listening on port 8000 (status check: {err}); keeping existing instance.")
                 return
-    with _lock:
-        command = [*background_python_command(), "-u", os.path.join(BASE_DIR, "server", "main.py")]
-        try:
-            _backend_log = open(os.path.join(BASE_DIR, "led-sign-server.log"), "a", encoding="utf-8")
-            _backend_proc = subprocess.Popen(
-                command,
-                cwd=BASE_DIR,
-                stdout=_backend_log,
-                stderr=subprocess.STDOUT,
-                **hidden_process_kwargs(),
-            )
-            launcher_log(f"Started backend (PID {_backend_proc.pid}): {' '.join(command)}")
-        except OSError as error:
-            launcher_log(f"Could not start backend: {error}")
+
+            force_kill_port(8000)
+            # Windows may take a moment to release the listener after taskkill
+            deadline = time.monotonic() + 5
+            while port_open(8000) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if port_open(8000):
+                launcher_log("Port 8000 is still occupied; force killing again.")
+                force_kill_port(8000)
+                time.sleep(0.5)
+                if port_open(8000):
+                    launcher_log("Port 8000 is still occupied; refusing to start a second backend.")
+                    return
+        with _lock:
+            command = [*background_python_command(), "-u", os.path.join(BASE_DIR, "server", "main.py")]
+            try:
+                _backend_log = open(os.path.join(BASE_DIR, "led-sign-server.log"), "a", encoding="utf-8")
+                _backend_proc = subprocess.Popen(
+                    command,
+                    cwd=BASE_DIR,
+                    stdout=_backend_log,
+                    stderr=subprocess.STDOUT,
+                    **hidden_process_kwargs(),
+                )
+                launcher_log(f"Started backend (PID {_backend_proc.pid}): {' '.join(command)}")
+            except OSError as error:
+                launcher_log(f"Could not start backend: {error}")
 
 
 def start_frontend():
@@ -343,9 +361,38 @@ def run_tray():
 def main():
     global BASE_DIR, _quit_flag
     BASE_DIR = find_base_dir()
-    launcher_log("LED Sign launcher started: stopping any existing servers first...")
-    stop_servers()
-    time.sleep(1)
+
+    # --- Single-instance guard (Windows named mutex) ---
+    # If the user double-clicks the shortcut while a tray instance is already
+    # running, we just open the browser and exit rather than killing the servers
+    # mid-connection. The mutex is released automatically when this process exits.
+    _mutex = None
+    already_running = False
+    try:
+        import ctypes
+        _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "LEDSignLauncherMutex")
+        already_running = (ctypes.windll.kernel32.GetLastError() == 183)  # ERROR_ALREADY_EXISTS
+    except Exception:
+        pass
+
+    if already_running:
+        # Another tray instance owns the mutex. Just open/focus the browser tab.
+        if '--background' not in sys.argv:
+            webbrowser.open("http://localhost:5173/")
+        return
+
+    if port_open(8000):
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:8000/status', timeout=2) as response:
+                is_healthy = json.load(response).get('api_version', 0) >= 4
+        except Exception:
+            is_healthy = False
+        if not is_healthy:
+            launcher_log("Stopping outdated servers...")
+            stop_servers()
+            time.sleep(1)
+        else:
+            launcher_log("Preserving healthy existing LED Sign backend.")
     _quit_flag = False
     threading.Thread(target=guardian_loop, daemon=True).start()
     threading.Thread(target=start_frontend, daemon=True).start()

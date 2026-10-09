@@ -8,22 +8,25 @@ echo ==================================================
 echo.
 
 echo [1/3] Installing dependencies (pystray, Pillow, PyInstaller)...
-python -m pip install pystray Pillow pyinstaller --quiet
+py -3.12 -m pip install pystray Pillow pyinstaller --quiet
 if %errorlevel% neq 0 (
     echo ERROR: pip install failed. Make sure Python is on PATH.
-    pause & exit /b 1
+    if "%1" neq "--no-pause" pause
+    exit /b 1
 )
 
 echo [2/3] Preparing LED Sign icon...
-python -c "from PIL import Image; im=Image.open('launcher_icon.png').convert('RGBA'); im.save('launcher_icon.ico',format='ICO',sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+py -3.12 -c "from PIL import Image; im=Image.open('launcher_icon.png').convert('RGBA'); im.save('launcher_icon.ico',format='ICO',sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 if %errorlevel% neq 0 (
     echo ERROR: launcher_icon.png is required to build the app icon.
-    pause & exit /b 1
+    if "%1" neq "--no-pause" pause
+    exit /b 1
 )
 set ICON_ARG=--icon=launcher_icon.ico
 
 echo [3/3] Building LED Sign.exe with PyInstaller...
-python -m PyInstaller ^
+py -3.12 -m PyInstaller ^
+    --noconfirm ^
     --onefile ^
     --windowed ^
     --name "LED Sign" ^
@@ -34,8 +37,11 @@ if %errorlevel% neq 0 (
     echo.
     echo ERROR: Build failed.
     if exist _icon.ico del _icon.ico
-    pause & exit /b 1
+    if "%1" neq "--no-pause" pause
+    exit /b 1
 )
+
+taskkill /F /IM "LED Sign.exe" >nul 2>&1
 
 if exist "dist\LED Sign.exe" (
     echo Copying updated LED Sign.exe to project root...
@@ -50,4 +56,4 @@ echo  App updated in root and dist:
 echo    - .\LED Sign.exe
 echo    - dist\LED Sign.exe
 echo ==================================================
-pause
+if "%1" neq "--no-pause" pause

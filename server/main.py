@@ -803,23 +803,24 @@ async def get_status():
 connect_lock = asyncio.Lock()
 
 async def _connect_internal(req: ConnectRequest):
-    global connected_client, connection_ready
-    target_mac = (req.address or "").strip().upper()
-    if connected_client and connected_client.is_connected:
-        if not target_mac or (connected_client.address and connected_client.address.upper() == target_mac):
-            connection_ready = True
-            return {"status": "success", "connected": True, "address": connected_client.address}
+    async with connect_lock:
+        global connected_client, connection_ready
+        target_mac = (req.address or "").strip().upper()
+        if connected_client and connected_client.is_connected:
+            if not target_mac or (connected_client.address and connected_client.address.upper() == target_mac):
+                connection_ready = True
+                return {"status": "success", "connected": True, "address": connected_client.address}
 
-    connection_ready = False
-    if connected_client:
-        try:
-            if connected_client.is_connected:
-                await connected_client.stop_notify(protocol.NOTIFY_UUID)
-                await connected_client.disconnect()
-        except Exception:
-            pass
-        connected_client = None
-        await asyncio.sleep(0.5)
+        connection_ready = False
+        if connected_client:
+            try:
+                if connected_client.is_connected:
+                    await connected_client.stop_notify(protocol.NOTIFY_UUID)
+                    await connected_client.disconnect()
+            except Exception:
+                pass
+            connected_client = None
+            await asyncio.sleep(0.5)
 
     client = None
 
@@ -871,16 +872,20 @@ async def _connect_internal(req: ConnectRequest):
                         found_device = device
                         stop_event.set()
 
-            scanner = BleakScanner(detection_callback=detection_callback, scanning_mode="active")
+            scanner = BleakScanner(detection_callback=detection_callback, scanning_mode="passive")
             try:
                 await scanner.start()
                 try:
-                    scan_wait = 9.0
+                    scan_wait = 20.0
                     await asyncio.wait_for(stop_event.wait(), timeout=scan_wait)
                 except asyncio.TimeoutError:
                     pass
             except Exception as scan_err:
                 print(f"[connect] Scanner error: {scan_err}")
+                if "handle is invalid" in str(scan_err).lower() or "-2147024890" in str(scan_err):
+                    print("[connect] Critical WinRT COM apartment error. Restarting server to reset Bluetooth...")
+                    asyncio.get_event_loop().call_later(0.5, lambda: os._exit(1))
+                    raise Exception("Windows Bluetooth handle became invalid. Backend restarting with clean COM apartment...")
             finally:
                 try:
                     await scanner.stop()
@@ -888,8 +893,6 @@ async def _connect_internal(req: ConnectRequest):
                     pass
 
             if not found_device:
-                # Never connect by raw MAC string: after a sign power cycle Windows
-                # uses stale cached GATT handles and hangs. Rescan instead.
                 print(f"[connect] Attempt {attempt + 1}: {target_mac or 'sign'} not detected in live scan (is it powered on and in range?), retrying...")
                 await asyncio.sleep(1.0)
                 continue
@@ -897,7 +900,7 @@ async def _connect_internal(req: ConnectRequest):
             c = None
             try:
                 c = BleakClient(found_device, disconnected_callback=on_disconnect)
-                await c.connect(timeout=15.0)
+                await c.connect(timeout=25.0)
                 if c.is_connected:
                     # Validate that the connected device actually has the LOY WRITE characteristic!
                     write_char = None
@@ -1231,71 +1234,72 @@ async def _play_preset(id: int, mac: str = ""):
 
 @app.get("/scan")
 async def scan_devices():
-    global connected_client, connection_ready
-    try:
-        found_map = {}
+    async with connect_lock:
+        global connected_client, connection_ready
+        try:
+            found_map = {}
 
-        # If currently connected to a sign, include it directly so user can see it
-        if connected_client and connected_client.is_connected and connected_client.address:
-            cur_addr = connected_client.address.upper()
-            found_map[cur_addr] = {
-                "name": "LED Sign (Connected)",
-                "adv_name": getattr(connected_client, "name", None) or "LED Sign",
-                "address": connected_client.address,
-                "rssi": -40,
-                "is_led": True
-            }
-
-        def on_detected(device, adv_data):
-            addr = device.address.upper()
-            name = (device.name or adv_data.local_name or "").strip()
-            services = [s.lower() for s in (adv_data.service_uuids or [])]
-            rssi = adv_data.rssi or -99
-
-            is_led = (
-                addr.startswith("FF:24:10:29:")
-                or "0000fff0-0000-1000-8000-00805f9b34fb" in services
-                or "0000ffe0-0000-1000-8000-00805f9b34fb" in services
-                or "HELLO" in name.upper()
-                or "SIGN" in name.upper()
-                or "LOY" in name.upper()
-                or name.upper().startswith("YS")
-                or name.upper().startswith("TL")
-                or name.upper().startswith("LEO")
-            )
-
-            display_name = name or ("LED Sign" if is_led else "")
-            if not display_name and not is_led:
-                return
-
-            if addr not in found_map:
-                found_map[addr] = {
-                    "name": display_name,
-                    "adv_name": adv_data.local_name or (name if name else None),
-                    "address": device.address,
-                    "rssi": rssi,
-                    "is_led": is_led
+            # If currently connected to a sign, include it directly so user can see it
+            if connected_client and connected_client.is_connected and connected_client.address:
+                cur_addr = connected_client.address.upper()
+                found_map[cur_addr] = {
+                    "name": "LED Sign (Connected)",
+                    "adv_name": getattr(connected_client, "name", None) or "LED Sign",
+                    "address": connected_client.address,
+                    "rssi": -40,
+                    "is_led": True
                 }
-            else:
-                if name:
-                    found_map[addr]["name"] = name
-                if is_led:
-                    found_map[addr]["is_led"] = True
-                if adv_data.local_name:
-                    found_map[addr]["adv_name"] = adv_data.local_name
-                if rssi and rssi > -99:
-                    found_map[addr]["rssi"] = rssi
 
-        await BleakScanner.discover(timeout=8.0, return_adv=True, detection_callback=on_detected)
+            def on_detected(device, adv_data):
+                addr = device.address.upper()
+                name = (device.name or adv_data.local_name or "").strip()
+                services = [s.lower() for s in (adv_data.service_uuids or [])]
+                rssi = adv_data.rssi or -99
 
-        results = list(found_map.values())
-        results.sort(key=lambda x: (0 if x["is_led"] else 1, -(x.get("rssi") or -99)))
-        print(f"[scan] Returning {len(results)} device(s) ({sum(1 for r in results if r['is_led'])} LED sign(s))")
-        return results
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+                is_led = (
+                    addr.startswith("FF:24:10:29:")
+                    or "0000fff0-0000-1000-8000-00805f9b34fb" in services
+                    or "0000ffe0-0000-1000-8000-00805f9b34fb" in services
+                    or "HELLO" in name.upper()
+                    or "SIGN" in name.upper()
+                    or "LOY" in name.upper()
+                    or name.upper().startswith("YS")
+                    or name.upper().startswith("TL")
+                    or name.upper().startswith("LEO")
+                )
+
+                display_name = name or ("LED Sign" if is_led else "")
+                if not display_name and not is_led:
+                    return
+
+                if addr not in found_map:
+                    found_map[addr] = {
+                        "name": display_name,
+                        "adv_name": adv_data.local_name or (name if name else None),
+                        "address": device.address,
+                        "rssi": rssi,
+                        "is_led": is_led
+                    }
+                else:
+                    if name:
+                        found_map[addr]["name"] = name
+                    if is_led:
+                        found_map[addr]["is_led"] = True
+                    if adv_data.local_name:
+                        found_map[addr]["adv_name"] = adv_data.local_name
+                    if rssi and rssi > -99:
+                        found_map[addr]["rssi"] = rssi
+
+            await BleakScanner.discover(timeout=8.0, return_adv=True, detection_callback=on_detected)
+
+            results = list(found_map.values())
+            results.sort(key=lambda x: (0 if x["is_led"] else 1, -(x.get("rssi") or -99)))
+            print(f"[scan] Returning {len(results)} device(s) ({sum(1 for r in results if r['is_led'])} LED sign(s))")
+            return results
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/auth/url")

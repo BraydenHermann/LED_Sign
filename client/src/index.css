@@ -56,7 +56,11 @@ body {
 
 .btn-styled {
   background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  background-repeat: no-repeat;
+  background-origin: border-box;
+  background-clip: padding-box;
   border: none;
+  outline: none;
   border-radius: 16px;
   color: white;
   padding: 13px 22px;
@@ -69,6 +73,7 @@ body {
   justify-content: center;
   gap: 8px;
   white-space: nowrap;
+  overflow: hidden;
 }
 .btn-styled:hover { transform: scale(1.02); box-shadow: var(--neon-shadow); }
 .btn-styled:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }

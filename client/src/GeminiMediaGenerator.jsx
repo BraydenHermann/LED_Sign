@@ -76,6 +76,13 @@ export default function GeminiMediaGenerator({
   const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('led_gemini_api_key') || '');
   const [openaiKey, setOpenaiKey] = useState(() => localStorage.getItem('led_openai_api_key') || '');
 
+  // Automatically close API key section whenever the parent section is collapsed
+  useEffect(() => {
+    if (!isExpanded) {
+      setShowKeys(false);
+    }
+  }, [isExpanded]);
+
   const updateKey = (which, value) => {
     const v = value.trim();
     if (which === 'gemini') {
@@ -89,23 +96,34 @@ export default function GeminiMediaGenerator({
 
   const fileInputRef = useRef(null);
 
-  // Fetch configured AI providers from backend on mount
+  // Fetch configured AI providers from backend on mount with retry
   useEffect(() => {
     let isMounted = true;
-    getAiProviders()
-      .then(res => {
-        if (isMounted && res?.data) {
-          setProvidersStatus(res.data);
-          if (!localStorage.getItem('led_ai_provider')) {
-            setProvider(res.data.default_provider || 'gemini');
+    const fetchProviders = () => {
+      getAiProviders()
+        .then(res => {
+          if (isMounted && res?.data) {
+            setProvidersStatus(res.data);
+            if (!localStorage.getItem('led_ai_provider')) {
+              setProvider(res.data.default_provider || 'gemini');
+            }
           }
-        }
-      })
-      .catch(err => {
-        console.debug('[AI Studio] Could not fetch AI providers:', err);
-      });
-    return () => { isMounted = false; };
-  }, []);
+        })
+        .catch(err => {
+          console.debug('[AI Studio] Could not fetch AI providers, will retry:', err);
+        });
+    };
+    fetchProviders();
+    const interval = setInterval(() => {
+      if (isMounted && !providersStatus) {
+        fetchProviders();
+      }
+    }, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [providersStatus]);
 
   const handleSelectProvider = (newProvider) => {
     setProvider(newProvider);
@@ -276,7 +294,13 @@ export default function GeminiMediaGenerator({
     >
       {/* Collapsible Header Bar - No agent label in title */}
       <div 
-        onClick={() => setIsExpanded(prev => !prev)}
+        onClick={() => {
+          setIsExpanded(prev => {
+            const next = !prev;
+            if (!next) setShowKeys(false);
+            return next;
+          });
+        }}
         style={{ 
           display: 'flex', 
           alignItems: 'center', 
@@ -377,12 +401,29 @@ export default function GeminiMediaGenerator({
               </button>
             </div>
 
-            {/* API Key Settings: users can supply their own keys */}
+            {/* API Key: users can supply their own keys to override server .env keys */}
             {(() => {
               const activeKey = isGemini ? geminiKey : openaiKey;
-              const serverHasKey = isGemini ? providersStatus?.gemini?.configured : providersStatus?.openai?.configured;
-              const statusText = activeKey ? 'Using your key' : (serverHasKey ? 'Using server key' : 'No key set');
-              const statusColor = (activeKey || serverHasKey) ? '#86efac' : '#fca5a5';
+              const providerInfo = isGemini ? providersStatus?.gemini : providersStatus?.openai;
+              const serverHasKey = Boolean(providerInfo?.configured);
+
+              let statusText = 'No key set';
+              let statusColor = '#fca5a5';
+
+              if (activeKey) {
+                statusText = 'Custom key active';
+                statusColor = '#86efac';
+              } else if (serverHasKey) {
+                statusText = 'Server key configured (.env)';
+                statusColor = '#86efac';
+              } else if (providersStatus === null) {
+                statusText = 'Checking...';
+                statusColor = '#94a3b8';
+              } else {
+                statusText = 'No key set';
+                statusColor = '#fca5a5';
+              }
+
               const linkStyle = { color: isGemini ? '#8fb8ee' : '#a7d5cb', textDecoration: 'underline' };
               const inputStyle = {
                 width: '100%', boxSizing: 'border-box', borderRadius: '8px', padding: '7px 10px',
@@ -396,7 +437,7 @@ export default function GeminiMediaGenerator({
                     style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#94a3b8', textAlign: 'left' }}
                   >
                     <KeyRound size={12} />
-                    <span>API Key Settings</span>
+                    <span>API Key</span>
                     <span style={{ color: statusColor, fontWeight: 600 }}>· {statusText}</span>
                     <ChevronDown size={12} className="text-slate-400 transition-transform duration-200" style={{ transform: showKeys ? 'rotate(180deg)' : 'rotate(0deg)' }} />
                   </button>
@@ -411,20 +452,75 @@ export default function GeminiMediaGenerator({
                         style={{ overflow: 'hidden' }}
                       >
                         <div style={{ padding: '10px 12px', borderRadius: '10px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '11px', color: '#cbd5e1' }}>
+                          {/* Server Key Indicator */}
+                          {serverHasKey && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 8px', borderRadius: '6px', background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.25)', color: '#86efac', fontSize: '11px' }}>
+                              <span>✓</span>
+                              <span>
+                                Server key configured in <code>.env</code>{providerInfo?.masked_key ? ` (${providerInfo.masked_key})` : ''}
+                              </span>
+                            </div>
+                          )}
+
                           {isGemini ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                              <label style={{ fontWeight: 700 }}>Gemini API Key</label>
-                              <input type="password" autoComplete="off" value={geminiKey} onChange={(e) => updateKey('gemini', e.target.value)} placeholder="AIza..." style={inputStyle} />
-                              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style={linkStyle}>Get a free Gemini key at Google AI Studio ↗</a>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <label style={{ fontWeight: 700 }}>Custom Gemini API Key (Optional)</label>
+                                {geminiKey && (
+                                  <button
+                                    type="button"
+                                    onClick={() => updateKey('gemini', '')}
+                                    style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '10px', textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
+                                  >
+                                    Clear (use server key)
+                                  </button>
+                                )}
+                              </div>
+                              <input
+                                type="password"
+                                autoComplete="off"
+                                value={geminiKey}
+                                onChange={(e) => updateKey('gemini', e.target.value)}
+                                placeholder={serverHasKey ? "Using server key (paste here to override)" : "AIza..."}
+                                style={inputStyle}
+                              />
+                              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style={linkStyle}>
+                                Get a free Gemini key at Google AI Studio ↗
+                              </a>
                             </div>
                           ) : (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                              <label style={{ fontWeight: 700 }}>OpenAI Key</label>
-                              <input type="password" autoComplete="off" value={openaiKey} onChange={(e) => updateKey('openai', e.target.value)} placeholder="sk-..." style={inputStyle} />
-                              <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" style={linkStyle}>Create an OpenAI key at platform.openai.com ↗</a>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <label style={{ fontWeight: 700 }}>Custom OpenAI Key (Optional)</label>
+                                {openaiKey && (
+                                  <button
+                                    type="button"
+                                    onClick={() => updateKey('openai', '')}
+                                    style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '10px', textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
+                                  >
+                                    Clear (use server key)
+                                  </button>
+                                )}
+                              </div>
+                              <input
+                                type="password"
+                                autoComplete="off"
+                                value={openaiKey}
+                                onChange={(e) => updateKey('openai', e.target.value)}
+                                placeholder={serverHasKey ? "Using server key (paste here to override)" : "sk-..."}
+                                style={inputStyle}
+                              />
+                              <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" style={linkStyle}>
+                                Create an OpenAI key at platform.openai.com ↗
+                              </a>
                             </div>
                           )}
-                          <span style={{ color: '#94a3b8' }}>Stored only in this browser. Leave blank to use the server's <code>.env</code> key.</span>
+
+                          <span style={{ color: '#94a3b8', lineHeight: '1.4' }}>
+                            {serverHasKey 
+                              ? "Leave blank to use the server's configured key, or enter your own personal key if you prefer to use your own rate limits or billing funds."
+                              : "Enter your personal key here. It will be stored only in your local browser."}
+                          </span>
                         </div>
                       </motion.div>
                     )}
