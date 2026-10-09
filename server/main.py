@@ -1,4 +1,8 @@
 import os
+import sys
+_SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SERVER_DIR not in sys.path:
+    sys.path.insert(0, _SERVER_DIR)
 import io
 import json as _json
 import asyncio
@@ -21,6 +25,7 @@ from PIL import Image, ImageDraw, ImageFont
 from loy_web_protocol import LOYWebProtocol
 from calendar_service import CalendarService
 import gemini_service
+import openai_service
 
 
 def hex_to_rgb_global(hex_str: Optional[str], default=(0,0,0)):
@@ -433,6 +438,21 @@ class GeminiConfigRequest(BaseModel):
     imageModel: Optional[str] = None
     defaultMode: Optional[str] = None
 
+class OpenAIGenerateRequest(BaseModel):
+    prompt: str
+    mediaType: Optional[str] = "gif"
+    attachments: Optional[List[GeminiAttachment]] = None
+    apiKey: Optional[str] = None
+    model: Optional[str] = None
+
+class AIGenerateRequest(BaseModel):
+    provider: Optional[str] = "gemini"
+    prompt: str
+    mediaType: Optional[str] = "gif"
+    attachments: Optional[List[GeminiAttachment]] = None
+    apiKey: Optional[str] = None
+    model: Optional[str] = None
+
 def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_color: str) -> tuple:
     import base64
     from io import BytesIO
@@ -656,6 +676,74 @@ async def gemini_generate(req: GeminiGenerateRequest):
         print(f"Error in gemini_generate: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/openai/status")
+@app.get("/openai-status")
+async def openai_status():
+    try:
+        return openai_service.check_status()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/ai/providers")
+@app.get("/ai-providers")
+async def ai_providers():
+    try:
+        gemini_st = gemini_service.check_status()
+        openai_st = openai_service.check_status()
+        default_p = "gemini" if gemini_st.get("configured") else ("openai" if openai_st.get("configured") else "gemini")
+        return {
+            "gemini": gemini_st,
+            "openai": openai_st,
+            "default_provider": default_p
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/openai/generate")
+@app.post("/openai-generate")
+async def openai_generate(req: OpenAIGenerateRequest):
+    try:
+        prompt = req.prompt.strip()
+        if not prompt:
+            raise ValueError("Prompt cannot be empty.")
+        media_type = (req.mediaType or "gif").lower()
+        attachments = [{"data": a.data, "mimeType": a.mimeType or "image/png"} for a in (req.attachments or [])]
+        
+        def _run_gen():
+            if media_type == "image":
+                return openai_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey)
+            elif media_type == "video":
+                return openai_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey)
+            else:
+                return openai_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey)
+
+        return await asyncio.to_thread(_run_gen)
+    except Exception as e:
+        print(f"Error in openai_generate: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ai/generate")
+@app.post("/ai-generate")
+async def ai_generate(req: AIGenerateRequest):
+    provider = (req.provider or "gemini").lower()
+    if provider in ("openai", "chatgpt"):
+        sub_req = OpenAIGenerateRequest(
+            prompt=req.prompt,
+            mediaType=req.mediaType,
+            attachments=req.attachments,
+            apiKey=req.apiKey,
+            model=req.model
+        )
+        return await openai_generate(sub_req)
+    else:
+        sub_req = GeminiGenerateRequest(
+            prompt=req.prompt,
+            mediaType=req.mediaType,
+            attachments=req.attachments,
+            apiKey=req.apiKey
+        )
+        return await gemini_generate(sub_req)
+
 
 @app.get("/status")
 async def get_status():
@@ -754,7 +842,7 @@ async def _connect_internal(req: ConnectRequest):
 
         client = None
         last_connect_error = None
-        max_attempts = 2
+        max_attempts = 3
 
         for attempt in range(max_attempts):
             found_device = None
@@ -787,7 +875,7 @@ async def _connect_internal(req: ConnectRequest):
             try:
                 await scanner.start()
                 try:
-                    scan_wait = 4.0 if target_mac else 6.0
+                    scan_wait = 9.0
                     await asyncio.wait_for(stop_event.wait(), timeout=scan_wait)
                 except asyncio.TimeoutError:
                     pass
@@ -799,17 +887,17 @@ async def _connect_internal(req: ConnectRequest):
                 except Exception:
                     pass
 
-            if not found_device and target_mac:
-                print(f"[connect] Attempt {attempt + 1}: Sign {target_mac} not detected in live scan; attempting direct address connection...")
-                found_device = target_mac
-            elif not found_device:
-                print(f"[connect] Attempt {attempt + 1}: Auto-discover sign not found in scan, retrying...")
+            if not found_device:
+                # Never connect by raw MAC string: after a sign power cycle Windows
+                # uses stale cached GATT handles and hangs. Rescan instead.
+                print(f"[connect] Attempt {attempt + 1}: {target_mac or 'sign'} not detected in live scan (is it powered on and in range?), retrying...")
                 await asyncio.sleep(1.0)
                 continue
 
+            c = None
             try:
                 c = BleakClient(found_device, disconnected_callback=on_disconnect)
-                await c.connect(timeout=8.0)
+                await c.connect(timeout=15.0)
                 if c.is_connected:
                     # Validate that the connected device actually has the LOY WRITE characteristic!
                     write_char = None
@@ -834,7 +922,8 @@ async def _connect_internal(req: ConnectRequest):
                 last_connect_error = ce
                 import traceback; traceback.print_exc(); print(f"[connect] Attempt {attempt + 1} connection failed: {ce}")
                 try:
-                    await c.disconnect()
+                    if c is not None:
+                        await c.disconnect()
                 except Exception:
                     pass
                 if attempt < max_attempts - 1:

@@ -60,3 +60,50 @@ export const generateGeminiMedia = async (payload) => {
   }
 };
 
+export const getAiProviders = async () => {
+  try {
+    return await axios.get('/ai-providers');
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      return await axios.get('/api/ai/providers');
+    }
+    throw err;
+  }
+};
+
+export const getOpenAiStatus = async () => {
+  try {
+    return await axios.get('/openai-status');
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      return await axios.get('/api/openai/status');
+    }
+    throw err;
+  }
+};
+
+export const generateOpenAiMedia = async (payload) => {
+  try {
+    return await axios.post('/openai-generate', payload, { timeout: 180000 });
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      return await axios.post('/api/openai/generate', payload, { timeout: 180000 });
+    }
+    throw err;
+  }
+};
+
+export const generateAiMedia = async (payload) => {
+  try {
+    return await axios.post('/ai-generate', payload, { timeout: 180000 });
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      if (payload.provider === 'openai') {
+        return await generateOpenAiMedia(payload);
+      }
+      return await generateGeminiMedia(payload);
+    }
+    throw err;
+  }
+};
+

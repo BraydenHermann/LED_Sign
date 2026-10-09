@@ -53,7 +53,19 @@ export default defineConfig({
         timeout: 300000
       },
       '/gemini-status': 'http://127.0.0.1:8000',
-      '/gemini-config': 'http://127.0.0.1:8000'
+      '/gemini-config': 'http://127.0.0.1:8000',
+      '/openai-generate': {
+        target: 'http://127.0.0.1:8000',
+        proxyTimeout: 300000,
+        timeout: 300000
+      },
+      '/openai-status': 'http://127.0.0.1:8000',
+      '/ai-generate': {
+        target: 'http://127.0.0.1:8000',
+        proxyTimeout: 300000,
+        timeout: 300000
+      },
+      '/ai-providers': 'http://127.0.0.1:8000'
     }
   }
 })

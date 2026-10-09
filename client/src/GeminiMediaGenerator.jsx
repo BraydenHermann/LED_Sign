@@ -1,10 +1,14 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Paperclip, Film, Image as ImageIcon, X, 
-  RefreshCw, AlertCircle, Layers, ChevronDown
+  RefreshCw, AlertCircle, Layers, ChevronDown, KeyRound
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { generateGeminiMedia } from './serverApi';
+import { generateAiMedia, getAiProviders } from './serverApi';
+
+// Brand colors
+const GEMINI_GRADIENT = 'linear-gradient(to right, #4796E3 0%, #9177C7 50%, #CA6673 100%)';
+const OPENAI_COLOR = '#74AA9C';
 
 // Official Google Gemini 4-pointed sparkle icon
 export const GeminiLogo = ({ size = 16, className = "" }) => (
@@ -17,6 +21,20 @@ export const GeminiLogo = ({ size = 16, className = "" }) => (
     style={{ display: 'inline-block', verticalAlign: 'middle', flexShrink: 0 }}
   >
     <path d="M12 2C12 7.523 7.523 12 2 12C7.523 12 12 16.477 12 22C12 16.477 16.477 12 22 12C16.477 12 12 7.523 12 2Z" />
+  </svg>
+);
+
+// Official OpenAI / ChatGPT spiral flower logo
+export const OpenAILogo = ({ size = 16, className = "" }) => (
+  <svg 
+    width={size} 
+    height={size} 
+    viewBox="0 0 24 24" 
+    fill="currentColor" 
+    className={className} 
+    style={{ display: 'inline-block', verticalAlign: 'middle', flexShrink: 0 }}
+  >
+    <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1683a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4947zm-9.66-4.1354a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1401-1.6564zm-1.1214-10.428a4.4566 4.4566 0 0 1 2.3657-1.9804V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1683a.0757.0757 0 0 1-.071 0l-4.8303-2.7865a4.504 4.504 0 0 1-1.6466-6.1243zm16.5902 4.5363L13.226 8.9816 15.246 7.8133a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.6435zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.3797V7.0474a.0804.0804 0 0 1 .0332-.0615l4.9814-2.8764a4.4992 4.4992 0 0 1 6.1402 1.6564 4.4708 4.4708 0 0 1 .5536 3.0137zm-8.8878-3.0658a4.4992 4.4992 0 0 1 2.8764 1.0408l-.1419.0804-4.7783 2.7582a.7948.7948 0 0 0-.3927.6813v6.7369L7.904 14.887a.071.071 0 0 1-.038-.052V9.2524a4.504 4.504 0 0 1 4.4945-4.4947zm-.0095 5.5636l2.919 1.6843v3.3685L12 17.6534l-2.919-1.6843v-3.3685L12 10.9208z" />
   </svg>
 );
 
@@ -47,13 +65,59 @@ export default function GeminiMediaGenerator({
   onNotify
 }) {
   const [isExpanded, setIsExpanded] = useState(false); // Collapsed by default
+  const [provider, setProvider] = useState(() => localStorage.getItem('led_ai_provider') || 'gemini');
+  const [providersStatus, setProvidersStatus] = useState(null);
   const [prompt, setPrompt] = useState('');
   const [mediaType, setMediaType] = useState('gif'); // 'gif' | 'image'
   const [attachments, setAttachments] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState('');
+  const [showKeys, setShowKeys] = useState(false);
+  const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('led_gemini_api_key') || '');
+  const [openaiKey, setOpenaiKey] = useState(() => localStorage.getItem('led_openai_api_key') || '');
+
+  const updateKey = (which, value) => {
+    const v = value.trim();
+    if (which === 'gemini') {
+      setGeminiKey(v);
+      v ? localStorage.setItem('led_gemini_api_key', v) : localStorage.removeItem('led_gemini_api_key');
+    } else {
+      setOpenaiKey(v);
+      v ? localStorage.setItem('led_openai_api_key', v) : localStorage.removeItem('led_openai_api_key');
+    }
+  };
 
   const fileInputRef = useRef(null);
+
+  // Fetch configured AI providers from backend on mount
+  useEffect(() => {
+    let isMounted = true;
+    getAiProviders()
+      .then(res => {
+        if (isMounted && res?.data) {
+          setProvidersStatus(res.data);
+          if (!localStorage.getItem('led_ai_provider')) {
+            setProvider(res.data.default_provider || 'gemini');
+          }
+        }
+      })
+      .catch(err => {
+        console.debug('[AI Studio] Could not fetch AI providers:', err);
+      });
+    return () => { isMounted = false; };
+  }, []);
+
+  const handleSelectProvider = (newProvider) => {
+    setProvider(newProvider);
+    localStorage.setItem('led_ai_provider', newProvider);
+    setError('');
+  };
+
+  // Check if current canvas has artwork or media loaded
+  const hasCanvasContent = Boolean(
+    form?.imgSrc || 
+    (Array.isArray(form?.pixels) && form.pixels.some(p => p && p !== 0 && p !== '0' && p !== '#000000' && p !== '#000'))
+  );
 
   const handleAddFiles = (files) => {
     if (!files || !files.length) return;
@@ -91,7 +155,7 @@ export default function GeminiMediaGenerator({
       return;
     }
 
-    if (Array.isArray(form.pixels) && form.pixels.some(p => p && p !== 0)) {
+    if (Array.isArray(form.pixels) && form.pixels.some(p => p && p !== 0 && p !== '0' && p !== '#000000' && p !== '#000')) {
       const canvas = document.createElement('canvas');
       canvas.width = 64;
       canvas.height = 20;
@@ -112,7 +176,7 @@ export default function GeminiMediaGenerator({
           ...prev,
           {
             id: `${Date.now()}-${Math.random()}`,
-            name: 'Current Canvas Snapshot (64x20)',
+            name: 'Canvas Snapshot (64x20)',
             mimeType: 'image/png',
             data: dataUrl
           }
@@ -121,7 +185,7 @@ export default function GeminiMediaGenerator({
       }
     }
 
-    setError('Current preset does not contain any artwork to attach.');
+    setError('Current preset does not contain any artwork to copy.');
   };
 
   const handleRemoveAttachment = (id) => {
@@ -139,6 +203,8 @@ export default function GeminiMediaGenerator({
 
     try {
       const payload = {
+        provider: provider,
+        apiKey: (provider === 'openai' ? openaiKey : geminiKey) || undefined,
         prompt: prompt.trim(),
         mediaType: mediaType,
         attachments: attachments.map(a => ({
@@ -147,10 +213,10 @@ export default function GeminiMediaGenerator({
         }))
       };
 
-      const res = await generateGeminiMedia(payload);
+      const res = await generateAiMedia(payload);
       const data = res.data;
       if (!data?.pixels || !data?.imgSrc) {
-        throw new Error('Gemini generation completed but returned invalid media data.');
+        throw new Error('AI generation completed but returned invalid media data.');
       }
 
       if (imageObjRef) {
@@ -163,7 +229,7 @@ export default function GeminiMediaGenerator({
         fileType: data.fileType || mediaType,
         imgSrc: data.imgSrc,
         pixels: data.pixels,
-        name: prev.name ? prev.name : (data.suggestedName || `Gemini ${mediaType.toUpperCase()}`),
+        name: prev.name ? prev.name : (data.suggestedName || `${provider === 'openai' ? 'OpenAI' : 'Gemini'} ${mediaType.toUpperCase()}`),
         dwBase: 64,
         dhBase: 20,
         zoom: 1.0,
@@ -178,16 +244,23 @@ export default function GeminiMediaGenerator({
       }
 
       if (onNotify) {
-        onNotify(`Generated ${mediaType === 'gif' ? 'GIF' : 'Image'} preset successfully!`);
+        onNotify(`Generated ${mediaType === 'gif' ? 'GIF' : 'Image'} with ${provider === 'openai' ? 'OpenAI' : 'Gemini'} successfully!`);
       }
     } catch (err) {
-      console.error('[GeminiMediaGenerator] Generation error:', err);
-      const detail = err?.response?.data?.detail || err?.message || 'Error communicating with Gemini';
+      console.error('[AI Studio] Generation error:', err);
+      const detail = err?.response?.data?.detail || err?.message || 'Error communicating with AI service';
       setError(detail);
     } finally {
       setIsGenerating(false);
     }
   };
+
+  const isGemini = provider === 'gemini';
+  const providerLabel = isGemini ? 'Gemini' : 'OpenAI';
+  const activeBrandBg = isGemini ? GEMINI_GRADIENT : OPENAI_COLOR;
+  const activeBrandShadow = isGemini 
+    ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(71, 150, 227, 0.25)' 
+    : '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(116, 170, 156, 0.25)';
 
   return (
     <div 
@@ -201,7 +274,7 @@ export default function GeminiMediaGenerator({
         flexDirection: 'column'
       }}
     >
-      {/* Collapsible Header Bar */}
+      {/* Collapsible Header Bar - No agent label in title */}
       <div 
         onClick={() => setIsExpanded(prev => !prev)}
         style={{ 
@@ -217,17 +290,22 @@ export default function GeminiMediaGenerator({
             width: '28px', 
             height: '28px', 
             borderRadius: '8px', 
-            background: 'linear-gradient(135deg, #10b981 0%, #3b82f6 100%)', 
+            background: activeBrandBg,
+            backgroundRepeat: 'no-repeat',
+            backgroundClip: 'padding-box',
+            boxShadow: activeBrandShadow,
             display: 'flex', 
             alignItems: 'center', 
             justifyContent: 'center',
-            color: '#ffffff'
+            color: '#ffffff',
+            transition: 'all 0.25s ease',
+            overflow: 'hidden'
           }}>
-            <GeminiLogo size={16} />
+            {isGemini ? <GeminiLogo size={16} /> : <OpenAILogo size={16} />}
           </div>
           <div>
             <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 800, color: '#f8fafc' }}>
-              Gemini AI Studio
+              {isGemini ? 'Google Gemini' : 'OpenAI'}
             </h4>
           </div>
         </div>
@@ -251,13 +329,130 @@ export default function GeminiMediaGenerator({
             transition={{ duration: 0.2 }}
             style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '14px', marginTop: '14px' }}
           >
-            {/* Format Selector: Equal width GIF Animation & Image */}
+            {/* AI Provider Selector: Google Gemini vs ChatGPT */}
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => handleSelectProvider('gemini')}
+                className="btn-styled text-[11px] py-1.5 px-3 rounded-xl transition-all"
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  background: isGemini ? GEMINI_GRADIENT : 'rgba(255, 255, 255, 0.05)',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundClip: 'padding-box',
+                  border: 'none',
+                  boxShadow: isGemini ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(71, 150, 227, 0.25)' : '0 0 0 1px rgba(255, 255, 255, 0.08)',
+                  color: isGemini ? '#ffffff' : 'var(--text-muted)',
+                  overflow: 'hidden'
+                }}
+              >
+                <GeminiLogo size={13} />
+                <span>Google Gemini</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSelectProvider('openai')}
+                className="btn-styled text-[11px] py-1.5 px-3 rounded-xl transition-all"
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  background: !isGemini ? OPENAI_COLOR : 'rgba(255, 255, 255, 0.05)',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundClip: 'padding-box',
+                  border: 'none',
+                  boxShadow: !isGemini ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(116, 170, 156, 0.25)' : '0 0 0 1px rgba(255, 255, 255, 0.08)',
+                  color: !isGemini ? '#ffffff' : 'var(--text-muted)',
+                  overflow: 'hidden'
+                }}
+              >
+                <OpenAILogo size={13} />
+                <span>OpenAI</span>
+              </button>
+            </div>
+
+            {/* API Key Settings: users can supply their own keys */}
+            {(() => {
+              const activeKey = isGemini ? geminiKey : openaiKey;
+              const serverHasKey = isGemini ? providersStatus?.gemini?.configured : providersStatus?.openai?.configured;
+              const statusText = activeKey ? 'Using your key' : (serverHasKey ? 'Using server key' : 'No key set');
+              const statusColor = (activeKey || serverHasKey) ? '#86efac' : '#fca5a5';
+              const linkStyle = { color: isGemini ? '#8fb8ee' : '#a7d5cb', textDecoration: 'underline' };
+              const inputStyle = {
+                width: '100%', boxSizing: 'border-box', borderRadius: '8px', padding: '7px 10px',
+                fontSize: '11px', background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.12)', color: '#fff'
+              };
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowKeys(v => !v)}
+                    style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#94a3b8', textAlign: 'left' }}
+                  >
+                    <KeyRound size={12} />
+                    <span>API Key Settings</span>
+                    <span style={{ color: statusColor, fontWeight: 600 }}>· {statusText}</span>
+                    <ChevronDown size={12} className="text-slate-400 transition-transform duration-200" style={{ transform: showKeys ? 'rotate(180deg)' : 'rotate(0deg)' }} />
+                  </button>
+                  <AnimatePresence initial={false}>
+                    {showKeys && (
+                      <motion.div
+                        key="key-drawer"
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.2 }}
+                        style={{ overflow: 'hidden' }}
+                      >
+                        <div style={{ padding: '10px 12px', borderRadius: '10px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '11px', color: '#cbd5e1' }}>
+                          {isGemini ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                              <label style={{ fontWeight: 700 }}>Gemini API Key</label>
+                              <input type="password" autoComplete="off" value={geminiKey} onChange={(e) => updateKey('gemini', e.target.value)} placeholder="AIza..." style={inputStyle} />
+                              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style={linkStyle}>Get a free Gemini key at Google AI Studio ↗</a>
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                              <label style={{ fontWeight: 700 }}>OpenAI Key</label>
+                              <input type="password" autoComplete="off" value={openaiKey} onChange={(e) => updateKey('openai', e.target.value)} placeholder="sk-..." style={inputStyle} />
+                              <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" style={linkStyle}>Create an OpenAI key at platform.openai.com ↗</a>
+                            </div>
+                          )}
+                          <span style={{ color: '#94a3b8' }}>Stored only in this browser. Leave blank to use the server's <code>.env</code> key.</span>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              );
+            })()}
+
+            {/* Format Selector: Follows agent branding */}
             <div style={{ display: 'flex', gap: '8px' }}>
               <button
                 type="button"
                 onClick={() => setMediaType('gif')}
-                className={`btn-styled text-[11px] py-2 px-3 rounded-xl transition-all ${mediaType === 'gif' ? 'active' : 'inactive'}`}
-                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                className="btn-styled text-[11px] py-2 px-3 rounded-xl transition-all"
+                style={{ 
+                  flex: 1, 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  gap: '6px',
+                  background: mediaType === 'gif' ? activeBrandBg : 'rgba(255, 255, 255, 0.05)',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundClip: 'padding-box',
+                  border: 'none',
+                  boxShadow: mediaType === 'gif' ? activeBrandShadow : '0 0 0 1px rgba(255, 255, 255, 0.08)',
+                  color: mediaType === 'gif' ? '#ffffff' : 'var(--text-muted)',
+                  overflow: 'hidden'
+                }}
               >
                 <Film size={13} />
                 <span>GIF Animation</span>
@@ -265,8 +460,21 @@ export default function GeminiMediaGenerator({
               <button
                 type="button"
                 onClick={() => setMediaType('image')}
-                className={`btn-styled text-[11px] py-2 px-3 rounded-xl transition-all ${mediaType === 'image' ? 'active' : 'inactive'}`}
-                style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                className="btn-styled text-[11px] py-2 px-3 rounded-xl transition-all"
+                style={{ 
+                  flex: 1, 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  gap: '6px',
+                  background: mediaType === 'image' ? activeBrandBg : 'rgba(255, 255, 255, 0.05)',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundClip: 'padding-box',
+                  border: 'none',
+                  boxShadow: mediaType === 'image' ? activeBrandShadow : '0 0 0 1px rgba(255, 255, 255, 0.08)',
+                  color: mediaType === 'image' ? '#ffffff' : 'var(--text-muted)',
+                  overflow: 'hidden'
+                }}
               >
                 <ImageIcon size={13} />
                 <span>Image</span>
@@ -279,7 +487,7 @@ export default function GeminiMediaGenerator({
                 rows={3}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder={`Describe the ${mediaType === 'gif' ? 'looping GIF animation' : 'pixel art image'} you want Gemini to create...`}
+                placeholder={`Describe the ${mediaType === 'gif' ? 'looping GIF animation' : 'pixel art image'} you want ${providerLabel} to create...`}
                 className="input-field"
                 style={{
                   width: '100%',
@@ -298,7 +506,7 @@ export default function GeminiMediaGenerator({
               />
             </div>
 
-            {/* Try Suggestions: Shorter & thinner, placed above Attach File / Current Canvas */}
+            {/* Try Suggestions: Styled matching active AI provider without pixel seams */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginTop: '-4px' }}>
               <span style={{ fontSize: '10px', color: '#94a3b8', fontWeight: 700 }}>Try:</span>
               {PROMPT_SUGGESTIONS.map((sug, i) => (
@@ -307,28 +515,37 @@ export default function GeminiMediaGenerator({
                   type="button"
                   onClick={() => setPrompt(sug.prompt)}
                   style={{
-                    padding: '2px 8px',
+                    padding: '3px 9px',
                     fontSize: '10px',
                     lineHeight: '1.3',
                     borderRadius: '8px',
-                    background: 'linear-gradient(135deg, #10b981 0%, #3b82f6 100%)',
-                    border: '1px solid rgba(255, 255, 255, 0.2)',
+                    background: activeBrandBg,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundClip: 'padding-box',
+                    border: 'none',
                     color: '#ffffff',
                     fontWeight: 600,
                     cursor: 'pointer',
-                    boxShadow: '0 2px 6px rgba(16, 185, 129, 0.25)',
+                    boxShadow: isGemini 
+                      ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 6px rgba(71, 150, 227, 0.25)' 
+                      : '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 6px rgba(116, 170, 156, 0.25)',
                     transition: 'all 0.15s ease',
                     whiteSpace: 'nowrap',
                     display: 'inline-flex',
-                    alignItems: 'center'
+                    alignItems: 'center',
+                    overflow: 'hidden'
                   }}
                   onMouseOver={(e) => { 
-                    e.currentTarget.style.opacity = '0.9';
-                    e.currentTarget.style.boxShadow = '0 3px 10px rgba(16, 185, 129, 0.4)';
+                    e.currentTarget.style.opacity = '0.92';
+                    e.currentTarget.style.boxShadow = isGemini 
+                      ? '0 0 0 1px rgba(255, 255, 255, 0.3), 0 3px 10px rgba(145, 119, 199, 0.45)' 
+                      : '0 0 0 1px rgba(255, 255, 255, 0.3), 0 3px 10px rgba(116, 170, 156, 0.45)';
                   }}
                   onMouseOut={(e) => { 
                     e.currentTarget.style.opacity = '1';
-                    e.currentTarget.style.boxShadow = '0 2px 6px rgba(16, 185, 129, 0.25)';
+                    e.currentTarget.style.boxShadow = isGemini 
+                      ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 6px rgba(71, 150, 227, 0.25)' 
+                      : '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 6px rgba(116, 170, 156, 0.25)';
                   }}
                 >
                   {sug.label}
@@ -336,7 +553,7 @@ export default function GeminiMediaGenerator({
               ))}
             </div>
 
-            {/* Action Buttons Right-Aligned Below Text Prompt Area */}
+            {/* Action Buttons Right-Aligned: Attach File & Copy Canvas follow agent branding */}
             <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
               <input
                 type="file"
@@ -353,7 +570,16 @@ export default function GeminiMediaGenerator({
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 className="btn-styled text-[10px] px-3 py-1.5 flex items-center gap-1.5"
-                style={{ borderRadius: '10px' }}
+                style={{ 
+                  borderRadius: '10px',
+                  background: activeBrandBg,
+                  backgroundRepeat: 'no-repeat',
+                  backgroundClip: 'padding-box',
+                  border: 'none',
+                  boxShadow: activeBrandShadow,
+                  color: '#ffffff',
+                  overflow: 'hidden'
+                }}
                 title="Attach an image or video as style/character reference"
               >
                 <Paperclip size={12} />
@@ -361,13 +587,25 @@ export default function GeminiMediaGenerator({
               </button>
               <button
                 type="button"
+                disabled={!hasCanvasContent}
                 onClick={handleAttachCurrentCanvas}
                 className="btn-styled text-[10px] px-3 py-1.5 flex items-center gap-1.5"
-                style={{ borderRadius: '10px' }}
-                title="Attach current preset canvas as reference context"
+                style={{ 
+                  borderRadius: '10px',
+                  background: hasCanvasContent ? activeBrandBg : 'rgba(255, 255, 255, 0.05)',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundClip: 'padding-box',
+                  border: hasCanvasContent ? 'none' : '1px solid rgba(255, 255, 255, 0.08)',
+                  boxShadow: hasCanvasContent ? activeBrandShadow : 'none',
+                  color: hasCanvasContent ? '#ffffff' : 'rgba(255, 255, 255, 0.35)',
+                  opacity: !hasCanvasContent ? 0.45 : 1,
+                  cursor: !hasCanvasContent ? 'not-allowed' : 'pointer',
+                  overflow: 'hidden'
+                }}
+                title={hasCanvasContent ? "Copy current preset canvas as reference context" : "Current canvas is empty"}
               >
                 <Layers size={12} />
-                <span>Current Canvas</span>
+                <span>Copy Canvas</span>
               </button>
             </div>
 
@@ -419,7 +657,7 @@ export default function GeminiMediaGenerator({
               </div>
             )}
 
-            {/* Generate Action Button - disabled until prompt has text */}
+            {/* Generate Action Button - matches active AI branding */}
             <button
               type="button"
               onClick={(e) => {
@@ -446,24 +684,37 @@ export default function GeminiMediaGenerator({
                 gap: '10px',
                 background: isGenerating 
                   ? 'rgba(255, 255, 255, 0.1)' 
-                  : (!prompt.trim() ? 'rgba(255, 255, 255, 0.06)' : 'linear-gradient(135deg, #10b981 0%, #3b82f6 100%)'),
+                  : (!prompt.trim() 
+                      ? 'rgba(255, 255, 255, 0.06)' 
+                      : activeBrandBg),
+                backgroundRepeat: 'no-repeat',
+                backgroundClip: 'padding-box',
                 color: !prompt.trim() ? 'rgba(255, 255, 255, 0.35)' : '#ffffff',
-                boxShadow: (isGenerating || !prompt.trim()) ? 'none' : '0 4px 15px rgba(16, 185, 129, 0.3)',
+                boxShadow: (isGenerating || !prompt.trim()) 
+                  ? 'none' 
+                  : (isGemini 
+                      ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 4px 15px rgba(71, 150, 227, 0.35)' 
+                      : '0 0 0 1px rgba(255, 255, 255, 0.2), 0 4px 15px rgba(116, 170, 156, 0.35)'),
                 cursor: isGenerating ? 'wait' : (!prompt.trim() ? 'not-allowed' : 'pointer'),
                 opacity: (!prompt.trim() && !isGenerating) ? 0.5 : 1,
-                transform: 'none'
+                transform: 'none',
+                overflow: 'hidden'
               }}
               onMouseEnter={(e) => {
                 if (!isGenerating && prompt.trim()) {
                   e.currentTarget.style.filter = 'brightness(1.06)';
-                  e.currentTarget.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.45)';
+                  e.currentTarget.style.boxShadow = isGemini 
+                    ? '0 0 0 1px rgba(255, 255, 255, 0.3), 0 6px 20px rgba(145, 119, 199, 0.5)' 
+                    : '0 0 0 1px rgba(255, 255, 255, 0.3), 0 6px 20px rgba(116, 170, 156, 0.5)';
                   e.currentTarget.style.borderRadius = '12px';
                 }
               }}
               onMouseLeave={(e) => {
                 if (!isGenerating && prompt.trim()) {
                   e.currentTarget.style.filter = 'none';
-                  e.currentTarget.style.boxShadow = '0 4px 15px rgba(16, 185, 129, 0.3)';
+                  e.currentTarget.style.boxShadow = isGemini 
+                    ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 4px 15px rgba(71, 150, 227, 0.35)' 
+                    : '0 0 0 1px rgba(255, 255, 255, 0.2), 0 4px 15px rgba(116, 170, 156, 0.35)';
                   e.currentTarget.style.borderRadius = '12px';
                 }
               }}
@@ -471,12 +722,12 @@ export default function GeminiMediaGenerator({
               {isGenerating ? (
                 <>
                   <RefreshCw size={15} className="animate-spin text-white" style={{ marginRight: '6px' }} />
-                  <span>Generating {mediaType === 'gif' ? 'GIF' : 'Image'}...</span>
+                  <span>Generating {mediaType === 'gif' ? 'GIF' : 'Image'} with {providerLabel}...</span>
                 </>
               ) : (
                 <>
-                  <GeminiLogo size={16} />
-                  <span>Generate {mediaType === 'gif' ? 'GIF' : 'Image'}</span>
+                  {isGemini ? <GeminiLogo size={16} /> : <OpenAILogo size={16} />}
+                  <span>Generate {mediaType === 'gif' ? 'GIF' : 'Image'} with {providerLabel}</span>
                 </>
               )}
             </button>
