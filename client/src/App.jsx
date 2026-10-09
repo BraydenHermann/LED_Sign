@@ -6258,7 +6258,19 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         <span>DRAW</span>
                       </button>
                       <button 
-                        onClick={() => { editingModeRef.current = 'image'; setForm({...form, mode: 'image'}); }}
+                        onClick={() => { 
+                          editingModeRef.current = 'image'; 
+                          setForm(prev => {
+                            const originalPreset = presets?.find(pr => pr.id === editingId);
+                            const originalImgSrc = (originalPreset && (originalPreset.mode === 'image' || originalPreset.imgSrc)) ? originalPreset.imgSrc : null;
+                            const targetImgSrc = prev.imgSrc || originalImgSrc;
+                            return {
+                              ...prev,
+                              mode: 'image',
+                              pixels: targetImgSrc ? prev.pixels : Array(64 * 20).fill(0)
+                            };
+                          }); 
+                        }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'image' ? 'inactive' : ''}`}
                         style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
                       >

@@ -133,8 +133,11 @@ export default function GeminiMediaGenerator({
 
   // Check if current canvas has artwork or media loaded
   const hasCanvasContent = Boolean(
-    form?.imgSrc || 
-    (Array.isArray(form?.pixels) && form.pixels.some(p => p && p !== 0 && p !== '0' && p !== '#000000' && p !== '#000'))
+    form?.mode === 'image'
+      ? form?.imgSrc
+      : form?.mode === 'drawing'
+        ? (Array.isArray(form?.pixels) && form.pixels.some(p => p && p !== 0 && p !== '0' && p !== '#000000' && p !== '#000'))
+        : form?.imgSrc
   );
 
   const handleAddFiles = (files) => {
@@ -160,6 +163,11 @@ export default function GeminiMediaGenerator({
 
   const handleAttachCurrentCanvas = () => {
     setError('');
+    if (!hasCanvasContent) {
+      setError('Current canvas is empty.');
+      return;
+    }
+
     if (form.imgSrc) {
       setAttachments(prev => [
         ...prev,
@@ -173,7 +181,7 @@ export default function GeminiMediaGenerator({
       return;
     }
 
-    if (Array.isArray(form.pixels) && form.pixels.some(p => p && p !== 0 && p !== '0' && p !== '#000000' && p !== '#000')) {
+    if (form.mode === 'drawing' && Array.isArray(form.pixels) && form.pixels.some(p => p && p !== 0 && p !== '0' && p !== '#000000' && p !== '#000')) {
       const canvas = document.createElement('canvas');
       canvas.width = 64;
       canvas.height = 20;
@@ -203,7 +211,7 @@ export default function GeminiMediaGenerator({
       }
     }
 
-    setError('Current preset does not contain any artwork to copy.');
+    setError('Current canvas does not contain any media to copy.');
   };
 
   const handleRemoveAttachment = (id) => {
