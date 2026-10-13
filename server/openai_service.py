@@ -34,8 +34,8 @@ from gemini_service import (
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-FALLBACK_OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o"]
+DEFAULT_OPENAI_MODEL = "gpt-4o"
+FALLBACK_OPENAI_MODELS = ["gpt-4o", "gpt-4o-mini"]
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
@@ -147,7 +147,9 @@ def _call_openai_chat(
 def generate_animated_gif(
     prompt: str,
     attachments: Optional[List[Dict[str, str]]] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    history: Optional[List[str]] = None,
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates an animated GIF adhering to 64x20 resolution using ChatGPT / OpenAI."""
     if Image is None:
@@ -159,7 +161,8 @@ def generate_animated_gif(
         raise RuntimeError("OpenAI API key not configured. Set OPENAI_API_KEY in .env or pass apiKey in request.")
 
     base_url = cfg["base_url"]
-    models_to_try = [cfg["model"]]
+    chosen_model = model or cfg.get("model", DEFAULT_OPENAI_MODEL)
+    models_to_try = [chosen_model]
     for alt in FALLBACK_OPENAI_MODELS:
         if alt not in models_to_try:
             models_to_try.append(alt)
@@ -171,9 +174,21 @@ def generate_animated_gif(
 - REFERENCE CONTEXT: The attached image/media represents the current 64x20 LED sign canvas or reference context. Use this reference to guide your adjustments matching the user's prompt: "{prompt}". Preserve the layout, character styling, or color identity where helpful, but feel free to modify, polish, or redesign elements if that will help the result look significantly better.
 """
 
+    history_guidance = ""
+    if history:
+        clean_history = [h.strip() for h in history if h and h.strip()]
+        if clean_history:
+            history_text = "\n".join(f"- \"{h}\"" for h in clean_history[-5:])
+            history_guidance = f"""
+- PREVIOUS CONVERSATION / PROMPT HISTORY:
+The user previously requested:
+{history_text}
+This current request ("{prompt}") is a follow-up or refinement in this ongoing conversation. Incorporate context from the previous requests while addressing the latest prompt.
+"""
+
     instruction = f"""{SYSTEM_CONSTRAINTS}
 
-Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".{ref_guidance}
+Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".{history_guidance}{ref_guidance}
 
 CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - Image resolution: EXACTLY width=64, height=20.
@@ -185,7 +200,7 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - In PIL (Pillow), use `draw.point((x, y), fill=...)` or `image.putpixel((x, y), (r, g, b))` for drawing individual pixels (ImageDraw does not natively have .pixel(), use .point()).
 - Output: Save the animated GIF directly to the filename specified in variable `OUTPUT_PATH`.
   Example: frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration={OPTIMAL_FRAME_DURATION_MS}, loop=0)
-- Do NOT import any packages other than PIL (Image, ImageDraw, ImageColor, ImageFilter), math, random, colorsys, and time.
+- Do NOT import any packages other than PIL (Image, ImageDraw, ImageColor, ImageFilter, ImageFont), math, random, colorsys, itertools, and time.
 - Return ONLY the Python code block wrapped in ```python ... ```.
 """
 
@@ -205,10 +220,15 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
                     }
                 })
 
-    messages = [
-        {"role": "system", "content": "You are a Python Pillow graphics developer creating 64x20 animated pixel art assets."},
-        {"role": "user", "content": user_content}
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": "You are a Python Pillow graphics developer creating 64x20 animated pixel art assets."}
     ]
+    if history:
+        clean_history = [h.strip() for h in history if h and h.strip()]
+        for prev_p in clean_history[-5:]:
+            messages.append({"role": "user", "content": f"Generate 64x20 animation: {prev_p}"})
+            messages.append({"role": "assistant", "content": f"```python\n# Animation code generated for: {prev_p}\n```"})
+    messages.append({"role": "user", "content": user_content})
 
     reply_text = None
     last_err = None
@@ -255,7 +275,9 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 def generate_still_image(
     prompt: str,
     attachments: Optional[List[Dict[str, str]]] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    history: Optional[List[str]] = None,
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates a still 64x20 pixel-art image using ChatGPT / OpenAI."""
     if Image is None:
@@ -267,7 +289,8 @@ def generate_still_image(
         raise RuntimeError("OpenAI API key not configured. Set OPENAI_API_KEY in .env or pass apiKey in request.")
 
     base_url = cfg["base_url"]
-    models_to_try = [cfg["model"]]
+    chosen_model = model or cfg.get("model", DEFAULT_OPENAI_MODEL)
+    models_to_try = [chosen_model]
     for alt in FALLBACK_OPENAI_MODELS:
         if alt not in models_to_try:
             models_to_try.append(alt)
@@ -279,9 +302,21 @@ def generate_still_image(
 - REFERENCE CONTEXT: The attached image/media represents the current 64x20 LED sign canvas or reference context. Use this reference to guide your adjustments matching the user's prompt: "{prompt}". Preserve the layout, character styling, or color identity where helpful, but feel free to modify, polish, or redesign elements if that will help the result look significantly better.
 """
 
+    history_guidance = ""
+    if history:
+        clean_history = [h.strip() for h in history if h and h.strip()]
+        if clean_history:
+            history_text = "\n".join(f"- \"{h}\"" for h in clean_history[-5:])
+            history_guidance = f"""
+- PREVIOUS CONVERSATION / PROMPT HISTORY:
+The user previously requested:
+{history_text}
+This current request ("{prompt}") is a follow-up or refinement in this ongoing conversation. Incorporate context from the previous requests while addressing the latest prompt.
+"""
+
     instruction = f"""{SYSTEM_CONSTRAINTS}
 
-Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a single pixel-perfect 64x20 image matching: "{prompt}".{ref_guidance}
+Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a single pixel-perfect 64x20 image matching: "{prompt}".{history_guidance}{ref_guidance}
 
 CRITICAL RULES:
 - Image resolution: EXACTLY width=64, height=20.
@@ -309,10 +344,15 @@ CRITICAL RULES:
                     }
                 })
 
-    messages = [
-        {"role": "system", "content": "You are a Python Pillow graphics developer creating 64x20 pixel art assets."},
-        {"role": "user", "content": user_content}
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": "You are a Python Pillow graphics developer creating 64x20 pixel art assets."}
     ]
+    if history:
+        clean_history = [h.strip() for h in history if h and h.strip()]
+        for prev_p in clean_history[-5:]:
+            messages.append({"role": "user", "content": f"Generate 64x20 image: {prev_p}"})
+            messages.append({"role": "assistant", "content": f"```python\n# Image code generated for: {prev_p}\n```"})
+    messages.append({"role": "user", "content": user_content})
 
     reply_text = None
     last_err = None
@@ -366,10 +406,12 @@ CRITICAL RULES:
 def generate_video(
     prompt: str,
     attachments: Optional[List[Dict[str, str]]] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    history: Optional[List[str]] = None,
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates animation frames and packages as video/gif preset for the sign."""
-    gif_result = generate_animated_gif(prompt, attachments=attachments, api_key=api_key)
+    gif_result = generate_animated_gif(prompt, attachments=attachments, api_key=api_key, history=history, model=model)
     gif_result["fileType"] = "video"
     gif_result["suggestedName"] = f"ChatGPT Video: {prompt[:24].strip()}"
     return gif_result

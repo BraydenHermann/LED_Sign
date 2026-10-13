@@ -10,7 +10,8 @@ import {
   Activity, Upload, Clock, ExternalLink, Link2Off, Link2,
   FileSearch, Search, RefreshCw, RotateCcw, StretchHorizontal, StretchVertical, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
-  Trash2, Pipette, Save, Send, Star, Download, Crosshair, Grid3X3, ScanLine, Type
+  Trash2, Pipette, Save, Send, Star, Download, Crosshair, Grid3X3, ScanLine, Type,
+  LogOut, Laptop
 } from 'lucide-react';
 
 const API_BASE = '';
@@ -3927,17 +3928,23 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={() => status.connected && setPresetView('saved')}
                 className={`btn-styled ${presetView === 'saved' && status.connected ? '' : 'inactive'}`}
-                style={{ height: 34, padding: '0 14px', fontSize: 14, opacity: status.connected ? 1 : 0.4, cursor: status.connected ? 'pointer' : 'not-allowed' }}
+                style={{ height: 34, padding: '0 14px', fontSize: 14, opacity: status.connected ? 1 : 0.4, cursor: status.connected ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: 6 }}
                 title={status.connected ? 'View saved sign presets' : 'Connect to a sign to view saved presets'}
-              >Saved</button>
+              >
+                <Save size={14} />
+                <span>Saved</span>
+              </button>
               <button
                 role="tab"
                 aria-selected={presetView === 'local'}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={() => setPresetView('local')}
                 className={`btn-styled ${presetView === 'local' ? '' : 'inactive'}`}
-                style={{ height: 34, padding: '0 14px', fontSize: 14 }}
-              >Local</button>
+                style={{ height: 34, padding: '0 14px', fontSize: 14, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              >
+                <Laptop size={14} />
+                <span>Local</span>
+              </button>
             </div>
           </div>
           
@@ -4300,8 +4307,13 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
               <button onClick={fetchEvents} className="btn-styled inactive" style={{ padding: '6px 10px', marginLeft: 4 }} disabled={loading} title="Refresh">
                 <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
               </button>
-              <button onClick={async () => { await axios.post(`${API_BASE}/auth/logout`); window.location.reload(); }} className="btn-styled inactive" style={{ padding: '6px 12px', fontSize: 12, marginLeft: 'auto' }}>
-                Sign out
+              <button 
+                onClick={async () => { await axios.post(`${API_BASE}/auth/logout`); window.location.reload(); }} 
+                className="btn-styled inactive" 
+                style={{ padding: '6px 12px', fontSize: 12, marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}
+              >
+                <LogOut size={13} />
+                <span>Sign out</span>
               </button>
             </>
           )}

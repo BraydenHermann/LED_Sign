@@ -54,7 +54,23 @@ const PROMPT_SUGGESTIONS = [
   {
     label: 'Pixel campfire...',
     prompt: 'Pixel campfire with glowing embers and smoke'
+  },
+  {
+    label: 'Car: Turn off high beams...',
+    prompt: 'Car rear window sign: Large bold "TURN OFF" then "HIGH BEAMS" with flashing headlight high beams animation'
   }
+];
+
+export const GEMINI_MODELS = [
+  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', tag: 'Smartest' },
+  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', tag: 'Fast' },
+  { id: 'gemini-3.8-pro', label: 'Gemini 3.8 Pro', tag: 'Reasoning' },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Lite', tag: 'Light' }
+];
+
+export const OPENAI_MODELS = [
+  { id: 'gpt-4o', label: 'GPT-4o', tag: 'Smartest' },
+  { id: 'gpt-4o-mini', label: 'GPT-4o mini', tag: 'Light' }
 ];
 
 const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({ 
@@ -77,7 +93,10 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
 
   const [provider, setProvider] = useState(() => localStorage.getItem('led_ai_provider') || 'gemini');
   const [providersStatus, setProvidersStatus] = useState(null);
+  const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem('led_gemini_model') || 'gemini-3.8-flash');
+  const [openaiModel, setOpenaiModel] = useState(() => localStorage.getItem('led_openai_model') || 'gpt-4o');
   const [prompt, setPrompt] = useState('');
+  const [promptHistory, setPromptHistory] = useState([]);
   const [mediaType, setMediaType] = useState('gif'); // 'gif' | 'image'
   const [attachments, setAttachments] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -269,6 +288,8 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         provider: provider,
         apiKey: (provider === 'openai' ? openaiKey : geminiKey) || undefined,
         prompt: prompt.trim(),
+        history: promptHistory,
+        model: isGemini ? geminiModel : openaiModel,
         mediaType: mediaType,
         attachments: finalAttachments.map(a => ({
           data: a.data,
@@ -302,8 +323,9 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         frameDurationsMs: data.frameDurationsMs || undefined
       }));
 
-      // Increment generation count while on edit/create page
+      // Increment generation count and record prompt history
       setGenerationCount(prev => prev + 1);
+      setPromptHistory(prev => [...prev, prompt.trim()]);
 
       // Automatically attach the generated media as reference for the next prompt
       const generatedRef = {
@@ -317,8 +339,6 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         const withoutCanvasRef = prev.filter(a => !a.isCanvasRef);
         return [...withoutCanvasRef, generatedRef];
       });
-      // Clear the prompt input so user can type adjustment prompt
-      setPrompt('');
 
       if (onGenerated) {
         onGenerated(data);
@@ -510,6 +530,66 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
               </button>
             </div>
 
+            {/* AI Model Selector */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: '11px', fontWeight: 700, color: '#cbd5e1' }}>AI Model</span>
+                <span style={{ fontSize: '10px', color: '#94a3b8' }}>
+                  {isGemini ? 'Gemini 3.8 Flash is recommended for visual code' : 'GPT-4o is recommended for visual code'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                {(isGemini ? GEMINI_MODELS : OPENAI_MODELS).map(m => {
+                  const activeModel = isGemini ? geminiModel : openaiModel;
+                  const isSelected = activeModel === m.id;
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => {
+                        if (isGemini) {
+                          setGeminiModel(m.id);
+                          localStorage.setItem('led_gemini_model', m.id);
+                        } else {
+                          setOpenaiModel(m.id);
+                          localStorage.setItem('led_openai_model', m.id);
+                        }
+                      }}
+                      className="btn-styled text-[11px] py-1.5 px-2.5 rounded-xl transition-all"
+                      style={{
+                        flex: '1 1 auto',
+                        minWidth: '100px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '5px',
+                        background: isSelected ? activeBrandBg : 'rgba(255, 255, 255, 0.04)',
+                        border: 'none',
+                        boxShadow: isSelected ? activeBrandShadow : '0 0 0 1px rgba(255, 255, 255, 0.08)',
+                        color: isSelected ? '#ffffff' : 'var(--text-muted)',
+                        fontWeight: isSelected ? 700 : 500,
+                        overflow: 'hidden'
+                      }}
+                    >
+                      <span>{m.label}</span>
+                      {m.tag && (
+                        <span style={{
+                          fontSize: '9px',
+                          fontWeight: 700,
+                          padding: '1px 5px',
+                          borderRadius: '5px',
+                          background: isSelected ? 'rgba(0, 0, 0, 0.28)' : 'rgba(255, 255, 255, 0.08)',
+                          color: isSelected ? '#ffffff' : '#94a3b8'
+                        }}>
+                          {m.tag}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* API Key: users can supply their own keys to override server .env keys */}
             {(() => {
               const activeKey = isGemini ? geminiKey : openaiKey;
@@ -686,6 +766,52 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
               </button>
             </div>
 
+            {/* Prompt Header & Controls */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '-4px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 700, color: '#cbd5e1' }}>Prompt</span>
+                {promptHistory.length > 0 && (
+                  <span style={{ 
+                    fontSize: '10px', 
+                    padding: '1px 7px', 
+                    borderRadius: '6px', 
+                    background: isGemini ? 'rgba(71, 150, 227, 0.2)' : 'rgba(116, 170, 156, 0.2)', 
+                    color: isGemini ? '#93c5fd' : '#a7d5cb', 
+                    border: isGemini ? '1px solid rgba(71, 150, 227, 0.35)' : '1px solid rgba(116, 170, 156, 0.35)',
+                    fontWeight: 600
+                  }}>
+                    Follow-up #{promptHistory.length}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                {prompt && (
+                  <button
+                    type="button"
+                    onClick={() => setPrompt('')}
+                    style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '10px', textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
+                    title="Clear current text in the prompt box"
+                  >
+                    Clear text
+                  </button>
+                )}
+                {promptHistory.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPromptHistory([]);
+                      setGenerationCount(0);
+                      setAttachments(prev => prev.filter(a => !a.isCanvasRef));
+                    }}
+                    style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '10px', textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
+                    title="Reset follow-up history and start a new conversation topic"
+                  >
+                    New prompt
+                  </button>
+                )}
+              </div>
+            </div>
+
             {/* Prompt Textarea */}
             <div style={{ position: 'relative' }}>
               <textarea
@@ -712,8 +838,8 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                   }
                 }}
                 placeholder={
-                  generationCount > 0
-                    ? `Describe adjustments for ${providerLabel} (canvas attached as reference below)...`
+                  promptHistory.length > 0
+                    ? `Describe adjustments for ${providerLabel} (canvas & prior request context preserved)...`
                     : `Describe the ${mediaType === 'gif' ? 'looping GIF animation' : 'pixel art image'} you want ${providerLabel} to create...`
                 }
                 className="input-field"
@@ -951,12 +1077,12 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
               {isGenerating ? (
                 <>
                   <RefreshCw size={15} className="animate-spin text-white" style={{ marginRight: '6px' }} />
-                  <span>Generating {mediaType === 'gif' ? 'GIF' : 'Image'} with {providerLabel}...</span>
+                  <span>{promptHistory.length > 0 ? 'Updating' : 'Generating'} {mediaType === 'gif' ? 'GIF' : 'Image'} with {providerLabel}...</span>
                 </>
               ) : (
                 <>
                   {isGemini ? <GeminiLogo size={16} /> : <OpenAILogo size={16} />}
-                  <span>Generate {mediaType === 'gif' ? 'GIF' : 'Image'} with {providerLabel}</span>
+                  <span>{promptHistory.length > 0 ? 'Update' : 'Generate'} {mediaType === 'gif' ? 'GIF' : 'Image'} with {providerLabel}</span>
                 </>
               )}
             </button>

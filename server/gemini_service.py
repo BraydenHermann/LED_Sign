@@ -79,24 +79,42 @@ load_env()
 
 
 SYSTEM_CONSTRAINTS = f"""
-You are an expert digital artist and animator creating pixel assets for a physical 64x20 RGB LED matrix display sign.
+You are an expert digital artist, pixel-art typographer, and animator creating pixel assets for a physical 64x20 RGB LED matrix display sign (e.g. car rear windows, desktop banners).
 
 CRITICAL HARDWARE CONSTRAINTS:
 1. Matrix Resolution: EXACTLY {PANEL_W} pixels wide by {PANEL_H} pixels high (ultra-wide 3.2:1 / 16:5 aspect ratio banner).
 2. Canvas Framing: All artwork must be composed horizontally across the wide banner. Do not place a tall or square subject that leaves empty sides.
 3. Pure Black Background: Background MUST be pure black (#000000). On physical LEDs, black (#000000) turns off the diodes completely, creating maximum contrast and visibility.
-4. Visual Style: Retro pixel art, 8-bit / 16-bit arcade aesthetics, vibrant neon signs, or bold vector silhouettes. Avoid intricate photorealistic textures, fine hairline details (< 2px), tiny text, or subtle low-contrast gradients.
-5. Palette: Vivid, high-saturation colors (neon cyan, electric magenta, bright bright yellow, hot orange, emerald green, crisp white highlights).
+4. Visual Style: Retro pixel art, 8-bit / 16-bit arcade aesthetics, vibrant neon signs, or bold vector silhouettes. Avoid intricate photorealistic textures, fine hairline details (< 2px), tiny unreadable text, or subtle low-contrast gradients.
+5. Palette: Vivid, high-saturation colors (neon cyan, electric magenta, bright neon yellow, hot orange, emergency red, crisp white highlights).
 6. Animation & Looping: For animations or GIFs, the animation MUST be a seamless infinite loop lasting between 2.0 and 3.0 seconds (around {OPTIMAL_GIF_FRAMES} frames at ~{DEFAULT_FPS} fps / {OPTIMAL_FRAME_DURATION_MS}ms per frame for ultra-fast, smooth Bluetooth transmission). Strict hardware limit is {MAX_FRAMES} frames maximum.
+
+CRITICAL TEXT & LEGIBILITY RULES (THE SCREEN IS ONLY 20 PIXELS TALL):
+Physical LED diodes are large and viewed from a distance (e.g., from other vehicles behind or across a room). Tiny text is completely illegible.
+- TEXT MUST BE LARGE AND BOLD:
+  Letters MUST be 10px to 16px high with thick strokes (minimum 2px stroke thickness). Never render tiny 3px-5px fonts or unreadable thin hairlines.
+- HANDLING LONGER PHRASES (MORE THAN 6-8 CHARACTERS):
+  A 64-pixel banner can only fit approximately 6 to 8 large, clearly legible letters at once. If a user asks for a phrase like "Turn off high beams", DO NOT attempt to squeeze the entire sentence onto the screen simultaneously (which renders it microscopic and illegible). Instead, use one of these two proven techniques:
+  A. SEQUENTIAL MULTI-SCENE PAGING (STRONGLY RECOMMENDED FOR WARNINGS / CAR SIGNS):
+     Split the message and animation into distinct scenes/cards across the frame loop!
+     * Scene 1 (frames 0 to 12): Display "TURN OFF" in huge, centered bold 12-16px letters (e.g. neon yellow #FFE600 or bright white #FFFFFF).
+     * Scene 2 (frames 13 to 27): Display "HIGH BEAMS" in huge bold letters OR transition to an animated graphic (e.g. flashing headlight rays).
+  B. HORIZONTAL SMOOTH SCROLLING (MARQUEE):
+     Scroll large, bold 12-16px text smoothly from right to left across the screen (x offset decreasing each frame).
+- AUTOMOTIVE & SYMBOL GRAPHICS:
+  When the prompt requests visual indicators (like "flashing high beams" or car warnings), draw bold, instantly recognizable pixel art icons!
+  For high beams: Draw a bold headlight icon (a rounded dome or lamp) with radiating bright high beam rays bursting outward, flashing/strobing between bright neon cyan/yellow/white and off to create a vivid, attention-grabbing warning.
+- DIRECT 64x20 COORDINATE DRAWING:
+  Draw pixels, shapes, and text directly at 64x20 coordinates. Never render on a large canvas and downscale down to 64x20, as downscaling destroys pixel legibility!
 """
 
 
 def load_config() -> Dict[str, Any]:
     """Load Gemini configuration from file or environment."""
     load_env()
-    raw_model = os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
-    if raw_model in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
-        raw_model = "gemini-3.5-flash-lite"
+    raw_model = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
+    if raw_model in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.5-flash-lite"):
+        raw_model = "gemini-3.8-flash"
     cfg = {
         "api_key": os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "",
         "model": raw_model,
@@ -115,8 +133,8 @@ def load_config() -> Dict[str, Any]:
     env_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if env_key:
         cfg["api_key"] = env_key
-    if cfg.get("model") in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
-        cfg["model"] = "gemini-3.5-flash-lite"
+    if cfg.get("model") in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.5-flash-lite"):
+        cfg["model"] = "gemini-3.8-flash"
     return cfg
 
 
@@ -300,7 +318,9 @@ def convert_gif_to_matrix_pixels(pil_gif: Image.Image) -> Tuple[List[Any], List[
 def generate_still_image(
     prompt: str,
     attachments: Optional[List[Dict[str, str]]] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    history: Optional[List[str]] = None,
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates a still image using Gemini / Imagen and resizes to 64x20."""
     if Image is None:
@@ -309,8 +329,14 @@ def generate_still_image(
     cfg = load_config()
     image_model = cfg.get("image_model", "imagen-3.0-generate-002")
 
+    history_context = ""
+    if history:
+        clean_history = [h.strip() for h in history if h and h.strip()]
+        if clean_history:
+            history_context = f" (Context from previous requests: {', '.join(clean_history[-3:])})"
+
     enhanced_prompt = (
-        f"{prompt}. High-contrast pixel art style, retro arcade 8-bit aesthetic, "
+        f"{prompt}{history_context}. High-contrast pixel art style, retro arcade 8-bit aesthetic, "
         f"horizontal 16:5 panoramic composition, pure solid black background (#000000), "
         f"vibrant saturated neon colors, clear bold silhouettes, no thin lines, no tiny text."
     )
@@ -334,9 +360,9 @@ def generate_still_image(
     except Exception as e:
         print(f"[GeminiService] Imagen predict fallback: {e}")
 
-        gemini_model = cfg.get("model", "gemini-3.5-flash-lite")
+        gemini_model = model or cfg.get("model", "gemini-3.8-flash")
         models_to_try = [gemini_model]
-        for alt in ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]:
+        for alt in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.8-pro", "gemini-3.5-flash-lite", "gemini-flash-latest"]:
             if alt not in models_to_try:
                 models_to_try.append(alt)
         
@@ -410,16 +436,18 @@ def generate_still_image(
 def generate_animated_gif(
     prompt: str,
     attachments: Optional[List[Dict[str, str]]] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    history: Optional[List[str]] = None,
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates an animated GIF adhering to 64x20 resolution and <= 300 frame limits."""
     if Image is None:
         raise RuntimeError("Pillow is not installed.")
 
     cfg = load_config()
-    model = cfg.get("model", "gemini-3.5-flash-lite")
-    models_to_try = [model]
-    for alt in ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]:
+    chosen_model = model or cfg.get("model", "gemini-3.8-flash")
+    models_to_try = [chosen_model]
+    for alt in ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.8-pro", "gemini-3.5-flash-lite", "gemini-flash-latest"]:
         if alt not in models_to_try:
             models_to_try.append(alt)
 
@@ -430,9 +458,21 @@ def generate_animated_gif(
 - REFERENCE CONTEXT: The attached image/media represents the current 64x20 LED sign canvas or reference context. Use this reference to guide your adjustments matching the user's prompt: "{prompt}". Preserve the layout, character styling, or color identity where helpful, but feel free to modify, polish, or redesign elements if that will help the result look significantly better.
 """
 
+    history_guidance = ""
+    if history:
+        clean_history = [h.strip() for h in history if h and h.strip()]
+        if clean_history:
+            history_text = "\n".join(f"- \"{h}\"" for h in clean_history[-5:])
+            history_guidance = f"""
+- PREVIOUS CONVERSATION / PROMPT HISTORY:
+The user previously requested:
+{history_text}
+This current request ("{prompt}") is a follow-up or refinement in this ongoing conversation. Incorporate context from the previous requests while addressing the latest prompt.
+"""
+
     instruction = f"""{SYSTEM_CONSTRAINTS}
 
-Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".{ref_guidance}
+Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".{history_guidance}{ref_guidance}
 
 CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - Image resolution: EXACTLY width=64, height=20.
@@ -444,7 +484,7 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - In PIL (Pillow), use `draw.point((x, y), fill=...)` or `image.putpixel((x, y), (r, g, b))` for drawing individual pixels (ImageDraw does not natively have .pixel(), use .point()).
 - Output: Save the animated GIF directly to the filename specified in variable `OUTPUT_PATH`.
   Example: frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration={OPTIMAL_FRAME_DURATION_MS}, loop=0)
-- Do NOT import any packages other than PIL (Image, ImageDraw, ImageColor, ImageFilter), math, random, colorsys, and time.
+- Do NOT import any packages other than PIL (Image, ImageDraw, ImageColor, ImageFilter, ImageFont), math, random, colorsys, itertools, and time.
 - Return ONLY the Python code block wrapped in ```python ... ```.
 """
 
@@ -510,10 +550,12 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 def generate_video(
     prompt: str,
     attachments: Optional[List[Dict[str, str]]] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    history: Optional[List[str]] = None,
+    model: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates animation frames and packages as video/gif preset for the sign."""
-    gif_result = generate_animated_gif(prompt, attachments=attachments, api_key=api_key)
+    gif_result = generate_animated_gif(prompt, attachments=attachments, api_key=api_key, history=history, model=model)
     gif_result["fileType"] = "video"
     gif_result["suggestedName"] = f"Gemini Video: {prompt[:24].strip()}"
     return gif_result
@@ -533,7 +575,20 @@ def _execute_pillow_script(script_text: str, output_type: str = "gif") -> bytes:
         import colorsys
         import sys
         import glob
-        from PIL import Image, ImageDraw, ImageColor, ImageFilter
+        import time
+        import itertools
+        from PIL import Image, ImageDraw, ImageColor, ImageFilter, ImageFont
+
+        # Shim ImageFont.truetype so missing local font files fall back gracefully
+        orig_truetype = getattr(ImageFont, "truetype", None)
+        def _safe_truetype(*args, **kwargs):
+            try:
+                if orig_truetype:
+                    return orig_truetype(*args, **kwargs)
+            except Exception:
+                pass
+            return ImageFont.load_default()
+        ImageFont.truetype = _safe_truetype
 
         # Comprehensive shims on ImageDraw to support LLM code calling .pixel() etc.
         def _shim_pixel(self, *args, **kwargs):
@@ -562,9 +617,26 @@ def _execute_pillow_script(script_text: str, output_type: str = "gif") -> bytes:
         if not hasattr(ImageDraw.ImageDraw, 'round_rectangle') and hasattr(ImageDraw.ImageDraw, 'rounded_rectangle'):
             ImageDraw.ImageDraw.round_rectangle = ImageDraw.ImageDraw.rounded_rectangle
 
+        # Safe time shim so time.sleep does not hang server processing
+        class _SafeTime:
+            def __init__(self, real_time):
+                self._real = real_time
+            def sleep(self, *args, **kwargs):
+                pass
+            def time(self):
+                return self._real.time()
+            def monotonic(self):
+                return self._real.monotonic()
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        safe_time = _SafeTime(time)
+
         def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
             base_mod = name.split(".")[0]
-            if base_mod in ("math", "random", "colorsys", "PIL"):
+            if base_mod == "time":
+                return safe_time
+            if base_mod in ("math", "random", "colorsys", "PIL", "itertools"):
                 return __import__(name, globals, locals, fromlist, level)
             raise ImportError(f"Importing '{name}' is not permitted.")
 
@@ -573,7 +645,8 @@ def _execute_pillow_script(script_text: str, output_type: str = "gif") -> bytes:
             for k in [
                 "range", "len", "min", "max", "int", "float", "abs", "round",
                 "list", "dict", "set", "tuple", "bool", "enumerate", "zip",
-                "isinstance", "print", "Exception", "ValueError", "str", "True", "False", "None"
+                "isinstance", "print", "Exception", "ValueError", "str", "True", "False", "None",
+                "sorted", "reversed", "any", "all", "sum", "map", "filter", "chr", "ord", "pow", "divmod"
             ] if (hasattr(__builtins__, k) or (isinstance(__builtins__, dict) and k in __builtins__))
         }
         builtins_dict["__import__"] = safe_import
@@ -585,10 +658,13 @@ def _execute_pillow_script(script_text: str, output_type: str = "gif") -> bytes:
             "math": math,
             "random": random,
             "colorsys": colorsys,
+            "time": safe_time,
+            "itertools": itertools,
             "Image": Image,
             "ImageDraw": ImageDraw,
             "ImageColor": ImageColor,
-            "ImageFilter": ImageFilter
+            "ImageFilter": ImageFilter,
+            "ImageFont": ImageFont
         }
 
         cwd_before = os.getcwd()

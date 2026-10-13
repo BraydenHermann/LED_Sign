@@ -452,6 +452,8 @@ class GeminiGenerateRequest(BaseModel):
     attachments: Optional[List[GeminiAttachment]] = None
     apiKey: Optional[str] = None
     style: Optional[str] = None
+    history: Optional[List[str]] = None
+    model: Optional[str] = None
 
 class GeminiConfigRequest(BaseModel):
     apiKey: Optional[str] = None
@@ -465,6 +467,7 @@ class OpenAIGenerateRequest(BaseModel):
     attachments: Optional[List[GeminiAttachment]] = None
     apiKey: Optional[str] = None
     model: Optional[str] = None
+    history: Optional[List[str]] = None
 
 class AIGenerateRequest(BaseModel):
     provider: Optional[str] = "gemini"
@@ -473,6 +476,7 @@ class AIGenerateRequest(BaseModel):
     attachments: Optional[List[GeminiAttachment]] = None
     apiKey: Optional[str] = None
     model: Optional[str] = None
+    history: Optional[List[str]] = None
 
 def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_color: str) -> tuple:
     import base64
@@ -686,11 +690,11 @@ async def gemini_generate(req: GeminiGenerateRequest):
         
         def _run_gen():
             if media_type == "image":
-                return gemini_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey)
+                return gemini_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
             elif media_type == "video":
-                return gemini_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey)
+                return gemini_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
             else:
-                return gemini_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey)
+                return gemini_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
 
         return await asyncio.to_thread(_run_gen)
     except Exception as e:
@@ -732,11 +736,11 @@ async def openai_generate(req: OpenAIGenerateRequest):
         
         def _run_gen():
             if media_type == "image":
-                return openai_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey)
+                return openai_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
             elif media_type == "video":
-                return openai_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey)
+                return openai_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
             else:
-                return openai_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey)
+                return openai_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
 
         return await asyncio.to_thread(_run_gen)
     except Exception as e:
@@ -753,7 +757,8 @@ async def ai_generate(req: AIGenerateRequest):
             mediaType=req.mediaType,
             attachments=req.attachments,
             apiKey=req.apiKey,
-            model=req.model
+            model=req.model,
+            history=req.history
         )
         return await openai_generate(sub_req)
     else:
@@ -761,7 +766,9 @@ async def ai_generate(req: AIGenerateRequest):
             prompt=req.prompt,
             mediaType=req.mediaType,
             attachments=req.attachments,
-            apiKey=req.apiKey
+            apiKey=req.apiKey,
+            history=req.history,
+            model=req.model
         )
         return await gemini_generate(sub_req)
 

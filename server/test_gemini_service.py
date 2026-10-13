@@ -123,6 +123,64 @@ frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80
         gif_bytes = gemini_service._execute_pillow_script(script, output_type="gif")
         self.assertTrue(len(gif_bytes) > 0)
 
+    @unittest.skipUnless(HAS_PIL, "PIL required for time import test")
+    def test_execute_pillow_script_with_time_import(self):
+        # Verifies that LLM code importing time does not fail with "Importing 'time' is not permitted"
+        script = """```python
+import time
+from PIL import Image, ImageDraw
+
+frames = []
+for i in range(3):
+    img = Image.new('RGB', (64, 20), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rectangle([i*5, 2, i*5 + 10, 15], fill=(255, 255, 0))
+    time.sleep(0.01)
+    frames.append(img)
+
+frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80, loop=0)
+```"""
+        gif_bytes = gemini_service._execute_pillow_script(script, output_type="gif")
+        self.assertTrue(len(gif_bytes) > 0)
+
+    @unittest.skipUnless(HAS_PIL, "PIL required for from time import test")
+    def test_execute_pillow_script_with_from_time_import(self):
+        # Verifies that LLM code doing "from time import sleep" works without error
+        script = """```python
+from time import sleep
+from PIL import Image, ImageDraw
+
+frames = []
+for i in range(2):
+    img = Image.new('RGB', (64, 20), (0, 0, 0))
+    sleep(0.01)
+    frames.append(img)
+
+frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80, loop=0)
+```"""
+        gif_bytes = gemini_service._execute_pillow_script(script, output_type="gif")
+        self.assertTrue(len(gif_bytes) > 0)
+
+    @unittest.skipUnless(HAS_PIL, "PIL required for ImageFont test")
+    def test_execute_pillow_script_with_imagefont(self):
+        # Verifies that LLM code drawing text with ImageFont works properly
+        script = """```python
+from PIL import Image, ImageDraw, ImageFont
+import itertools
+
+font = ImageFont.load_default()
+frames = []
+for i in range(2):
+    img = Image.new('RGB', (64, 20), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.text((2, 2), "HIGH BEAMS", fill=(255, 255, 255), font=font)
+    frames.append(img)
+
+frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80, loop=0)
+```"""
+        gif_bytes = gemini_service._execute_pillow_script(script, output_type="gif")
+        self.assertTrue(len(gif_bytes) > 0)
+
 
 if __name__ == '__main__':
     unittest.main()
