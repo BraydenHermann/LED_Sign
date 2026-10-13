@@ -2276,11 +2276,11 @@ export default function App() {
       if (events) {
         const nextEvent = selectCalendarEvent(events, now);
         const nextEventId = nextEvent ? `${nextEvent.id}-${nextEvent.start_iso}` : null;
-        if (nextEventId !== lastActiveEventIdRef.current) {
+        if (nextEventId && lastActiveEventIdRef.current && nextEventId !== lastActiveEventIdRef.current) {
           console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current} -> ${nextEventId}. Clearing manual override.`);
-          lastActiveEventIdRef.current = nextEventId;
           setIsManualOverride(false);
         }
+        lastActiveEventIdRef.current = nextEventId;
       }
     } catch (err) {
       console.error("[auto-push] Error during transition check:", err);
@@ -2501,6 +2501,16 @@ export default function App() {
           if (savedLastPushedId && savedLastPushedId !== 'hw-slot-1') {
             console.log(`[connect] Resuming previously pushed preset: ${savedLastPushedId}`);
             setLastPushedId(savedLastPushedId);
+            if (savedLastPushedId.startsWith('hw-slot-')) {
+              const slotNum = parseInt(savedLastPushedId.replace('hw-slot-', ''), 10);
+              if (!isNaN(slotNum)) {
+                try {
+                  await axios.post(`${API_BASE}/preset?id=${slotNum}&mac=${encodeURIComponent(targetMac)}`);
+                } catch (e) {
+                  console.warn(`[connect] Failed to resume slot ${slotNum}:`, e);
+                }
+              }
+            }
           } else {
             console.log("[connect] Playing hardware default slot (slot 1)");
             setLastPushedId('hw-slot-1');

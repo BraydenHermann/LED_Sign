@@ -992,8 +992,21 @@ async def _connect_internal(req: ConnectRequest):
             except Exception:
                 pass
 
-            # Stop any hardware clock and halt boot playlist immediately upon connection
-            await stop_all_playback(blank=False)
+            # If a preset was playing prior to reconnect, resume it; otherwise stop boot playlist/clock
+            if current_display_mode and current_display_mode.startswith("preset-"):
+                try:
+                    slot_id = int(current_display_mode.split("-")[1])
+                    select_pkt = protocol.build_slot_select_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=False)
+                    await asyncio.sleep(0.05)
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=False)
+                    await asyncio.sleep(0.05)
+                    print(f"[connect] Resumed active preset slot {slot_id}")
+                except Exception as pe:
+                    print(f"[connect] Warning resuming preset playback: {pe}")
+            else:
+                await stop_all_playback(blank=False)
             try:
                 # Query hardware slot inventory (first 12 slots only)
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 12), response=False)
@@ -1256,11 +1269,11 @@ async def _play_preset(id: int, mac: str = ""):
                 await asyncio.sleep(0.1)
             except Exception:
                 pass
-            # Tell sign to display this specific saved slot in continuous single mode
+            # Tell sign to display this specific saved slot in continuous loop mode
             select_pkt = protocol.build_slot_select_command(id)
             await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
             await asyncio.sleep(0.05)
-            play_pkt = protocol.build_user_slot_play_command(id, loop_mode=0)
+            play_pkt = protocol.build_user_slot_play_command(id, loop_mode=1)
             await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
             await asyncio.sleep(0.05)
 
@@ -3271,7 +3284,7 @@ async def _save_preset(req: SavePresetRequest):
                     await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
                     await asyncio.sleep(0.1)
 
-                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
 
@@ -3332,7 +3345,7 @@ async def _save_preset(req: SavePresetRequest):
                     await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
                     await asyncio.sleep(0.05)
 
-                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
+                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
 
