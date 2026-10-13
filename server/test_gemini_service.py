@@ -102,6 +102,27 @@ frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80
         self.assertEqual(pil_gif.size, (64, 20))
         self.assertEqual(getattr(pil_gif, "n_frames", 1), 5)
 
+    @unittest.skipUnless(HAS_PIL, "PIL required for pixel shim test")
+    def test_execute_pillow_script_with_pixel_shims(self):
+        # Verifies that LLM code calling draw.pixel((x, y), fill) or draw.pixel(x, y, fill)
+        # succeeds without throwing "'ImageDraw' object has no attribute 'pixel'"
+        script = """```python
+from PIL import Image, ImageDraw
+
+frames = []
+for i in range(3):
+    img = Image.new('RGB', (64, 20), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.pixel((5, 5), fill=(255, 0, 0))
+    d.pixel(10, 10, (0, 255, 0))
+    d.putpixel((15, 15), fill=(0, 0, 255))
+    frames.append(img)
+
+frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80, loop=0)
+```"""
+        gif_bytes = gemini_service._execute_pillow_script(script, output_type="gif")
+        self.assertTrue(len(gif_bytes) > 0)
+
 
 if __name__ == '__main__':
     unittest.main()

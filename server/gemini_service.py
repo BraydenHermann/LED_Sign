@@ -340,7 +340,12 @@ def generate_still_image(
             if alt not in models_to_try:
                 models_to_try.append(alt)
         
-        parts = [{"text": f"{SYSTEM_CONSTRAINTS}\n\nTask: Generate Python Pillow script that creates a 64x20 PNG image for this prompt: '{prompt}'. Output ONLY executable Python code inside a ```python ``` block."}]
+        has_attachments = bool(attachments and len(attachments) > 0)
+        ref_guidance = ""
+        if has_attachments:
+            ref_guidance = f"\n- Reference Context: The attached media is the current 64x20 canvas or reference. Use it to guide adjustments for '{prompt}', preserving composition where helpful but enhancing whatever makes it look best."
+        
+        parts = [{"text": f"{SYSTEM_CONSTRAINTS}\n\nTask: Generate Python Pillow script that creates a 64x20 PNG image for this prompt: '{prompt}'.{ref_guidance}\n- In PIL (Pillow), use draw.point((x, y), fill=...) or image.putpixel((x, y), color) for individual pixels.\n- Output: Save directly to OUTPUT_PATH.\nOutput ONLY executable Python code inside a ```python ``` block."}]
         
         if attachments:
             for att in attachments:
@@ -418,9 +423,16 @@ def generate_animated_gif(
         if alt not in models_to_try:
             models_to_try.append(alt)
 
+    has_attachments = bool(attachments and len(attachments) > 0)
+    ref_guidance = ""
+    if has_attachments:
+        ref_guidance = f"""
+- REFERENCE CONTEXT: The attached image/media represents the current 64x20 LED sign canvas or reference context. Use this reference to guide your adjustments matching the user's prompt: "{prompt}". Preserve the layout, character styling, or color identity where helpful, but feel free to modify, polish, or redesign elements if that will help the result look significantly better.
+"""
+
     instruction = f"""{SYSTEM_CONSTRAINTS}
 
-Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".
+Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".{ref_guidance}
 
 CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - Image resolution: EXACTLY width=64, height=20.
@@ -429,6 +441,7 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - Background: pure solid black (0, 0, 0).
 - Seamless loop: the last frame must naturally loop back into the first frame.
 - Pixel Art / Geometry: Draw high-contrast shapes, icons, pixel characters, glowing lines, animated moving elements, scrolling accents, or neon effects.
+- In PIL (Pillow), use `draw.point((x, y), fill=...)` or `image.putpixel((x, y), (r, g, b))` for drawing individual pixels (ImageDraw does not natively have .pixel(), use .point()).
 - Output: Save the animated GIF directly to the filename specified in variable `OUTPUT_PATH`.
   Example: frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration={OPTIMAL_FRAME_DURATION_MS}, loop=0)
 - Do NOT import any packages other than PIL (Image, ImageDraw, ImageColor, ImageFilter), math, random, colorsys, and time.
@@ -521,6 +534,33 @@ def _execute_pillow_script(script_text: str, output_type: str = "gif") -> bytes:
         import sys
         import glob
         from PIL import Image, ImageDraw, ImageColor, ImageFilter
+
+        # Comprehensive shims on ImageDraw to support LLM code calling .pixel() etc.
+        def _shim_pixel(self, *args, **kwargs):
+            if not args and not kwargs:
+                return
+            if len(args) >= 2 and isinstance(args[0], (int, float)) and isinstance(args[1], (int, float)):
+                xy = (int(round(args[0])), int(round(args[1])))
+                fill = args[2] if len(args) > 2 else kwargs.get("fill", kwargs.get("color", None))
+                return self.point(xy, fill=fill)
+            elif len(args) >= 1:
+                xy = args[0]
+                fill = args[1] if len(args) > 1 else kwargs.get("fill", kwargs.get("color", None))
+                return self.point(xy, fill=fill)
+            return self.point(*args, **kwargs)
+
+        ImageDraw.ImageDraw.pixel = _shim_pixel
+        ImageDraw.ImageDraw.putpixel = _shim_pixel
+        ImageDraw.ImageDraw.set_pixel = _shim_pixel
+        ImageDraw.ImageDraw.draw_pixel = _shim_pixel
+        if not hasattr(ImageDraw.ImageDraw, 'dot'):
+            ImageDraw.ImageDraw.dot = _shim_pixel
+        if not hasattr(ImageDraw.ImageDraw, 'box'):
+            ImageDraw.ImageDraw.box = ImageDraw.ImageDraw.rectangle
+        if not hasattr(ImageDraw.ImageDraw, 'rect'):
+            ImageDraw.ImageDraw.rect = ImageDraw.ImageDraw.rectangle
+        if not hasattr(ImageDraw.ImageDraw, 'round_rectangle') and hasattr(ImageDraw.ImageDraw, 'rounded_rectangle'):
+            ImageDraw.ImageDraw.round_rectangle = ImageDraw.ImageDraw.rounded_rectangle
 
         def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
             base_mod = name.split(".")[0]

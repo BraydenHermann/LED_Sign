@@ -266,9 +266,12 @@ def stop_servers():
         for proc in (_backend_proc, _frontend_proc, _calendar_proc):
             if proc and proc.poll() is None:
                 try:
-                    proc.terminate()
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, **hidden_process_kwargs())
                 except Exception:
-                    pass
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
         _backend_proc = None
         _frontend_proc = None
         _calendar_proc = None

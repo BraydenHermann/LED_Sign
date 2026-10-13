@@ -187,9 +187,45 @@ function normalizeForSign(str) {
     .replace(/[\u0300-\u036f]/g, '');
 }
 
-function getEventDisplayString(ev) {
+function cleanEventTitle(title, isClean = true) {
+  if (!title) return 'Untitled Event';
+  if (!isClean) return title;
+
+  let cleaned = title;
+  const names = ['Brayden Hermann', 'Brayden', 'Hermann'];
+
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // " and Name", " & Name", ", and Name", ", & Name"
+    cleaned = cleaned.replace(new RegExp(`[\\s,]+(?:and|&)\\s+${escaped}\\b`, 'gi'), '');
+    // "Name and ", "Name & "
+    cleaned = cleaned.replace(new RegExp(`\\b${escaped}\\s+(?:and|&)\\s*`, 'gi'), '');
+    // " with Name"
+    cleaned = cleaned.replace(new RegExp(`\\s*(?:with)\\s+${escaped}\\b`, 'gi'), '');
+    // " - Name", " / Name", " : Name", " | Name"
+    cleaned = cleaned.replace(new RegExp(`\\s*[-/:|]\\s*${escaped}\\b`, 'gi'), '');
+    cleaned = cleaned.replace(new RegExp(`\\b${escaped}\\s*[-/:|]\\s*`, 'gi'), '');
+    // ", Name"
+    cleaned = cleaned.replace(new RegExp(`,\\s*${escaped}\\b`, 'gi'), '');
+    // Standalone Name
+    cleaned = cleaned.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), '');
+  }
+
+  // Clean trailing or leading punctuation and dangling conjunctions
+  cleaned = cleaned.replace(/\s*(?:and|&|\/|\-|:|,)\s*$/gi, '');
+  cleaned = cleaned.replace(/^\s*(?:and|&|\/|\-|:|,)\s*/gi, '');
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+
+  return cleaned || title.trim() || 'Untitled Event';
+}
+
+function getEventDisplayString(ev, isClean = null) {
   if (!ev) return 'IN A MEETING';
-  const summary = ev.summary || 'Untitled Event';
+  if (isClean === null) {
+    isClean = localStorage.getItem('loy_clean_name') !== 'false';
+  }
+  const rawSummary = ev.summary || 'Untitled Event';
+  const summary = normalizeForSign(isClean ? cleanEventTitle(rawSummary, true) : rawSummary);
   try {
     const endD = new Date(ev.end_iso);
     const timeFmt = new Intl.DateTimeFormat(undefined, { 
@@ -214,10 +250,9 @@ function getEventDisplayString(ev) {
     } else if (summary.length + 1 + shortEndTimeStr.length <= maxLen) {
       signText = `${summary} ${shortEndTimeStr}`;
     } else {
-      // Need to truncate title — do not include am/pm to save characters
-      const suffix = `... ${shortEndTimeStr}`;
-      const maxTitleLen = maxLen - suffix.length;
-      const truncTitle = summary.slice(0, Math.max(0, maxTitleLen)).trimEnd();
+      // Entire title doesn't fit: "-" and am/pm are dropped; fit as many title characters as possible.
+      const suffix = ` ${shortEndTimeStr}`;
+      const truncTitle = summary.slice(0, Math.max(0, maxLen - suffix.length)).trimEnd();
       signText = `${truncTitle}${suffix}`;
     }
 
@@ -1523,7 +1558,22 @@ export default function App() {
     connected: false, address: null, preview_url: null,
     calendar_connected: false, uptime: '—', frames: 0
   });
-  const [brightness, setBrightness] = useState(15);
+  const [brightness, setBrightness] = useState(() => {
+    const saved = parseInt(localStorage.getItem('loy_brightness'), 10);
+    return saved >= 1 && saved <= 15 ? saved : 15;
+  });
+  useEffect(() => {
+    try { localStorage.setItem('loy_brightness', String(brightness)); } catch (e) {}
+  }, [brightness]);
+  const brightnessSyncedRef = useRef(false);
+  useEffect(() => {
+    if (!status.connected) { brightnessSyncedRef.current = false; return; }
+    if (brightnessSyncedRef.current || pushingRef.current) return;
+    brightnessSyncedRef.current = true;
+    if (status.brightness !== undefined && status.brightness !== brightness) {
+      axios.post(`${API_BASE}/brightness?level=${brightness}`).catch(() => { brightnessSyncedRef.current = false; });
+    }
+  }, [status.connected, status.brightness]);
   const [speed, setSpeed] = useState(8);
 
   // Drag state for Saved Presets
@@ -2058,7 +2108,11 @@ export default function App() {
     try {
       const isClean = localStorage.getItem('loy_clean_name') !== 'false';
       const res = await axios.get(`${API_BASE}/calendar/today?clean_name=${isClean}`);
-      const evs = res.data?.events || [];
+      const rawEvs = res.data?.events || [];
+      const evs = rawEvs.map(ev => ({
+        ...ev,
+        summary: cleanEventTitle(ev.summary, isClean)
+      }));
       setEvents(evs);
       setCalLoading(false);
       return evs;
@@ -2601,10 +2655,12 @@ export default function App() {
           handleSetPushMessage('Saving event to Slot 1...');
 
           try {
+            const isCurrentlyPlaying = (lastPushedId === 'hw-slot-0') || (status?.display_mode === 'preset-0');
             const saveRes = await savePresetToSign({
               slot_id: 0,
               address: targetMac,
-              preset: eventPresetCopy
+              preset: eventPresetCopy,
+              is_currently_playing: isCurrentlyPlaying
             });
             const savedThumb = saveRes.data?.preview_url
               ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}`
@@ -2746,6 +2802,7 @@ export default function App() {
             savedPresets={savedPresets}
             setSavedPresets={setSavedPresets}
             syncHardwareSlots={syncHardwareSlots}
+            lastPushedId={lastPushedId}
             setLastPushedId={setLastPushedId}
             presetView={presetView}
             setPresetView={setPresetView}
@@ -2828,9 +2885,40 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
   };
 
-  const onBrightnessChange = async (val) => {
-    setBrightness(val);
-    try { await axios.post(`${API_BASE}/brightness?level=${val}`); } catch (e) {}
+  const [brightnessDragging, setBrightnessDragging] = useState(false);
+  // The slider works in percent (7–100; the sign's 15 levels map to ~7–100%).
+  const [brightnessRaw, setBrightnessRaw] = useState(() => {
+    const savedPct = parseFloat(localStorage.getItem('loy_brightness_pct'));
+    if (savedPct >= 7 && savedPct <= 100 && Math.max(1, Math.min(15, Math.round(savedPct * 15 / 100))) === brightness) return savedPct;
+    return Math.max(7, Math.min(100, Math.round(brightness * 100 / 15)));
+  });
+  useEffect(() => {
+    try { localStorage.setItem('loy_brightness_pct', String(brightnessRaw)); } catch (e) {}
+  }, [brightnessRaw]);
+
+  useEffect(() => {
+    if (!brightnessDragging) return;
+    const stop = () => setBrightnessDragging(false);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    return () => {
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+    };
+  }, [brightnessDragging]);
+
+  const onBrightnessChange = async (rawPct) => {
+    if (pushingRef?.current || pushing) return;
+    // Magnetic snap to 25% / 50% / 75% inside a small window; the lowest and
+    // highest values are the slider's own ends. Everything between stays selectable.
+    const snapPoints = [25, 50, 75];
+    const near = snapPoints.find(p => Math.abs(p - rawPct) <= 1.5);
+    const shown = Math.max(7, Math.min(100, near !== undefined ? near : rawPct));
+    setBrightnessRaw(shown);
+    const finalVal = Math.max(1, Math.min(15, Math.round(shown * 15 / 100)));
+    if (finalVal === brightness) return;
+    setBrightness(finalVal);
+    try { await axios.post(`${API_BASE}/brightness?level=${finalVal}`); } catch (e) {}
   };
 
   const onSpeedChange = async (val) => {
@@ -3094,11 +3182,16 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       // the upload. The local preset retains it for editing/exporting.
       if (presetForUpload.pixels?.length) delete presetForUpload.imgSrc;
 
+      const isCurrentlyPlaying = (lastPushedId === `hw-slot-${hwSlotId}`) || 
+        (lastPushedId === `preset-${hwSlotId}`) || 
+        (lastPushedId && slotObj?.preset?.id && lastPushedId === slotObj.preset.id) || 
+        (status?.display_mode === `preset-${hwSlotId}`);
       const res = await savePresetToSign({
         slot_id: hwSlotId,
         address: status.address || DEFAULT_MAC,
         preset: presetForUpload,
-        progress_id: progressId
+        progress_id: progressId,
+        is_currently_playing: isCurrentlyPlaying
       }, {
         timeout: 300000,
         onUploadProgress: (event) => {
@@ -3378,16 +3471,24 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   <PresetCardMedia preset={activePreset} now={now} />
                 </div>
               ) : status?.preview_url ? (
-                <img
-                  ref={previewRef}
-                  src={`${API_BASE}${status.preview_url}?t=${previewStamp}`}
-                  className={`${status.width && status.width > 64 ? "scrolling-preview" : "static-preview"} ${isLoaded ? 'loaded' : ''}`}
-                  style={status.width && status.width > 64 ? { '--scroll-duration': `${((64 + status.width) * Math.max(10, 80 - (activePreset?.speed !== undefined ? activePreset.speed : (status?.speed !== undefined ? status.speed : speed)) * 5)) / 1000}s` } : {}}
-                  onLoad={() => setIsLoaded(true)}
-                />
+                <>
+                  <img
+                    ref={previewRef}
+                    src={`${API_BASE}${status.preview_url}?t=${previewStamp}`}
+                    className={`${status.width && status.width > 64 ? "scrolling-preview" : "static-preview"} ${isLoaded ? 'loaded' : ''}`}
+                    style={status.width && status.width > 64 ? { '--scroll-duration': `${((64 + status.width) * Math.max(10, 80 - (activePreset?.speed !== undefined ? activePreset.speed : (status?.speed !== undefined ? status.speed : speed)) * 5)) / 1000}s` } : {}}
+                    onLoad={() => setIsLoaded(true)}
+                    onError={() => setIsLoaded(true)}
+                  />
+                  {!isLoaded && (
+                    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000000', zIndex: 5 }}>
+                      <RefreshCw size={26} className="animate-spin text-violet-400" />
+                    </div>
+                  )}
+                </>
               ) : (
-                <div style={{width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '12px'}}>
-                  Connecting...
+                <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000000' }}>
+                  <RefreshCw size={26} className="animate-spin text-violet-400" />
                 </div>
               )
             ) : (
@@ -3419,15 +3520,42 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           </div>
 
           <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-            <div className="brightness-rail glass-panel" style={{ opacity: status.connected ? 1 : 0.2, pointerEvents: status.connected ? 'auto' : 'none', padding: '12px 16px', flex: 1 }}>
+            <div className="brightness-rail glass-panel" style={{ opacity: status.connected ? (pushing || isConnecting ? 0.5 : 1) : 0.2, pointerEvents: (status.connected && !pushing && !isConnecting) ? 'auto' : 'none', padding: '12px 16px', flex: 1 }}>
               <Sun className="text-amber-400 flex-shrink-0" size={17} />
-              <input 
-                type="range" min="1" max="15" value={brightness} 
-                onChange={(e) => onBrightnessChange(parseInt(e.target.value))} 
-                className="h-slider" 
-                disabled={!status.connected}
-              />
-              <span className="font-bold text-slate-500 w-6 text-[10px] text-right">{brightness}</span>
+              <div style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', alignItems: 'center' }}>
+                <div aria-hidden="true" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, pointerEvents: 'none', opacity: brightnessDragging ? 1 : 0, transition: 'opacity 0.15s ease' }}>
+                  {[25, 50, 75].map(v => (
+                    <span key={v} style={{
+                      position: 'absolute',
+                      left: `calc(8px + (100% - 16px) * ${(v - 7) / 93})`,
+                      top: '50%',
+                      width: '2px',
+                      height: '12px',
+                      marginLeft: '-1px',
+                      marginTop: '-6px',
+                      borderRadius: '1px',
+                      background: 'rgba(255, 255, 255, 0.28)'
+                    }} />
+                  ))}
+                </div>
+                <input 
+                  type="range" min="7" max="100" step="0.5"
+                  value={brightnessRaw}
+                  onPointerDown={() => setBrightnessDragging(true)}
+                  onKeyDown={(e) => {
+                    if (['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp'].includes(e.key)) {
+                      e.preventDefault();
+                      const dir = (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? -1 : 1;
+                      onBrightnessChange(Math.max(7, Math.min(100, Math.round(brightnessRaw) + dir * 5)));
+                    }
+                  }}
+                  onChange={(e) => onBrightnessChange(parseFloat(e.target.value))} 
+                  className="brightness-slider" 
+                  style={{ position: 'relative', width: '100%', '--fill': `calc(8px + (100% - 16px) * ${(brightnessRaw - 7) / 93})` }}
+                  disabled={!status.connected || pushing || isConnecting}
+                />
+              </div>
+              <span className="font-bold text-slate-500 text-[10px] text-right flex-shrink-0" style={{ width: '30px', minWidth: '30px', fontVariantNumeric: 'tabular-nums' }}>{Math.round(brightnessRaw)}%</span>
             </div>
           </div>
         </div>
@@ -4270,6 +4398,7 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
               ev={ev}
               now={now}
               onPush={onPush}
+              cleanName={cleanName}
             />
           ))}
         </div>
@@ -4293,16 +4422,18 @@ function formatEventTime(ev) {
   }
 }
 
-function EventCard({ ev, now, onPush }) {
+function EventCard({ ev, now, onPush, cleanName }) {
+  const isClean = cleanName !== false;
   const timeStr = formatEventTime(ev);
-  const summary = ev?.summary || 'Untitled Event';
+  const rawSummary = ev?.summary || 'Untitled Event';
+  const summary = cleanEventTitle(rawSummary, isClean);
   const isDeclined = ev?.response_status?.toLowerCase() === 'declined' || summary.toLowerCase().includes('[declined]');
   const isActive = isEventActive(ev, now);
 
   const handleCardClick = (e) => {
     // If the click was on the link (title/time), don't push
     if (e.target.closest('a')) return;
-    const displayStr = getEventDisplayString(ev);
+    const displayStr = getEventDisplayString(ev, isClean);
     onPush(displayStr, true);
   };
 
@@ -4638,7 +4769,7 @@ function HslColorSlider({ label, value, onChange }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, setLastPushedId, presetView, setPresetView }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView }) {
   const fontReady = useFontReady();
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
@@ -4763,6 +4894,15 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     isDefault: false
   });
 
+  const [isAiExpanded, setIsAiExpanded] = useState(false);
+  const aiGeneratorRef = useRef(null);
+
+  useEffect(() => {
+    if (!isModalOpen || form.mode !== 'image') {
+      setIsAiExpanded(false);
+    }
+  }, [isModalOpen, form.mode]);
+
   const containerRef = useRef(null);
   const [containerWidth, setContainerWidth] = useState(600);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
@@ -4821,6 +4961,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     const acceptDrop = (event) => {
       if (!event.dataTransfer?.files?.length) return;
       event.preventDefault();
+      if (isAiExpanded && aiGeneratorRef.current?.handleAddFiles) {
+        aiGeneratorRef.current.handleAddFiles(event.dataTransfer.files);
+        return;
+      }
       const file = event.dataTransfer.files[0];
       setForm(prev => ({ ...prev, mode: 'image' }));
       setTimeout(() => handleMediaFile(file), 0);
@@ -4834,7 +4978,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       window.removeEventListener('dragover', allowDrop);
       window.removeEventListener('drop', acceptDrop);
     };
-  }, [isModalOpen]);
+  }, [isModalOpen, isAiExpanded]);
 
   const handleMediaDragOver = (e) => {
     e.preventDefault();
@@ -4852,6 +4996,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     e.preventDefault();
     e.stopPropagation();
     setIsDraggingOver(false);
+    if (isAiExpanded && aiGeneratorRef.current?.handleAddFiles) {
+      aiGeneratorRef.current.handleAddFiles(e.dataTransfer.files);
+      return;
+    }
     const file = e.dataTransfer.files?.[0];
     if (file) {
       handleMediaFile(file);
@@ -4959,27 +5107,44 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     });
   };
 
-  // Clipboard paste support (CTRL + V) when in IMAGE/VIDEO tab
+  // Clipboard paste support (CTRL + V)
   useEffect(() => {
-    if (!isModalOpen || form.mode !== 'image') return;
+    if (!isModalOpen) return;
 
     const handlePaste = (e) => {
+      const activeTag = document.activeElement?.tagName?.toLowerCase();
+      if (activeTag === 'input' || activeTag === 'textarea') {
+        return;
+      }
+
       const items = e.clipboardData?.items;
       if (!items) return;
+
+      const mediaFiles = [];
       for (let i = 0; i < items.length; i++) {
-        if (items[i].type.indexOf('image') !== -1) {
+        if (items[i].type && (items[i].type.startsWith('image/') || items[i].type.startsWith('video/'))) {
           const file = items[i].getAsFile();
-          if (file) {
-            handleMediaFile(file);
-            break;
-          }
+          if (file) mediaFiles.push(file);
+        }
+      }
+
+      if (mediaFiles.length > 0) {
+        if (isAiExpanded && aiGeneratorRef.current?.handleAddFiles) {
+          e.preventDefault();
+          aiGeneratorRef.current.handleAddFiles(mediaFiles);
+          return;
+        }
+
+        if (form.mode === 'image') {
+          e.preventDefault();
+          handleMediaFile(mediaFiles[0]);
         }
       }
     };
 
     window.addEventListener('paste', handlePaste);
     return () => window.removeEventListener('paste', handlePaste);
-  }, [isModalOpen, form.mode]);
+  }, [isModalOpen, form.mode, isAiExpanded]);
 
   // Global arrow key support for cropping (no need to click to focus first)
   useEffect(() => {
@@ -5518,10 +5683,12 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
             if (typeof setPresetView === 'function') setPresetView('saved');
             if (typeof setPushing === 'function') setPushing(true);
             if (typeof setPushMessage === 'function') setPushMessage('Saving default to Slot 2...');
+            const isCurrentlyPlaying = (lastPushedId === 'hw-slot-1') || (status?.display_mode === 'preset-1');
             const saveRes = await savePresetToSign({
               slot_id: 1,
               address: status.address || DEFAULT_MAC,
-              preset: defaultPresetCopy
+              preset: defaultPresetCopy,
+              is_currently_playing: isCurrentlyPlaying
             });
             console.log('[preset-save] Saved default preset to hardware slot 1');
             const savedThumb = saveRes.data?.preview_url 
@@ -6790,6 +6957,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     )}
 
                     <GeminiMediaGenerator 
+                      ref={aiGeneratorRef}
+                      isExpanded={isAiExpanded}
+                      onToggleExpand={setIsAiExpanded}
                       form={form} 
                       setForm={setForm} 
                       imageObjRef={imageObjRef} 

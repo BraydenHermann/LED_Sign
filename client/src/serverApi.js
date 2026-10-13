@@ -16,10 +16,15 @@ export function requireCompletedWrite(result) {
   throw new Error('The server did not confirm the slot write. Restart LED Sign’s servers and try again.');
 }
 
-async function postToCurrentServer(path, payload, options) {
+let _serverVersionChecked = false;
+
+async function postToCurrentServer(path, payload, options = {}) {
   try {
-    const { data: status } = await axios.get('/status', { timeout: 15000 });
-    requireCurrentServer(status);
+    if (!_serverVersionChecked) {
+      const { data: status } = await axios.get('/status', { timeout: 30000 });
+      requireCurrentServer(status);
+      _serverVersionChecked = true;
+    }
     return await axios.post(path, payload, options);
   } catch (error) {
     if (axios.isAxiosError(error) && !error.response) {

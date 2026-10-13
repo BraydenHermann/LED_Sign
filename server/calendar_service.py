@@ -1,6 +1,7 @@
 import datetime
 import os.path
 import traceback
+from typing import Optional
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -19,17 +20,46 @@ def clean_event_summary(summary: str, user_name: str = None) -> str:
         return "Untitled"
         
     cleaned = summary
+    names_to_strip = []
     if user_name:
-        escaped_name = re.escape(user_name)
-        cleaned = re.sub(r'\s*(?:and|&)\s+' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
+        names_to_strip.append(user_name.strip())
+        parts = user_name.strip().split()
+        if len(parts) > 1:
+            names_to_strip.append(parts[0])
+            names_to_strip.append(parts[-1])
+
+    # Always recognize Brayden and Hermann as user names for this environment
+    for default_n in ['Brayden Hermann', 'Brayden', 'Hermann']:
+        if default_n not in names_to_strip:
+            names_to_strip.append(default_n)
+
+    # Sort names by length descending so multi-word names match first
+    names_to_strip = sorted(list(set(n for n in names_to_strip if len(n) > 1)), key=len, reverse=True)
+
+    for name in names_to_strip:
+        escaped_name = re.escape(name)
+        # Matches: " and Name", " & Name", ", and Name", ", & Name"
+        cleaned = re.sub(r'[\s,]+(?:and|&)\s+' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
+        # Matches: "Name and ", "Name & "
         cleaned = re.sub(r'\b' + escaped_name + r'\s+(?:and|&)\s*', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\s*[-/]\s*' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b' + escaped_name + r'\s*[-/]\s*', '', cleaned, flags=re.IGNORECASE)
+        # Matches: " with Name"
+        cleaned = re.sub(r'\s*(?:with)\s+' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
+        # Matches: " - Name", " / Name", " : Name", " | Name"
+        cleaned = re.sub(r'\s*[-/:|]\s*' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b' + escaped_name + r'\s*[-/:|]\s*', '', cleaned, flags=re.IGNORECASE)
+        # Matches: ", Name"
+        cleaned = re.sub(r',\s*' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
+        # Matches standalone Name
+        cleaned = re.sub(r'\b' + escaped_name + r'\b', '', cleaned, flags=re.IGNORECASE)
         
-        if cleaned.strip().lower() == user_name.lower():
-            cleaned = ''
-            
-    cleaned = cleaned.strip()
+    # Clean up any leftover punctuation or dangling conjunctions
+    cleaned = re.sub(r'\s*(?:and|&|\/|\-|:|,)\s*$', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'^\s*(?:and|&|\/|\-|:|,)\s*', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+    # If stripping removed everything, keep the original summary
+    if not cleaned:
+        cleaned = summary.strip()
 
     # Transliterate French / European / special characters to ASCII equivalents
     cleaned = cleaned.replace('œ', 'oe').replace('Œ', 'OE').replace('æ', 'ae').replace('Æ', 'AE')
@@ -118,6 +148,21 @@ class CalendarService:
         if not self.creds or not self.creds.valid:
             return None
         return build('calendar', 'v3', credentials=self.creds)
+
+    def get_primary_user_name(self) -> Optional[str]:
+        if hasattr(self, '_cached_user_name') and self._cached_user_name:
+            return self._cached_user_name
+        service = self._get_service()
+        if not service:
+            return None
+        try:
+            cal = service.calendarList().get(calendarId='primary').execute()
+            if cal and cal.get('summary'):
+                self._cached_user_name = cal.get('summary')
+                return self._cached_user_name
+        except Exception:
+            pass
+        return None
 
     def get_active_events(self):
         """Return events that are currently happening right now."""
@@ -238,9 +283,9 @@ class CalendarService:
                     user_name = creator.get('displayName')
                     
                 if not user_name:
-                    user_name = os.environ.get('CALENDAR_DISPLAY_NAME')
+                    user_name = os.environ.get('CALENDAR_DISPLAY_NAME') or self.get_primary_user_name()
             
-            cleaned_summary = clean_event_summary(raw_summary, user_name)
+            cleaned_summary = clean_event_summary(raw_summary, user_name) if clean_name else raw_summary
             print(f"[calendar] Event: {cleaned_summary} (raw: {raw_summary}) | Status: {response_status} | Attendees: {len(attendees)}")
 
             # Only accepted calendar invites/events appear in the schedule to avoid spam

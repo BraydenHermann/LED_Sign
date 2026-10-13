@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useImperativeHandle } from 'react';
 import { 
   Paperclip, Film, Image as ImageIcon, X, 
   RefreshCw, AlertCircle, Layers, ChevronDown, KeyRound
@@ -57,14 +57,24 @@ const PROMPT_SUGGESTIONS = [
   }
 ];
 
-export default function GeminiMediaGenerator({ 
+const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({ 
   form, 
   setForm, 
   imageObjRef, 
   onGenerated,
-  onNotify
-}) {
-  const [isExpanded, setIsExpanded] = useState(false); // Collapsed by default
+  onNotify,
+  isExpanded: controlledExpanded,
+  onToggleExpand
+}, ref) {
+  const [internalExpanded, setInternalExpanded] = useState(false);
+  const isExpanded = controlledExpanded !== undefined ? controlledExpanded : internalExpanded;
+  const toggleExpanded = () => {
+    const next = !isExpanded;
+    if (onToggleExpand) onToggleExpand(next);
+    else setInternalExpanded(next);
+    if (!next) setShowKeys(false);
+  };
+
   const [provider, setProvider] = useState(() => localStorage.getItem('led_ai_provider') || 'gemini');
   const [providersStatus, setProvidersStatus] = useState(null);
   const [prompt, setPrompt] = useState('');
@@ -75,6 +85,8 @@ export default function GeminiMediaGenerator({
   const [showKeys, setShowKeys] = useState(false);
   const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('led_gemini_api_key') || '');
   const [openaiKey, setOpenaiKey] = useState(() => localStorage.getItem('led_openai_api_key') || '');
+  const [generationCount, setGenerationCount] = useState(0);
+  const [isAiDragging, setIsAiDragging] = useState(false);
 
   // Automatically close API key section whenever the parent section is collapsed
   useEffect(() => {
@@ -131,6 +143,45 @@ export default function GeminiMediaGenerator({
     setError('');
   };
 
+  // Helper to extract clean 64x20 data URL snapshot of current canvas
+  const getCanvasSnapshot = () => {
+    if (form?.imgSrc) {
+      return {
+        id: `canvas-ref-${Date.now()}`,
+        name: 'Canvas',
+        mimeType: form.fileType === 'gif' ? 'image/gif' : (form.fileType === 'video' ? 'video/mp4' : 'image/png'),
+        data: form.imgSrc,
+        isCanvasRef: true
+      };
+    }
+    if (form?.mode === 'drawing' && Array.isArray(form?.pixels) && form.pixels.some(p => p && p !== 0 && p !== '0' && p !== '#000000' && p !== '#000')) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 20;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = form.bgColor || '#000000';
+        ctx.fillRect(0, 0, 64, 20);
+        form.pixels.slice(0, 1280).forEach((col, idx) => {
+          if (col && typeof col === 'string' && col.startsWith('#')) {
+            const x = idx % 64;
+            const y = Math.floor(idx / 64);
+            ctx.fillStyle = col;
+            ctx.fillRect(x, y, 1, 1);
+          }
+        });
+        return {
+          id: `canvas-ref-${Date.now()}`,
+          name: 'Canvas',
+          mimeType: 'image/png',
+          data: canvas.toDataURL('image/png'),
+          isCanvasRef: true
+        };
+      }
+    }
+    return null;
+  };
+
   // Check if current canvas has artwork or media loaded
   const hasCanvasContent = Boolean(
     form?.mode === 'image'
@@ -144,6 +195,9 @@ export default function GeminiMediaGenerator({
     if (!files || !files.length) return;
     setError('');
     Array.from(files).forEach(file => {
+      if (file.type && !file.type.startsWith('image/') && !file.type.startsWith('video/')) {
+        return;
+      }
       const reader = new FileReader();
       reader.onload = (e) => {
         const dataUrl = e.target.result;
@@ -151,7 +205,7 @@ export default function GeminiMediaGenerator({
           ...prev,
           {
             id: `${Date.now()}-${Math.random()}`,
-            name: file.name,
+            name: file.name || 'Attached Media',
             mimeType: file.type || 'image/png',
             data: dataUrl
           }
@@ -161,57 +215,31 @@ export default function GeminiMediaGenerator({
     });
   };
 
+  useImperativeHandle(ref, () => ({
+    handleAddFiles: (files) => {
+      handleAddFiles(files);
+      if (onNotify) {
+        const count = files.length || 1;
+        const name = files[0]?.name || 'media';
+        onNotify(`Attached ${count > 1 ? `${count} files` : name} to ${provider === 'openai' ? 'OpenAI' : 'Gemini'} prompt!`);
+      }
+    },
+    attachCurrentCanvas: () => handleAttachCurrentCanvas(),
+    getCanvasSnapshot,
+    isExpanded: () => isExpanded
+  }));
+
   const handleAttachCurrentCanvas = () => {
     setError('');
-    if (!hasCanvasContent) {
-      setError('Current canvas is empty.');
+    const snapshot = getCanvasSnapshot();
+    if (!snapshot) {
+      setError('Current canvas does not contain any artwork to copy.');
       return;
     }
-
-    if (form.imgSrc) {
-      setAttachments(prev => [
-        ...prev,
-        {
-          id: `${Date.now()}-${Math.random()}`,
-          name: 'Current Preset Media',
-          mimeType: form.fileType === 'video' ? 'video/mp4' : 'image/png',
-          data: form.imgSrc
-        }
-      ]);
-      return;
-    }
-
-    if (form.mode === 'drawing' && Array.isArray(form.pixels) && form.pixels.some(p => p && p !== 0 && p !== '0' && p !== '#000000' && p !== '#000')) {
-      const canvas = document.createElement('canvas');
-      canvas.width = 64;
-      canvas.height = 20;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.fillStyle = form.bgColor || '#000000';
-        ctx.fillRect(0, 0, 64, 20);
-        form.pixels.forEach((col, idx) => {
-          if (col && typeof col === 'string' && col.startsWith('#')) {
-            const x = idx % 64;
-            const y = Math.floor(idx / 64);
-            ctx.fillStyle = col;
-            ctx.fillRect(x, y, 1, 1);
-          }
-        });
-        const dataUrl = canvas.toDataURL('image/png');
-        setAttachments(prev => [
-          ...prev,
-          {
-            id: `${Date.now()}-${Math.random()}`,
-            name: 'Canvas Snapshot (64x20)',
-            mimeType: 'image/png',
-            data: dataUrl
-          }
-        ]);
-        return;
-      }
-    }
-
-    setError('Current canvas does not contain any media to copy.');
+    setAttachments(prev => {
+      const filtered = prev.filter(a => !a.isCanvasRef);
+      return [...filtered, snapshot];
+    });
   };
 
   const handleRemoveAttachment = (id) => {
@@ -228,12 +256,21 @@ export default function GeminiMediaGenerator({
     setIsGenerating(true);
 
     try {
+      let finalAttachments = [...attachments];
+      // If sending another prompt while still on the edit/create page, attach canvas as context for adjustments
+      if (generationCount > 0 && !finalAttachments.some(a => a.isCanvasRef)) {
+        const snapshot = getCanvasSnapshot();
+        if (snapshot) {
+          finalAttachments.push(snapshot);
+        }
+      }
+
       const payload = {
         provider: provider,
         apiKey: (provider === 'openai' ? openaiKey : geminiKey) || undefined,
         prompt: prompt.trim(),
         mediaType: mediaType,
-        attachments: attachments.map(a => ({
+        attachments: finalAttachments.map(a => ({
           data: a.data,
           mimeType: a.mimeType
         }))
@@ -265,6 +302,24 @@ export default function GeminiMediaGenerator({
         frameDurationsMs: data.frameDurationsMs || undefined
       }));
 
+      // Increment generation count while on edit/create page
+      setGenerationCount(prev => prev + 1);
+
+      // Automatically attach the generated media as reference for the next prompt
+      const generatedRef = {
+        id: `canvas-ref-${Date.now()}`,
+        name: 'Canvas',
+        mimeType: (data.fileType === 'gif' || mediaType === 'gif') ? 'image/gif' : 'image/png',
+        data: data.imgSrc,
+        isCanvasRef: true
+      };
+      setAttachments(prev => {
+        const withoutCanvasRef = prev.filter(a => !a.isCanvasRef);
+        return [...withoutCanvasRef, generatedRef];
+      });
+      // Clear the prompt input so user can type adjustment prompt
+      setPrompt('');
+
       if (onGenerated) {
         onGenerated(data);
       }
@@ -292,23 +347,69 @@ export default function GeminiMediaGenerator({
     <div 
       className="glass-panel" 
       style={{ 
+        position: 'relative',
         padding: '14px 16px', 
         borderRadius: '16px', 
-        background: 'rgba(255, 255, 255, 0.03)', 
-        border: '1px solid rgba(255, 255, 255, 0.08)', 
+        background: isAiDragging ? 'rgba(99, 102, 241, 0.12)' : 'rgba(255, 255, 255, 0.03)', 
+        border: isAiDragging ? '1px dashed var(--accent-primary, #6366f1)' : '1px solid rgba(255, 255, 255, 0.08)', 
         display: 'flex', 
-        flexDirection: 'column'
+        flexDirection: 'column',
+        transition: 'background 0.2s ease, border 0.2s ease'
+      }}
+      onDragOver={(e) => {
+        if (isExpanded && e.dataTransfer?.types?.includes('Files')) {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsAiDragging(true);
+        }
+      }}
+      onDragEnter={(e) => {
+        if (isExpanded && e.dataTransfer?.types?.includes('Files')) {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsAiDragging(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget.contains(e.relatedTarget)) return;
+        setIsAiDragging(false);
+      }}
+      onDrop={(e) => {
+        if (isExpanded && e.dataTransfer?.files?.length) {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsAiDragging(false);
+          handleAddFiles(e.dataTransfer.files);
+          if (onNotify) {
+            onNotify(`Attached ${e.dataTransfer.files.length} file(s) to ${providerLabel} prompt!`);
+          }
+        }
       }}
     >
+      {/* Drop zone highlight banner */}
+      {isAiDragging && (
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          background: 'rgba(0, 0, 0, 0.75)',
+          border: '2px dashed var(--accent-primary, #6366f1)',
+          borderRadius: '16px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 50,
+          color: '#ffffff',
+          fontSize: '12px',
+          fontWeight: 700,
+          pointerEvents: 'none'
+        }}>
+          Drop media to attach directly to {providerLabel} prompt
+        </div>
+      )}
+
       {/* Collapsible Header Bar - No agent label in title */}
       <div 
-        onClick={() => {
-          setIsExpanded(prev => {
-            const next = !prev;
-            if (!next) setShowKeys(false);
-            return next;
-          });
-        }}
+        onClick={toggleExpanded}
         style={{ 
           display: 'flex', 
           alignItems: 'center', 
@@ -591,7 +692,30 @@ export default function GeminiMediaGenerator({
                 rows={3}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder={`Describe the ${mediaType === 'gif' ? 'looping GIF animation' : 'pixel art image'} you want ${providerLabel} to create...`}
+                onPaste={(e) => {
+                  const items = e.clipboardData?.items;
+                  if (!items) return;
+                  const mediaFiles = [];
+                  for (let i = 0; i < items.length; i++) {
+                    if (items[i].type && (items[i].type.startsWith('image/') || items[i].type.startsWith('video/'))) {
+                      const file = items[i].getAsFile();
+                      if (file) mediaFiles.push(file);
+                    }
+                  }
+                  if (mediaFiles.length > 0) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleAddFiles(mediaFiles);
+                    if (onNotify) {
+                      onNotify(`Attached ${mediaFiles.length} item(s) from clipboard to ${providerLabel} prompt!`);
+                    }
+                  }
+                }}
+                placeholder={
+                  generationCount > 0
+                    ? `Describe adjustments for ${providerLabel} (canvas attached as reference below)...`
+                    : `Describe the ${mediaType === 'gif' ? 'looping GIF animation' : 'pixel art image'} you want ${providerLabel} to create...`
+                }
                 className="input-field"
                 style={{
                   width: '100%',
@@ -731,7 +855,7 @@ export default function GeminiMediaGenerator({
                       color: '#e2e8f0'
                     }}
                   >
-                    {att.mimeType.startsWith('image/') ? (
+                    {att.mimeType?.startsWith('image/') ? (
                       <img src={att.data} alt="Context" style={{ width: '22px', height: '22px', objectFit: 'cover', borderRadius: '4px' }} />
                     ) : (
                       <Film size={16} className="text-slate-400" />
@@ -745,6 +869,7 @@ export default function GeminiMediaGenerator({
                       style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '2px', display: 'flex' }}
                       onMouseOver={(e) => { e.currentTarget.style.color = '#ef4444'; }}
                       onMouseOut={(e) => { e.currentTarget.style.color = '#94a3b8'; }}
+                      title="Remove attachment"
                     >
                       <X size={12} />
                     </button>
@@ -840,4 +965,6 @@ export default function GeminiMediaGenerator({
       </AnimatePresence>
     </div>
   );
-}
+});
+
+export default GeminiMediaGenerator;

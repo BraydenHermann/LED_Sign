@@ -164,9 +164,16 @@ def generate_animated_gif(
         if alt not in models_to_try:
             models_to_try.append(alt)
 
+    has_attachments = bool(attachments and len(attachments) > 0)
+    ref_guidance = ""
+    if has_attachments:
+        ref_guidance = f"""
+- REFERENCE CONTEXT: The attached image/media represents the current 64x20 LED sign canvas or reference context. Use this reference to guide your adjustments matching the user's prompt: "{prompt}". Preserve the layout, character styling, or color identity where helpful, but feel free to modify, polish, or redesign elements if that will help the result look significantly better.
+"""
+
     instruction = f"""{SYSTEM_CONSTRAINTS}
 
-Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".
+Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".{ref_guidance}
 
 CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - Image resolution: EXACTLY width=64, height=20.
@@ -175,6 +182,7 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - Background: pure solid black (0, 0, 0).
 - Seamless loop: the last frame must naturally loop back into the first frame.
 - Pixel Art / Geometry: Draw high-contrast shapes, icons, pixel characters, glowing lines, animated moving elements, scrolling accents, or neon effects.
+- In PIL (Pillow), use `draw.point((x, y), fill=...)` or `image.putpixel((x, y), (r, g, b))` for drawing individual pixels (ImageDraw does not natively have .pixel(), use .point()).
 - Output: Save the animated GIF directly to the filename specified in variable `OUTPUT_PATH`.
   Example: frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration={OPTIMAL_FRAME_DURATION_MS}, loop=0)
 - Do NOT import any packages other than PIL (Image, ImageDraw, ImageColor, ImageFilter), math, random, colorsys, and time.
@@ -185,7 +193,10 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
     if attachments:
         for att in attachments:
             data = att.get("data", "")
-            if data.startswith("data:image/"):
+            if data:
+                if not data.startswith("data:"):
+                    mime = att.get("mimeType", "image/png")
+                    data = f"data:{mime};base64,{data}"
                 user_content.append({
                     "type": "image_url",
                     "image_url": {
@@ -261,14 +272,22 @@ def generate_still_image(
         if alt not in models_to_try:
             models_to_try.append(alt)
 
+    has_attachments = bool(attachments and len(attachments) > 0)
+    ref_guidance = ""
+    if has_attachments:
+        ref_guidance = f"""
+- REFERENCE CONTEXT: The attached image/media represents the current 64x20 LED sign canvas or reference context. Use this reference to guide your adjustments matching the user's prompt: "{prompt}". Preserve the layout, character styling, or color identity where helpful, but feel free to modify, polish, or redesign elements if that will help the result look significantly better.
+"""
+
     instruction = f"""{SYSTEM_CONSTRAINTS}
 
-Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a single pixel-perfect 64x20 image matching: "{prompt}".
+Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a single pixel-perfect 64x20 image matching: "{prompt}".{ref_guidance}
 
 CRITICAL RULES:
 - Image resolution: EXACTLY width=64, height=20.
 - Background: pure solid black (0, 0, 0).
 - Pixel Art / Aesthetics: Vibrant neon, bold retro pixel art, high contrast.
+- In PIL (Pillow), use `draw.point((x, y), fill=...)` or `image.putpixel((x, y), (r, g, b))` for individual pixels (ImageDraw does not natively have .pixel(), use .point()).
 - Output: Save the PNG directly to the filename specified in variable `OUTPUT_PATH`.
   Example: img.save(OUTPUT_PATH)
 - Return ONLY the Python code block wrapped in ```python ... ```.
@@ -278,7 +297,10 @@ CRITICAL RULES:
     if attachments:
         for att in attachments:
             data = att.get("data", "")
-            if data.startswith("data:image/"):
+            if data:
+                if not data.startswith("data:"):
+                    mime = att.get("mimeType", "image/png")
+                    data = f"data:{mime};base64,{data}"
                 user_content.append({
                     "type": "image_url",
                     "image_url": {

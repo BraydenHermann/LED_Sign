@@ -1,5 +1,19 @@
 import os
 import sys
+import platform
+
+# Prevent Windows WMI/COM deadlocks when bleak queries platform.system() in background processes
+platform.system = lambda: "Windows"
+platform.machine = lambda: "AMD64"
+platform._wmi_query = lambda *args, **kwargs: iter([])
+
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 _SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
@@ -133,16 +147,23 @@ async def safe_write_gatt_char(char_uuid: str, data: Union[bytes, bytearray], re
         raise RuntimeError("Sign is not connected")
 
 async def stop_all_playback(blank: bool = False):
-    """Halts the onboard hardware playlist engine and clock."""
+    """Halts the onboard hardware playlist engine, active slot playback, and clock."""
     global connected_client, connection_ready
     if connected_client and connected_client.is_connected and connection_ready:
         try:
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
             await asyncio.sleep(0.02)
             await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
             await asyncio.sleep(0.02)
             if blank:
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+                await asyncio.sleep(0.02)
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+                await asyncio.sleep(0.02)
+                black_frame = protocol.bitmap_command([1] * (PANEL_W * PANEL_H), PANEL_W, PANEL_H, color="#000000")
+                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, black_frame, response=True)
+                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
                 await asyncio.sleep(0.02)
         except Exception as e:
             print(f"[stop_all_playback error] {e}")
@@ -165,7 +186,7 @@ async def calendar_background_loop():
             if not (os.path.exists(calendar_service.token_path) or (calendar_service.creds is not None and calendar_service.creds.valid)):
                 continue
 
-            events = calendar_service.get_today_events(clean_name=True)
+            events = await asyncio.to_thread(calendar_service.get_today_events, clean_name=True)
             if not events:
                 continue
                 
@@ -822,166 +843,178 @@ async def _connect_internal(req: ConnectRequest):
             connected_client = None
             await asyncio.sleep(0.5)
 
-    client = None
-
-    try:
-        target_mac = (req.address or "").strip().upper()
-        print(f"[connect] Target LED sign: {target_mac or 'auto-discover'}...")
-
-        def on_disconnect(c):
-            global connected_client, connection_ready, last_connected_mac, _reconnect_task
-            addr = getattr(c, 'address', 'unknown')
-            print(f"[BLE] Device disconnected callback: {addr}")
-            connected_client = None
-            connection_ready = False
-            # Schedule background auto-reconnect
-            mac_to_reconnect = last_connected_mac or (addr if addr != 'unknown' else '')
-            if mac_to_reconnect and (_reconnect_task is None or _reconnect_task.done()):
-                print(f"[BLE] Scheduling auto-reconnect to {mac_to_reconnect} in 4s...")
-                loop = asyncio.get_event_loop()
-                _reconnect_task = loop.create_task(_auto_reconnect(mac_to_reconnect, delay=4.0))
-
         client = None
-        last_connect_error = None
-        max_attempts = 3
 
-        for attempt in range(max_attempts):
-            found_device = None
-            stop_event = asyncio.Event()
+        try:
+            target_mac = (req.address or "").strip().upper()
+            print(f"[connect] Target LED sign: {target_mac or 'auto-discover'}...")
 
-            def detection_callback(device, adv_data):
-                nonlocal found_device
-                addr = device.address.upper()
-                name = (device.name or adv_data.local_name or "").upper()
-                services = [s.lower() for s in (adv_data.service_uuids or [])]
+            def on_disconnect(c):
+                global connected_client, connection_ready, last_connected_mac, _reconnect_task
+                addr = getattr(c, 'address', 'unknown')
+                print(f"[BLE] Device disconnected callback: {addr}")
+                connected_client = None
+                connection_ready = False
+                # Schedule background auto-reconnect
+                mac_to_reconnect = last_connected_mac or (addr if addr != 'unknown' else '')
+                if mac_to_reconnect and (_reconnect_task is None or _reconnect_task.done()):
+                    print(f"[BLE] Scheduling auto-reconnect to {mac_to_reconnect} in 4s...")
+                    loop = asyncio.get_event_loop()
+                    _reconnect_task = loop.create_task(_auto_reconnect(mac_to_reconnect, delay=4.0))
 
-                if target_mac:
-                    if addr == target_mac:
-                        found_device = device
-                        stop_event.set()
-                else:
-                    is_sign = (
-                        "0000fff0-0000-1000-8000-00805f9b34fb" in services
-                        or "HELLO" in name
-                        or "SIGN" in name
-                        or name.startswith("YS")
-                        or name.startswith("TL")
-                        or name.startswith("LOY")
-                    )
-                    if is_sign:
-                        found_device = device
-                        stop_event.set()
+            client = None
+            last_connect_error = None
+            max_attempts = 2
 
-            scanner = BleakScanner(detection_callback=detection_callback, scanning_mode="passive")
-            try:
-                await scanner.start()
+            for attempt in range(max_attempts):
+                found_device = None
+                stop_event = asyncio.Event()
+
+                def detection_callback(device, adv_data):
+                    nonlocal found_device
+                    addr = device.address.upper()
+                    name = (device.name or adv_data.local_name or "").upper()
+                    services = [s.lower() for s in (adv_data.service_uuids or [])]
+
+                    if target_mac:
+                        if addr == target_mac:
+                            print(f"[connect] Target detected: {addr} (name={name}, rssi={adv_data.rssi})", flush=True)
+                            found_device = device
+                            stop_event.set()
+                    else:
+                        is_sign = (
+                            "0000fff0-0000-1000-8000-00805f9b34fb" in services
+                            or "HELLO" in name
+                            or "SIGN" in name
+                            or name.startswith("YS")
+                            or name.startswith("TL")
+                            or name.startswith("LOY")
+                        )
+                        if is_sign:
+                            print(f"[connect] Sign discovered: {addr} (name={name}, rssi={adv_data.rssi})", flush=True)
+                            found_device = device
+                            stop_event.set()
+
+                print(f"[connect] Starting BLE scan (attempt {attempt + 1}/{max_attempts})...", flush=True)
+                scanner = BleakScanner(detection_callback=detection_callback, scanning_mode="active")
                 try:
-                    scan_wait = 20.0
-                    await asyncio.wait_for(stop_event.wait(), timeout=scan_wait)
-                except asyncio.TimeoutError:
-                    pass
-            except Exception as scan_err:
-                print(f"[connect] Scanner error: {scan_err}")
-                if "handle is invalid" in str(scan_err).lower() or "-2147024890" in str(scan_err):
-                    print("[connect] Critical WinRT COM apartment error. Restarting server to reset Bluetooth...")
-                    asyncio.get_event_loop().call_later(0.5, lambda: os._exit(1))
-                    raise Exception("Windows Bluetooth handle became invalid. Backend restarting with clean COM apartment...")
-            finally:
+                    await scanner.start()
+                    try:
+                        scan_wait = 6.0 if target_mac else 10.0
+                        await asyncio.wait_for(stop_event.wait(), timeout=scan_wait)
+                    except asyncio.TimeoutError:
+                        pass
+                except Exception as scan_err:
+                    print(f"[connect] Scanner error: {scan_err}", flush=True)
+                    if "handle is invalid" in str(scan_err).lower() or "-2147024890" in str(scan_err):
+                        print("[connect] Critical WinRT COM apartment error. Restarting server to reset Bluetooth...", flush=True)
+                        asyncio.get_event_loop().call_later(0.5, lambda: os._exit(1))
+                        raise Exception("Windows Bluetooth handle became invalid. Backend restarting with clean COM apartment...")
+                finally:
+                    try:
+                        await asyncio.wait_for(scanner.stop(), timeout=2.0)
+                    except Exception:
+                        pass
+
+                if not found_device:
+                    if target_mac:
+                        print(f"[connect] Attempt {attempt + 1}: {target_mac} not detected in live scan; attempting direct address connection...", flush=True)
+                        found_device = target_mac
+                    else:
+                        print(f"[connect] Attempt {attempt + 1}: Auto-discover sign not detected in live scan (is it powered on and in range?), retrying...", flush=True)
+                        await asyncio.sleep(1.0)
+                        continue
+
+                c = None
                 try:
-                    await scanner.stop()
-                except Exception:
-                    pass
-
-            if not found_device:
-                print(f"[connect] Attempt {attempt + 1}: {target_mac or 'sign'} not detected in live scan (is it powered on and in range?), retrying...")
-                await asyncio.sleep(1.0)
-                continue
-
-            c = None
-            try:
-                c = BleakClient(found_device, disconnected_callback=on_disconnect)
-                await c.connect(timeout=25.0)
-                if c.is_connected:
-                    # Validate that the connected device actually has the LOY WRITE characteristic!
-                    write_char = None
-                    for s in c.services:
-                        for ch in s.characteristics:
-                            if ch.uuid.lower() == protocol.WRITE_UUID.lower():
-                                write_char = ch
+                    target_label = getattr(found_device, 'address', found_device)
+                    print(f"[connect] Connecting BleakClient to {target_label}...", flush=True)
+                    c = BleakClient(found_device, disconnected_callback=on_disconnect)
+                    await c.connect(timeout=25.0)
+                    print(f"[connect] BleakClient connected! is_connected={c.is_connected}", flush=True)
+                    if c.is_connected:
+                        # Validate that the connected device actually has the LOY WRITE characteristic!
+                        write_char = None
+                        for s in c.services:
+                            for ch in s.characteristics:
+                                if ch.uuid.lower() == protocol.WRITE_UUID.lower():
+                                    write_char = ch
+                                    break
+                            if write_char:
                                 break
-                        if write_char:
-                            break
-                    if not write_char:
-                        print(f"[connect] Connected device {getattr(c, 'address', '')} is missing WRITE_UUID {protocol.WRITE_UUID}!")
-                        try:
+                        if not write_char:
+                            print(f"[connect] Connected device {getattr(c, 'address', '')} is missing WRITE_UUID {protocol.WRITE_UUID}!")
+                            try:
+                                await c.disconnect()
+                            except Exception:
+                                pass
+                            raise Exception(f"Device {getattr(c, 'address', '')} is not a valid LED sign (missing characteristic {protocol.WRITE_UUID}).")
+
+                        client = c
+                        break
+                except Exception as ce:
+                    last_connect_error = ce
+                    import traceback; traceback.print_exc(); print(f"[connect] Attempt {attempt + 1} connection failed: {ce}")
+                    try:
+                        if c is not None:
                             await c.disconnect()
-                        except Exception:
-                            pass
-                        raise Exception(f"Device {getattr(c, 'address', '')} is not a valid LED sign (missing characteristic {protocol.WRITE_UUID}).")
+                    except Exception:
+                        pass
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(1.0)
 
-                    client = c
-                    break
-            except Exception as ce:
-                last_connect_error = ce
-                import traceback; traceback.print_exc(); print(f"[connect] Attempt {attempt + 1} connection failed: {ce}")
-                try:
-                    if c is not None:
-                        await c.disconnect()
-                except Exception:
-                    pass
-                if attempt < max_attempts - 1:
-                    await asyncio.sleep(1.0)
+            if not client or not client.is_connected:
+                raise Exception(
+                    f"Could not connect to sign after {max_attempts} attempts. "
+                    f"Last error: {last_connect_error or 'Device not found in range'}. "
+                    "Try: 1) Toggle your PC Bluetooth off and on, 2) Power cycle the sign, 3) Remove the sign from Windows Bluetooth settings and re-pair."
+                )
 
-        if not client or not client.is_connected:
-            raise Exception(
-                f"Could not connect to sign after {max_attempts} attempts. "
-                f"Last error: {last_connect_error or 'Device not found in range'}. "
-                "Try: 1) Toggle your PC Bluetooth off and on, 2) Power cycle the sign, 3) Remove the sign from Windows Bluetooth settings and re-pair."
-            )
+            client_address = client.address
 
-        client_address = client.address
+            # Subscribe to notifications for slot query replies
+            try:
+                await client.start_notify(protocol.NOTIFY_UUID, notification_handler)
+                print("[connect] Subscribed to NOTIFY_UUID notifications.")
+            except Exception as ne:
+                print(f"[connect] Warning starting notify: {ne}")
 
-        # Subscribe to notifications for slot query replies
-        try:
-            await client.start_notify(protocol.NOTIFY_UUID, notification_handler)
-            print("[connect] Subscribed to NOTIFY_UUID notifications.")
-        except Exception as ne:
-            print(f"[connect] Warning starting notify: {ne}")
+            connected_client = client
+            connection_ready = True
 
-        connected_client = client
+            # Ensure sign display is powered on
+            try:
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=False)
+                await asyncio.sleep(0.05)
+                if brightness != 15:
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=False)
+                    await asyncio.sleep(0.05)
+            except Exception:
+                pass
 
-        # Ensure sign display is powered on
-        try:
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=False)
-            await asyncio.sleep(0.05)
-        except Exception:
-            pass
+            # Stop any hardware clock and halt boot playlist immediately upon connection
+            await stop_all_playback(blank=False)
+            try:
+                # Query hardware slot inventory (first 12 slots only)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 12), response=False)
+                await asyncio.sleep(0.05)
+            except Exception as se:
+                print(f"[connect] Warning initializing slots: {se}")
 
-        # Stop any hardware clock and halt boot playlist immediately upon connection
-        await stop_all_playback(blank=False)
-        try:
-            # Query hardware slot inventory (first 12 slots only)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 12), response=False)
-            await asyncio.sleep(0.05)
-        except Exception as se:
-            print(f"[connect] Warning initializing slots: {se}")
-
-        connection_ready = True
-        last_connected_mac = client_address.upper() if client_address else ""
-        return {"status": "success", "address": client_address}
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(f"[connect] FAILED: {type(e).__name__}: {e}")
-        if connected_client == client or not (connected_client and connected_client.is_connected):
-            connected_client = None
-            connection_ready = False
-        raise HTTPException(status_code=408, detail=f"{type(e).__name__}: {e}")
+            last_connected_mac = client_address.upper() if client_address else ""
+            return {"status": "success", "address": client_address}
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[connect] FAILED: {type(e).__name__}: {e}")
+            if connected_client == client or not (connected_client and connected_client.is_connected):
+                connected_client = None
+                connection_ready = False
+            raise HTTPException(status_code=408, detail=f"{type(e).__name__}: {e}")
 
 @app.post("/connect")
 async def connect(req: ConnectRequest):
-    async with connect_lock:
-        return await _connect_internal(req)
+    return await _connect_internal(req)
 
 @app.post("/disconnect")
 async def disconnect():
@@ -1086,9 +1119,13 @@ async def clear():
         
     return {"status": "success"}
 
+hardware_saving = False
+
 @app.post("/power")
 async def set_power(on: bool):
     global connected_client, connection_ready, power
+    if hardware_saving:
+        raise HTTPException(status_code=409, detail="Sign is busy saving a preset")
     if connected_client and connected_client.is_connected and connection_ready:
         try:
             packet = protocol.power_command(on)
@@ -1103,6 +1140,8 @@ async def set_power(on: bool):
 @app.post("/brightness")
 async def set_brightness(level: int):
     global connected_client, connection_ready, brightness
+    if hardware_saving:
+        raise HTTPException(status_code=409, detail="Sign is busy saving a preset")
     if connected_client and connected_client.is_connected and connection_ready:
         try:
             packet = protocol.brightness_command(level)
@@ -1331,7 +1370,7 @@ async def logout():
 @app.get("/calendar/today")
 async def get_today_events(clean_name: bool = True):
     try:
-        events = calendar_service.get_today_events(clean_name=clean_name)
+        events = await asyncio.to_thread(calendar_service.get_today_events, clean_name=clean_name)
         if events is None:
             return {"events": []}
         return {"events": events}
@@ -1684,14 +1723,14 @@ def truncate_text_to_width(text: str, font, max_width: int) -> str:
     if (bbox[2] - bbox[0]) <= max_width:
         return text
         
-    # Truncate character by character and append "..."
+    # Truncate character by character (no ellipsis)
     for i in range(len(text) - 1, 0, -1):
-        truncated = text[:i] + "..."
+        truncated = text[:i].rstrip()
         bbox = draw.textbbox((0, 0), truncated, font=font)
         if (bbox[2] - bbox[0]) <= max_width:
             return truncated
             
-    return "..."
+    return text[:1]
 
 def render_text_image(text: str, font, text_color: str, bg_color: str):
     temp_img = Image.new("RGB", (1, 1), bg_color)
@@ -2870,6 +2909,7 @@ class SavePresetRequest(BaseModel):
     preset: PushTextRequest
     address: str = ""
     progress_id: Optional[str] = None
+    is_currently_playing: Optional[bool] = None
 
 @app.get("/save-progress/{progress_id}")
 async def get_save_progress(progress_id: str):
@@ -2884,8 +2924,13 @@ def encode_var_len(val: int) -> bytes:
 async def save_preset(req: SavePresetRequest):
     # A complete file transfer is one transaction. Calendar saves and manual
     # slot selections must not interleave session, chunk and play packets.
+    global hardware_saving
     async with preset_switch_lock:
-        return await _save_preset(req)
+        hardware_saving = True
+        try:
+            return await _save_preset(req)
+        finally:
+            hardware_saving = False
 
 
 async def _save_preset(req: SavePresetRequest):
@@ -2901,7 +2946,7 @@ async def _save_preset(req: SavePresetRequest):
         if progress_id:
             save_progress[progress_id] = {"progress": max(0, min(100, int(value))), "phase": phase}
 
-    # The browser uses 0â€“15% for uploading the preset. Begin server-side work
+    # The browser uses 0–15% for uploading the preset. Begin server-side work
     # at the same boundary so progress never appears to move backward.
     report_progress(15, "Preparing preset")
 
@@ -2911,6 +2956,7 @@ async def _save_preset(req: SavePresetRequest):
     preset = req.preset
     slot_id = req.slot_id # 0-indexed slot index (0 to 11)
     mac_str = (req.address or (connected_client.address if connected_client else "") or "").replace(':', '').lower()
+    is_playing_target_slot = req.is_currently_playing if req.is_currently_playing is not None else (current_display_mode == f"preset-{slot_id}")
     
     if preset.mode == 'clock':
         try:
@@ -3162,24 +3208,7 @@ async def _save_preset(req: SavePresetRequest):
         gif_bytes = await asyncio.to_thread(encode_gif)
         report_progress(60, "Writing to sign")
         
-        # Update live dashboard preview files immediately so the UI reflects what's being uploaded
-        current_gif = os.path.join(STATIC_DIR, "current.gif")
-        current_png = os.path.join(STATIC_DIR, "current.png")
-        if is_anim:
-            save_preview_bytes(gif_bytes, current_gif)
-            if os.path.exists(current_png):
-                try: os.remove(current_png)
-                except Exception: pass
-        else:
-            if pil_frames:
-                try:
-                    im = pil_frames[0].copy()
-                    im.thumbnail((PANEL_W, PANEL_H))
-                    im.convert("RGB").save(current_png)
-                except Exception: pass
-            if os.path.exists(current_gif):
-                try: os.remove(current_gif)
-                except Exception: pass
+        # Live preview files are published only after the transfer succeeds (see below).
 
         if not connected_client or not connected_client.is_connected or not connection_ready:
             raise RuntimeError("Sign disconnected before the slot transfer")
@@ -3188,17 +3217,16 @@ async def _save_preset(req: SavePresetRequest):
                 speed = preset.speed if preset.speed is not None else current_speed
                 speed = max(1, min(15, speed))
 
-                # Preserve the previously working sequence: blank immediately
-                # before transfer, after rendering/encoding is complete.
+                # Blank screen to black and halt onboard playback while saving to hardware flash.
+                # Turn off physical screen display and cancel background playback while saving to hardware flash.
+                # When the screen is powered off, the MCU does not read SPI flash to refresh the matrix,
+                # completely eliminating SPI read/write bus contention and guaranteeing a solid black screen.
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
+                await asyncio.sleep(0.02)
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
                 await asyncio.sleep(0.02)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
-                await asyncio.sleep(0.02)
-                black_frame = protocol.bitmap_command([1] * (PANEL_W * PANEL_H), PANEL_W, PANEL_H, color="#000000")
-                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, black_frame, response=True)
-                await asyncio.sleep(0.02)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
-                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(False), response=True)
+                await asyncio.sleep(0.05)
 
                 if is_anim:
                     # Animated GIF/video and animated text:
@@ -3245,6 +3273,10 @@ async def _save_preset(req: SavePresetRequest):
 
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=0)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+                    await asyncio.sleep(0.05)
+
+                    # Re-enable physical screen display to show newly saved preset
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
                     await asyncio.sleep(0.05)
 
                     hardware_slots_state[slot_id] = {
@@ -3304,6 +3336,13 @@ async def _save_preset(req: SavePresetRequest):
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
                     await asyncio.sleep(0.05)
 
+                    # Re-enable physical screen display to show newly saved preset
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
+                    await asyncio.sleep(0.05)
+                    if brightness != 15:
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
+                        await asyncio.sleep(0.05)
+
                     hardware_slots_state[slot_id] = {
                         "slot_id": slot_id,
                         "occupied": True,
@@ -3328,6 +3367,24 @@ async def _save_preset(req: SavePresetRequest):
         preset_gif_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.gif")
         save_preview_bytes(_json.dumps(preset.model_dump()).encode("utf-8"), preset_json_path)
         save_preview_bytes(gif_bytes, preset_gif_path)
+
+        current_gif = os.path.join(STATIC_DIR, "current.gif")
+        current_png = os.path.join(STATIC_DIR, "current.png")
+        if is_anim:
+            save_preview_bytes(gif_bytes, current_gif)
+            if os.path.exists(current_png):
+                try: os.remove(current_png)
+                except Exception: pass
+        else:
+            if pil_frames:
+                try:
+                    im = pil_frames[0].copy()
+                    im.thumbnail((PANEL_W, PANEL_H))
+                    im.convert("RGB").save(current_png)
+                except Exception: pass
+            if os.path.exists(current_gif):
+                try: os.remove(current_gif)
+                except Exception: pass
 
         # Increment frames sent to signal status updates
         current_display_mode = f"preset-{slot_id}"
