@@ -248,13 +248,28 @@ function getEventDisplayString(ev, isClean = null) {
     } else if (withShort.length <= maxLen) {
       // Otherwise, do not include it
       signText = withShort;
-    } else if (summary.length + 1 + shortEndTimeStr.length <= maxLen) {
-      signText = `${summary} ${shortEndTimeStr}`;
     } else {
-      // Entire title doesn't fit: "-" and am/pm are dropped; fit as many title characters as possible.
-      const suffix = ` ${shortEndTimeStr}`;
-      const truncTitle = summary.slice(0, Math.max(0, maxLen - suffix.length)).trimEnd();
-      signText = `${truncTitle}${suffix}`;
+      // Preserve whole words when the title needs truncation. This lets us keep
+      // the separator (and am/pm when it still fits) instead of displaying a
+      // clipped word such as "Touchp 11:30".
+      const shortSuffix = ` - ${shortEndTimeStr}`;
+      const fullSuffix = ` - ${rawEndTimeStr}`;
+      const titleLimit = Math.max(0, maxLen - shortSuffix.length);
+      const clipped = summary.slice(0, titleLimit).trimEnd();
+      const cutMidToken = clipped.length < summary.length && !/[\s/|:,;]/.test(summary[clipped.length]);
+      const truncTitle = cutMidToken
+        ? (clipped.replace(/(?:\s+|[/|:,;])+[^\s/|:,;]*$/, '').trimEnd() || clipped)
+        : clipped;
+
+      if (truncTitle && `${truncTitle}${fullSuffix}`.length <= maxLen) {
+        signText = `${truncTitle}${fullSuffix}`;
+      } else if (truncTitle) {
+        signText = `${truncTitle}${shortSuffix}`;
+      } else {
+        // A title containing one very long word has no safe word boundary.
+        // Keep the end time readable rather than producing an empty label.
+        signText = shortEndTimeStr;
+      }
     }
 
     // Internal pipe-delimited format used by handlePush: "display ||| start - end"
