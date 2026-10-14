@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useImperativeHandle } from 'react';
 import { 
-  Paperclip, Film, Image as ImageIcon, X, 
+  Paperclip, Film, Image as ImageIcon, Upload, X, 
   RefreshCw, AlertCircle, Layers, ChevronDown, KeyRound
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -55,10 +55,6 @@ const PROMPT_SUGGESTIONS = [
     label: 'Pixel campfire...',
     prompt: 'Pixel campfire with glowing embers and smoke'
   },
-  {
-    label: 'Car: Turn off high beams...',
-    prompt: 'Car rear window sign: Large bold "TURN OFF" then "HIGH BEAMS" with flashing headlight high beams animation'
-  }
 ];
 
 export const GEMINI_MODELS = [
@@ -80,7 +76,11 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
   onGenerated,
   onNotify,
   isExpanded: controlledExpanded,
-  onToggleExpand
+  onToggleExpand,
+  onCloseSidePanel,
+  onProviderChange,
+  className = '',
+  style = {}
 }, ref) {
   const [internalExpanded, setInternalExpanded] = useState(false);
   const isExpanded = controlledExpanded !== undefined ? controlledExpanded : internalExpanded;
@@ -136,12 +136,15 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
           if (isMounted && res?.data) {
             setProvidersStatus(res.data);
             if (!localStorage.getItem('led_ai_provider')) {
-              setProvider(res.data.default_provider || 'gemini');
+              const defaultProvider = res.data.default_provider || 'gemini';
+              setProvider(defaultProvider);
+              onProviderChange?.(defaultProvider);
             }
           }
         })
         .catch(err => {
           console.debug('[AI Studio] Could not fetch AI providers, will retry:', err);
+          if (isMounted) setProvidersStatus({ unavailable: true });
         });
     };
     fetchProviders();
@@ -154,11 +157,12 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
       isMounted = false;
       clearInterval(interval);
     };
-  }, [providersStatus]);
+  }, [providersStatus, onProviderChange]);
 
   const handleSelectProvider = (newProvider) => {
     setProvider(newProvider);
     localStorage.setItem('led_ai_provider', newProvider);
+    onProviderChange?.(newProvider);
     setError('');
   };
 
@@ -359,22 +363,24 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
   const isGemini = provider === 'gemini';
   const providerLabel = isGemini ? 'Gemini' : 'OpenAI';
   const activeBrandBg = isGemini ? GEMINI_GRADIENT : OPENAI_COLOR;
+  const activeBrandBorder = isGemini ? '#9177C7' : OPENAI_COLOR;
   const activeBrandShadow = isGemini 
     ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(71, 150, 227, 0.25)' 
     : '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(116, 170, 156, 0.25)';
 
   return (
     <div 
-      className="glass-panel" 
+      className={`glass-panel ${className}`} 
       style={{ 
         position: 'relative',
         padding: '14px 16px', 
         borderRadius: '16px', 
-        background: isAiDragging ? 'rgba(99, 102, 241, 0.12)' : 'rgba(255, 255, 255, 0.03)', 
-        border: isAiDragging ? '1px dashed var(--accent-primary, #6366f1)' : '1px solid rgba(255, 255, 255, 0.08)', 
+        background: isAiDragging ? (isGemini ? 'rgba(145, 119, 199, 0.15)' : 'rgba(116, 170, 156, 0.15)') : 'var(--card-bg)',
+        border: isAiDragging ? `2px dashed ${activeBrandBorder}` : '1px solid rgba(255, 255, 255, 0.08)', 
         display: 'flex', 
         flexDirection: 'column',
-        transition: 'background 0.2s ease, border 0.2s ease'
+        transition: 'background 0.2s ease, border 0.2s ease',
+        ...style
       }}
       onDragOver={(e) => {
         if (isExpanded && e.dataTransfer?.types?.includes('Files')) {
@@ -411,30 +417,33 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         <div style={{
           position: 'absolute',
           inset: 0,
-          background: 'rgba(0, 0, 0, 0.75)',
-          border: '2px dashed var(--accent-primary, #6366f1)',
+          background: isGemini ? 'rgba(145, 119, 199, 0.15)' : 'rgba(116, 170, 156, 0.15)',
+          border: `2px dashed ${activeBrandBorder}`,
           borderRadius: '16px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
+          flexDirection: 'column',
+          gap: '8px',
           zIndex: 50,
-          color: '#ffffff',
-          fontSize: '12px',
+          color: activeBrandBorder,
+          fontSize: '14px',
           fontWeight: 700,
           pointerEvents: 'none'
         }}>
-          Drop media to attach directly to {providerLabel} prompt
+          <Upload size={32} className="animate-bounce mb-2" />
+          <span>Drop to Attach File</span>
         </div>
       )}
 
-      {/* Collapsible Header Bar - No agent label in title */}
+      {/* Panel header */}
       <div 
-        onClick={toggleExpanded}
+        onClick={onCloseSidePanel ? undefined : toggleExpanded}
         style={{ 
           display: 'flex', 
           alignItems: 'center', 
           justifyContent: 'space-between', 
-          cursor: 'pointer',
+          cursor: onCloseSidePanel ? 'default' : 'pointer',
           userSelect: 'none'
         }}
       >
@@ -458,17 +467,37 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
           </div>
           <div>
             <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 800, color: '#f8fafc' }}>
-              {isGemini ? 'Google Gemini' : 'OpenAI'}
+              {providerLabel}
             </h4>
           </div>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <ChevronDown 
-            size={18} 
-            className="text-slate-400 transition-transform duration-200" 
-            style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }} 
-          />
+          {onCloseSidePanel && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCloseSidePanel();
+              }}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: '#94a3b8',
+                cursor: 'pointer',
+                padding: '2px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+              onMouseOver={e => e.currentTarget.style.color = '#ffffff'}
+              onMouseOut={e => e.currentTarget.style.color = '#94a3b8'}
+              title="Close AI Studio side panel"
+            >
+              <X size={16} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -482,7 +511,7 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
             transition={{ duration: 0.2 }}
             style={{ overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: '14px', marginTop: '14px' }}
           >
-            {/* AI Provider Selector: Google Gemini vs ChatGPT */}
+            {/* AI Provider Selector */}
             <div style={{ display: 'flex', gap: '8px' }}>
               <button
                 type="button"
@@ -494,6 +523,7 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '6px',
+                  height: '42px',
                   background: isGemini ? GEMINI_GRADIENT : 'rgba(255, 255, 255, 0.05)',
                   backgroundRepeat: 'no-repeat',
                   backgroundClip: 'padding-box',
@@ -504,7 +534,7 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                 }}
               >
                 <GeminiLogo size={13} />
-                <span>Google Gemini</span>
+                <span>Gemini</span>
               </button>
               <button
                 type="button"
@@ -516,6 +546,7 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '6px',
+                  height: '42px',
                   background: !isGemini ? OPENAI_COLOR : 'rgba(255, 255, 255, 0.05)',
                   backgroundRepeat: 'no-repeat',
                   backgroundClip: 'padding-box',
@@ -528,66 +559,6 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                 <OpenAILogo size={13} />
                 <span>OpenAI</span>
               </button>
-            </div>
-
-            {/* AI Model Selector */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: '11px', fontWeight: 700, color: '#cbd5e1' }}>AI Model</span>
-                <span style={{ fontSize: '10px', color: '#94a3b8' }}>
-                  {isGemini ? 'Gemini 3.8 Flash is recommended for visual code' : 'GPT-4o is recommended for visual code'}
-                </span>
-              </div>
-              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                {(isGemini ? GEMINI_MODELS : OPENAI_MODELS).map(m => {
-                  const activeModel = isGemini ? geminiModel : openaiModel;
-                  const isSelected = activeModel === m.id;
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => {
-                        if (isGemini) {
-                          setGeminiModel(m.id);
-                          localStorage.setItem('led_gemini_model', m.id);
-                        } else {
-                          setOpenaiModel(m.id);
-                          localStorage.setItem('led_openai_model', m.id);
-                        }
-                      }}
-                      className="btn-styled text-[11px] py-1.5 px-2.5 rounded-xl transition-all"
-                      style={{
-                        flex: '1 1 auto',
-                        minWidth: '100px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '5px',
-                        background: isSelected ? activeBrandBg : 'rgba(255, 255, 255, 0.04)',
-                        border: 'none',
-                        boxShadow: isSelected ? activeBrandShadow : '0 0 0 1px rgba(255, 255, 255, 0.08)',
-                        color: isSelected ? '#ffffff' : 'var(--text-muted)',
-                        fontWeight: isSelected ? 700 : 500,
-                        overflow: 'hidden'
-                      }}
-                    >
-                      <span>{m.label}</span>
-                      {m.tag && (
-                        <span style={{
-                          fontSize: '9px',
-                          fontWeight: 700,
-                          padding: '1px 5px',
-                          borderRadius: '5px',
-                          background: isSelected ? 'rgba(0, 0, 0, 0.28)' : 'rgba(255, 255, 255, 0.08)',
-                          color: isSelected ? '#ffffff' : '#94a3b8'
-                        }}>
-                          {m.tag}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
             </div>
 
             {/* API Key: users can supply their own keys to override server .env keys */}
@@ -608,6 +579,9 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
               } else if (providersStatus === null) {
                 statusText = 'Checking...';
                 statusColor = '#94a3b8';
+              } else if (providersStatus.unavailable) {
+                statusText = 'Server unavailable';
+                statusColor = '#fbbf24';
               } else {
                 statusText = 'No key set';
                 statusColor = '#fca5a5';
@@ -717,6 +691,63 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                 </div>
               );
             })()}
+
+            {/* AI Model Selector */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+              gap: '6px'
+            }}>
+              {(isGemini ? GEMINI_MODELS : OPENAI_MODELS).map(m => {
+                const activeModel = isGemini ? geminiModel : openaiModel;
+                const isSelected = activeModel === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => {
+                      if (isGemini) {
+                        setGeminiModel(m.id);
+                        localStorage.setItem('led_gemini_model', m.id);
+                      } else {
+                        setOpenaiModel(m.id);
+                        localStorage.setItem('led_openai_model', m.id);
+                      }
+                    }}
+                    className="btn-styled text-[11px] py-1.5 px-2 rounded-xl transition-all"
+                    style={{
+                      width: '100%',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '2px',
+                      background: isSelected ? activeBrandBg : 'rgba(255, 255, 255, 0.04)',
+                      border: 'none',
+                      boxShadow: isSelected ? activeBrandShadow : '0 0 0 1px rgba(255, 255, 255, 0.08)',
+                      color: isSelected ? '#ffffff' : 'var(--text-muted)',
+                      fontWeight: isSelected ? 700 : 500,
+                      overflow: 'hidden'
+                    }}
+                  >
+                    <span style={{ lineHeight: 1.2 }}>{m.label}</span>
+                    {m.tag && (
+                      <span style={{
+                        fontSize: '9px',
+                        fontWeight: 700,
+                        lineHeight: 1,
+                        padding: '1.5px 6px',
+                        borderRadius: '4px',
+                        background: isSelected ? 'rgba(0, 0, 0, 0.28)' : 'rgba(255, 255, 255, 0.08)',
+                        color: isSelected ? '#ffffff' : '#94a3b8'
+                      }}>
+                        {m.tag}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
 
             {/* Format Selector: Follows agent branding */}
             <div style={{ display: 'flex', gap: '8px' }}>

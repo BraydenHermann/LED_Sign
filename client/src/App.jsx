@@ -2,7 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 're
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { savePresetToSign, processVideoMedia } from './serverApi';
-import GeminiMediaGenerator from './GeminiMediaGenerator';
+import GeminiMediaGenerator, { GeminiLogo, OpenAILogo } from './GeminiMediaGenerator';
 
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -4917,6 +4917,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   });
 
   const [isAiExpanded, setIsAiExpanded] = useState(false);
+  const [aiProvider, setAiProvider] = useState(() => localStorage.getItem('led_ai_provider') || 'gemini');
   const aiGeneratorRef = useRef(null);
 
   useEffect(() => {
@@ -4976,17 +4977,14 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
   };
 
-  // A media file dropped anywhere over the preset editor becomes an image/video
-  // preset, even if the user was editing text, drawing, or a clock.
+  // A media file dropped over the preset editor becomes an image/video preset,
+  // even while the AI side panel is open. The AI panel handles only drops on
+  // its own surface.
   useEffect(() => {
     if (!isModalOpen) return;
     const acceptDrop = (event) => {
       if (!event.dataTransfer?.files?.length) return;
       event.preventDefault();
-      if (isAiExpanded && aiGeneratorRef.current?.handleAddFiles) {
-        aiGeneratorRef.current.handleAddFiles(event.dataTransfer.files);
-        return;
-      }
       const file = event.dataTransfer.files[0];
       setForm(prev => ({ ...prev, mode: 'image' }));
       setTimeout(() => handleMediaFile(file), 0);
@@ -5000,7 +4998,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       window.removeEventListener('dragover', allowDrop);
       window.removeEventListener('drop', acceptDrop);
     };
-  }, [isModalOpen, isAiExpanded]);
+  }, [isModalOpen]);
 
   const handleMediaDragOver = (e) => {
     e.preventDefault();
@@ -5018,10 +5016,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     e.preventDefault();
     e.stopPropagation();
     setIsDraggingOver(false);
-    if (isAiExpanded && aiGeneratorRef.current?.handleAddFiles) {
-      aiGeneratorRef.current.handleAddFiles(e.dataTransfer.files);
-      return;
-    }
     const file = e.dataTransfer.files?.[0];
     if (file) {
       handleMediaFile(file);
@@ -6008,19 +6002,42 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
       {isModalOpen && createPortal(
         <AnimatePresence>
-          <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
+          <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', overflow: 'hidden' }}>
             <motion.div 
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}
               onClick={() => { setIsModalOpen(false); setAnimDropdownOpen(false); }}
             />
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className={`relative glass-panel ${isSaving ? 'media-processing-lock' : ''}`}
-              style={{ position: 'relative', padding: '32px', width: '100%', maxWidth: '768px', overflowY: 'auto', maxHeight: '90vh' }}
+            <div 
+              style={{ 
+                position: 'relative', 
+                zIndex: 1, 
+                display: 'flex', 
+                flexDirection: 'row', 
+                alignItems: 'flex-start',
+                justifyContent: 'flex-start',
+                gap: '16px', 
+                width: isAiExpanded && form.mode === 'image' ? '1244px' : '768px',
+                maxWidth: 'none',
+                maxHeight: '92vh',
+                transition: 'max-width 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
+              }}
             >
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0, y: 20 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.9, opacity: 0, y: 20 }}
+                className={`relative glass-panel ${isSaving ? 'media-processing-lock' : ''}`}
+                style={{ 
+                  position: 'relative', 
+                  padding: '32px', 
+                  width: '768px',
+                  flex: '0 0 768px',
+                  overflowY: 'auto', 
+                  maxHeight: '92vh',
+                  borderRadius: '24px'
+                }}
+              >
               {isSaving && (
                 <div
                   aria-label="Media processing in progress"
@@ -6715,6 +6732,24 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                               <Download size={13} />
                             </button>
                           )}
+                        <button
+                          type="button"
+                          onClick={() => setIsAiExpanded(prev => !prev)}
+                          className={`btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5 transition-all ${!isAiExpanded ? 'inactive' : ''}`}
+                          aria-label={`Create with ${aiProvider === 'gemini' ? 'Gemini' : 'OpenAI'}`}
+                          style={{
+                            borderRadius: '12px',
+                            background: aiProvider === 'gemini' ? 'linear-gradient(to right, #4796E3 0%, #9177C7 50%, #CA6673 100%)' : '#74AA9C',
+                            border: 'none',
+                            color: '#ffffff',
+                            boxShadow: aiProvider === 'gemini'
+                              ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(71, 150, 227, 0.25)'
+                              : '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(116, 170, 156, 0.25)'
+                          }}
+                          title={isAiExpanded ? "Close AI Studio side-panel" : "Create media with AI"}
+                        >
+                          {aiProvider === 'gemini' ? <GeminiLogo size={13} /> : <OpenAILogo size={13} />}
+                        </button>
                       </div>
 
                       {/* Visual Tools Toggles */}
@@ -6977,16 +7012,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         />
                       </div>
                     )}
-
-                    <GeminiMediaGenerator 
-                      ref={aiGeneratorRef}
-                      isExpanded={isAiExpanded}
-                      onToggleExpand={setIsAiExpanded}
-                      form={form} 
-                      setForm={setForm} 
-                      imageObjRef={imageObjRef} 
-                      onNotify={setUnifiedPushMessage} 
-                    />
                   </div>
                 )}
 
@@ -7127,10 +7152,53 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 </div>
               </div>
             </motion.div>
+
+            {/* AI Studio Side Panel */}
+            <AnimatePresence>
+              {isAiExpanded && form.mode === 'image' && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.22, ease: 'easeOut' }}
+                  style={{
+                    position: 'absolute',
+                    left: '784px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    width: '460px',
+                    maxWidth: '460px',
+                    maxHeight: '92vh',
+                    overflowY: 'auto',
+                    borderRadius: '24px',
+                    display: 'flex',
+                    flexDirection: 'column'
+                  }}
+                >
+                  <GeminiMediaGenerator 
+                    ref={aiGeneratorRef}
+                    isExpanded={true}
+                    onToggleExpand={setIsAiExpanded}
+                    onCloseSidePanel={() => setIsAiExpanded(false)}
+                    onProviderChange={setAiProvider}
+                    form={form} 
+                    setForm={setForm} 
+                    imageObjRef={imageObjRef} 
+                    onNotify={setUnifiedPushMessage}
+                    style={{
+                      height: '100%',
+                      borderRadius: '24px',
+                      padding: '24px'
+                    }}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
-        </AnimatePresence>,
-        document.body
-      )}
+        </div>
+      </AnimatePresence>,
+      document.body
+    )}
     </div>
   );
 }
