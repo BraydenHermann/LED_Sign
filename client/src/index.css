@@ -82,6 +82,16 @@ body {
   color: var(--text-muted);
   box-shadow: none;
 }
+.modal-close-btn {
+  background: none;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+.modal-close-btn:hover { color: #fff; }
 
 .btn-disconnect {
   background: rgba(239,68,68,0.15);
@@ -256,15 +266,52 @@ img.scrolling-preview {
   transition: border-color 0.2s;
   transform: translateZ(0);
 }
-.preset-card:hover { border-color: var(--accent-primary); }
+.preset-card:not(.preset-card-reserved):not(.preset-card-drag-target):hover { border-color: transparent; }
+.preset-card:not(.preset-card-reserved):not(.preset-card-drag-target):hover::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  border: 2px solid transparent;
+  border-radius: inherit;
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary)) border-box;
+  -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+.preset-card-reserved,
+.preset-card.empty-slot.preset-card-reserved {
+  border: 2px solid var(--glass-border);
+}
+.preset-card-reserved:hover,
+body.preset-dragging .preset-card-reserved {
+  border-color: var(--reserved-color);
+}
+.preset-card-reserved .preset-card-badge { opacity: 0; transition: opacity 0.15s ease; }
+.preset-card-reserved:hover .preset-card-badge,
+body.preset-dragging .preset-card-reserved .preset-card-badge { opacity: 1; }
+.preset-card.preset-card-drag-target {
+  border: 2px dashed;
+  border-color: var(--accent-primary) var(--accent-secondary) var(--accent-secondary) var(--accent-primary);
+  box-shadow: var(--neon-shadow);
+}
 .preset-card.empty-slot {
   flex-direction: column;
   background: rgba(0, 0, 0, 0.4);
-  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border: 2px dashed rgba(255, 255, 255, 0.15);
 }
-.preset-card.empty-slot:hover {
+.preset-card.empty-slot.preset-card-reserved { border: 2px solid var(--glass-border); }
+.preset-card.empty-slot.preset-card-reserved:hover,
+body.preset-dragging .preset-card.empty-slot.preset-card-reserved { border-color: var(--reserved-color); }
+.preset-card.empty-slot:not(.preset-card-reserved):hover {
   background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.3);
+  border-color: transparent;
+}
+.preset-card.empty-slot.preset-card-drag-target {
+  border: 2px dashed;
+  border-color: var(--accent-primary) var(--accent-secondary) var(--accent-secondary) var(--accent-primary);
 }
 .preset-card.declined { opacity: 0.5; filter: grayscale(1); cursor: not-allowed; }
 
@@ -606,6 +653,66 @@ img.scrolling-preview {
   margin-bottom: 4px;
 }
 
+.scan-passcode-form {
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.scan-passcode-description {
+  margin: 8px 2px 0;
+  color: rgba(255,255,255,0.7);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.scan-passcode-input {
+  width: 100%;
+  box-sizing: border-box;
+  letter-spacing: 0.42em;
+  text-align: center;
+  font-size: 22px;
+  padding: 12px;
+  border-radius: 10px;
+  color: white;
+  background: rgba(0,0,0,0.28);
+  border: 1px solid rgba(255,255,255,0.25);
+}
+
+.scan-passcode-error {
+  margin: 0 2px;
+  color: #fca5a5;
+  font-size: 12px;
+}
+
+.scan-passcode-recovery {
+  margin: 0 2px;
+  color: rgba(255,255,255,0.55);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.scan-passcode-recovery a {
+  color: #c4b5fd;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.scan-passcode-actions {
+  margin-top: auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.scan-passcode-connect {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
 .scan-item {
   background: rgba(255,255,255,0.04);
   border: 1px solid var(--glass-border);
@@ -619,6 +726,34 @@ img.scrolling-preview {
   transition: background 0.15s;
 }
 .scan-item:hover { background: rgba(139,92,246,0.15); border-color: rgba(139,92,246,0.3); }
+.scan-item[aria-disabled="true"]:hover { background: rgba(255,255,255,0.04); border-color: var(--glass-border); }
+.scan-item-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.scan-item-heading { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.scan-item-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; margin: 0; }
+.scan-item-status { flex: 0 0 auto; white-space: nowrap; align-self: flex-start; }
+.media-drop-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(139,92,246,0.18), rgba(236,72,153,0.18));
+  border: 2px dashed;
+  border-color: var(--accent-primary) var(--accent-secondary) var(--accent-secondary) var(--accent-primary);
+  border-radius: 8px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-primary);
+  font-weight: bold;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
+.media-drop-overlay span {
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
 /* ── Calendar / Event Cards ── */
 .event-card-container {
   display: flex;

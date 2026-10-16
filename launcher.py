@@ -202,7 +202,7 @@ def start_backend():
             try:
                 with urllib.request.urlopen('http://127.0.0.1:8000/status', timeout=3) as response:
                     data = json.load(response)
-                    if data.get('api_version', 0) >= 4:
+                    if data.get('api_version', 0) >= 5:
                         launcher_log("Current backend already listening on port 8000.")
                         return
                     launcher_log(f"Replacing an outdated backend (version {data.get('api_version')}).")
@@ -387,7 +387,7 @@ def main():
     if port_open(8000):
         try:
             with urllib.request.urlopen('http://127.0.0.1:8000/status', timeout=2) as response:
-                is_healthy = json.load(response).get('api_version', 0) >= 4
+                is_healthy = json.load(response).get('api_version', 0) >= 5
         except Exception:
             is_healthy = False
         if not is_healthy:

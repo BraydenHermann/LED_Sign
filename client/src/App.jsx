@@ -2,6 +2,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 're
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { savePresetToSign, processVideoMedia } from './serverApi';
+import { fitEventSignText } from './eventText';
 import GeminiMediaGenerator, { GeminiLogo, OpenAILogo } from './GeminiMediaGenerator';
 
 import { motion, AnimatePresence } from 'framer-motion';
@@ -11,7 +12,7 @@ import {
   FileSearch, Search, RefreshCw, RotateCcw, StretchHorizontal, StretchVertical, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
   Trash2, Pipette, Save, Send, Star, Download, Crosshair, Grid3X3, ScanLine, Type,
-  LogOut, Laptop
+  LogOut, Laptop, Settings
 } from 'lucide-react';
 
 const API_BASE = '';
@@ -235,42 +236,7 @@ function getEventDisplayString(ev, isClean = null) {
       hour12: true 
     });
     const rawEndTimeStr = timeFmt.format(endD).toLowerCase();
-    const shortEndTimeStr = rawEndTimeStr.replace(/\s*(am|pm)/gi, '').trim();
-
-    const maxLen = 25;
-    const withAmPm = `${summary} - ${rawEndTimeStr}`;
-    const withShort = `${summary} - ${shortEndTimeStr}`;
-
-    let signText;
-    if (withAmPm.length <= maxLen) {
-      // If the event title and end time fit within the 25 character limit, include the am/pm labels
-      signText = withAmPm;
-    } else if (withShort.length <= maxLen) {
-      // Otherwise, do not include it
-      signText = withShort;
-    } else {
-      // Preserve whole words when the title needs truncation. This lets us keep
-      // the separator (and am/pm when it still fits) instead of displaying a
-      // clipped word such as "Touchp 11:30".
-      const shortSuffix = ` - ${shortEndTimeStr}`;
-      const fullSuffix = ` - ${rawEndTimeStr}`;
-      const titleLimit = Math.max(0, maxLen - shortSuffix.length);
-      const clipped = summary.slice(0, titleLimit).trimEnd();
-      const cutMidToken = clipped.length < summary.length && !/[\s/|:,;]/.test(summary[clipped.length]);
-      const truncTitle = cutMidToken
-        ? (clipped.replace(/(?:\s+|[/|:,;])+[^\s/|:,;]*$/, '').trimEnd() || clipped)
-        : clipped;
-
-      if (truncTitle && `${truncTitle}${fullSuffix}`.length <= maxLen) {
-        signText = `${truncTitle}${fullSuffix}`;
-      } else if (truncTitle) {
-        signText = `${truncTitle}${shortSuffix}`;
-      } else {
-        // A title containing one very long word has no safe word boundary.
-        // Keep the end time readable rather than producing an empty label.
-        signText = shortEndTimeStr;
-      }
-    }
+    const signText = fitEventSignText(summary, rawEndTimeStr);
 
     // Internal pipe-delimited format used by handlePush: "display ||| start - end"
     const startD = new Date(ev.start_iso);
@@ -1602,6 +1568,11 @@ export default function App() {
     return saved;
   });
   const [isConnecting, setIsConnecting] = useState(false);
+  const [connectionTarget, setConnectionTarget] = useState(null);
+  const [connectionError, setConnectionError] = useState('');
+  const [passcodeTarget, setPasscodeTarget] = useState(null);
+  const [bluetoothPasscode, setBluetoothPasscode] = useState('');
+  const [passcodeError, setPasscodeError] = useState('');
   const [scanOpen, setScanOpen] = useState(false);
   const [apiError, setApiError] = useState(false);
   const [hasFetchedStatus, setHasFetchedStatus] = useState(false);
@@ -1628,6 +1599,9 @@ export default function App() {
     setPresetView(status.connected ? 'saved' : 'local');
   }, [status.connected]);
   const autoConnectTried = useRef(false);
+  const activeConnectRef = useRef(null);
+  const preferredSignRef = useRef(null);
+  const choosingSignRef = useRef(false);
 
   const clearStatusOnNextInteractionRef = useRef(false);
   const armStatusClear = (msg) => {
@@ -1676,12 +1650,6 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    if (macAddress && macAddress.startsWith('FF:24:10:29:')) {
-      localStorage.setItem('loy_mac', macAddress);
-    }
-  }, [macAddress]);
-
   const [previewStamp, setPreviewStamp] = useState(Date.now());
   const lastPreviewTs = useRef(0);
   const lastFramesRef = useRef(-1);
@@ -1689,6 +1657,12 @@ export default function App() {
   const fetchStatus = async () => {
     try {
       const res = await axios.get(`${API_BASE}/status`);
+      // Do not let a late poll for the previous sign replace the selected
+      // target while the user is connecting or entering its Passcode.
+      if (res.data?.connected && preferredSignRef.current &&
+          res.data.address?.toUpperCase() !== preferredSignRef.current.toUpperCase()) {
+        return res.data;
+      }
       // BLE can briefly report disconnected while it is recovering. Keep the
       // last live UI state through two status polls so the page does not race
       // the backend's reconnect worker or visibly flap on a refresh.
@@ -1701,11 +1675,13 @@ export default function App() {
       }
       setStatus(res.data);
       if (res.data && res.data.connected && res.data.address) {
-        setMacAddress(res.data.address);
-        try {
-          localStorage.setItem('loy_last_connected_mac', res.data.address);
-          localStorage.setItem('loy_mac', res.data.address);
-        } catch (e) {}
+        if (!choosingSignRef.current && (!preferredSignRef.current || preferredSignRef.current.toUpperCase() === res.data.address.toUpperCase())) {
+          setMacAddress(res.data.address);
+          try {
+            localStorage.setItem('loy_last_connected_mac', res.data.address);
+            localStorage.setItem('loy_mac', res.data.address);
+          } catch (e) {}
+        }
       }
       setApiError(false);
       setHasFetchedStatus(true);
@@ -1740,61 +1716,110 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Dedicated Auto-Connect Effect — only reconnect to the most recently connected sign
+  // Give the user time to choose another sign before trying the last one.
   useEffect(() => {
     const lastConnected = localStorage.getItem('loy_last_connected_mac');
-    if (hasFetchedStatus && !status.connected && lastConnected && !autoConnectTried.current && !isConnecting && !apiError) {
+    if (!hasFetchedStatus || status.connected || !lastConnected || autoConnectTried.current || isConnecting || apiError || scanOpen) return;
+    const timer = window.setTimeout(() => {
+      if (autoConnectTried.current || preferredSignRef.current || choosingSignRef.current) return;
       console.log("[auto-connect] Attempting to reconnect to most recently connected sign:", lastConnected);
       autoConnectTried.current = true;
       doConnect(lastConnected, false, true);
-    }
-  }, [hasFetchedStatus, status.connected, isConnecting, apiError]);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [hasFetchedStatus, status.connected, isConnecting, apiError, scanOpen]);
 
-  const doConnect = async (addr, isRetry = false, isAuto = false) => {
-    if (!addr || (isConnecting && !isRetry)) return;
+  const doConnect = async (addr, isRetry = false, isAuto = false, passcode = '') => {
+    if (!addr) return;
+    if (!isAuto) {
+      autoConnectTried.current = true;
+      preferredSignRef.current = addr;
+      choosingSignRef.current = false;
+      setConnectionTarget(addr);
+      setConnectionError('');
+    }
+    if (activeConnectRef.current && !isRetry) {
+      if (isAuto) return;
+      // Dispatch the human-selected request immediately. The backend's
+      // connection intent then supersedes the older attempt.
+      activeConnectRef.current.controller.abort();
+    }
+    const controller = new AbortController();
+    const requestId = Symbol('sign-connect');
+    activeConnectRef.current = { id: requestId, isAuto, controller };
     setIsConnecting(true);
     setConnectionFailed(false);
     console.log(`[connect] ${isRetry ? 'Retry attempt' : 'Connecting'} to:`, addr, isAuto ? '(auto)' : '');
     try {
-      const timeoutMs = 60000;
-      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr }, { timeout: timeoutMs });
+      const timeoutMs = 75000;
+      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr, ...(passcode ? { passcode } : {}) }, { timeout: timeoutMs, signal: controller.signal });
+      if (activeConnectRef.current?.id !== requestId) return;
       const connectedAddr = resPost.data?.address || addr;
-      if (connectedAddr && connectedAddr.toUpperCase().startsWith('FF:24:10:29:')) {
+      if (connectedAddr && connectedAddr.toUpperCase().startsWith('FF:24:10:29:') && (!isAuto || !choosingSignRef.current)) {
         setMacAddress(connectedAddr);
         localStorage.setItem('loy_last_connected_mac', connectedAddr);
         localStorage.setItem('loy_mac', connectedAddr);
       }
       const res = await axios.get(`${API_BASE}/status`);
-      setStatus(res.data);
-      if (res.data.connected) {
-        setScanOpen(false);
+      if (activeConnectRef.current?.id !== requestId) return;
+      if (res.data.connected && res.data.address?.toUpperCase() === addr.toUpperCase()) {
+        setStatus(res.data);
+        if (!choosingSignRef.current) setScanOpen(false);
         setConnectionFailed(false);
-        localStorage.setItem('loy_last_connected_mac', res.data.address || connectedAddr);
-        localStorage.setItem('loy_mac', res.data.address || connectedAddr);
+        if (!isAuto) setConnectionTarget(null);
+        if (passcode) setPasscodeTarget(null);
+        if (!isAuto || !choosingSignRef.current) {
+          localStorage.setItem('loy_last_connected_mac', res.data.address || connectedAddr);
+          localStorage.setItem('loy_mac', res.data.address || connectedAddr);
+        }
         if (res.data.power !== undefined) setPower(res.data.power);
         else setPower(true);
       } else {
-        throw new Error("Server reported sign not connected");
+        throw new Error(`The selected sign did not connect${res.data.address ? `; still connected to ${res.data.address}` : ''}.`);
       }
     } catch (e) {
+      if (controller.signal.aborted) return;
       console.error(`[connect] ${isRetry ? 'Retry' : 'Attempt 1'} failed:`, e.message);
+      if (e.response?.status === 401 && ['passcode_required', 'invalid_passcode'].includes(e.response?.data?.detail?.code)) {
+        // Keep the credential transient: it is never written to browser
+        // storage, recent-device entries, or backend logs.
+        autoConnectTried.current = true;
+        setConnectionTarget(null);
+        setScanOpen(true);
+        setPasscodeTarget(addr);
+        setPasscodeError(e.response.data.detail.code === 'invalid_passcode'
+          ? 'Incorrect Passcode. Please try again.'
+          : passcode ? 'The sign still requires authentication. Please check the Passcode and try again.' : '');
+        return;
+      }
       if (!e.response) {
         axios.get(`${API_BASE}/status`).then(() => setApiError(false)).catch(() => setApiError(true));
       }
-      if (!isRetry && !isAuto) {
-        // Silent first-failure retry for manual user connection
-        console.log('[connect] Auto-retrying once...');
-        await new Promise(r => setTimeout(r, 1000));
-        await doConnect(addr, true, false);
-        return;
+      if (!isAuto) {
+        setConnectionTarget(null);
+        const detail = e.response?.data?.detail;
+        const message = typeof detail === 'string' ? detail : detail?.message || `Could not connect to ${addr}. Please try again.`;
+        setConnectionError(message);
+        if (passcode) {
+          setScanOpen(true);
+          setPasscodeTarget(addr);
+          setPasscodeError(message);
+        }
       }
       setConnectionFailed(true);
     } finally {
-      setIsConnecting(false);
+      if (activeConnectRef.current?.id === requestId) {
+        activeConnectRef.current = null;
+        setIsConnecting(false);
+      }
     }
   };
 
   const handleDisconnect = async () => {
+    activeConnectRef.current?.controller.abort();
+    activeConnectRef.current = null;
+    setConnectionTarget(null);
+    setConnectionError('');
     setStatus(prev => ({ ...prev, connected: false, address: null, preview_url: null }));
     setIsConnecting(false);
     autoConnectTried.current = true; // Prevent immediate auto-reconnect loop on manual disconnect
@@ -1803,6 +1828,18 @@ export default function App() {
     setIsManualOverride(false);
     setLastPushedId(null);
     try { await axios.post(`${API_BASE}/disconnect`, {}, { timeout: 3000 }); } catch (e) {}
+  };
+
+  const submitBluetoothPasscode = async (event) => {
+    event.preventDefault();
+    if (!/^\d{6}$/.test(bluetoothPasscode)) {
+      setPasscodeError('Enter exactly six digits.');
+      return;
+    }
+    const target = passcodeTarget;
+    if (!target) return;
+    setPasscodeError('');
+    await doConnect(target, false, false, bluetoothPasscode);
   };
 
   const handleMacInput = (raw) => {
@@ -1833,7 +1870,7 @@ export default function App() {
   const [lastPushedId, setLastPushedId] = useState(null);
 
   useEffect(() => {
-    if (lastPushedId && status?.address) {
+    if (lastPushedId && status?.address && playbackSignRef.current === status.address.toUpperCase()) {
       localStorage.setItem(`loy_last_pushed_id_${status.address}`, lastPushedId);
     }
   }, [lastPushedId, status?.address]);
@@ -1844,6 +1881,20 @@ export default function App() {
   // Retain the manually selected saved slot while a calendar event temporarily
   // uses its dedicated calendar slot, so it can be restored when the event ends.
   const calendarReturnPresetRef = useRef(null);
+  const playbackSignRef = useRef(null);
+  useEffect(() => {
+    if (!status.connected || !status.address) return;
+    const signMac = status.address.toUpperCase();
+    if (playbackSignRef.current && playbackSignRef.current !== signMac) {
+      // Playback and calendar-return state belong to the previous sign.
+      setLastPushedId(null);
+      calendarReturnPresetRef.current = null;
+      lastActiveEventIdRef.current = null;
+      setIsManualOverrideState(false);
+      isManualOverrideRef.current = false;
+    }
+    playbackSignRef.current = signMac;
+  }, [status.connected, status.address]);
   // A transient BLE disconnect (for example while the PC is locked) must not
   // replay the default and overwrite the preset the user deliberately chose.
   const initializedConnectionMacsRef = useRef(new Set());
@@ -2376,7 +2427,7 @@ export default function App() {
               const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
               const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
               new Notification('Upcoming Meeting', {
-                body: `${cleanEventSummary(currentEvent.summary)} starts ${timeLabel}`,
+                body: `${cleanEventTitle(currentEvent.summary, true)} starts ${timeLabel}`,
                 icon: '/favicon.ico',
                 tag: `meeting-${targetId}`,
               });
@@ -2414,7 +2465,6 @@ export default function App() {
   // Sync on connection
   useEffect(() => {
     if (status.connected && status.address && dbLoaded && presets && presets.length > 0) {
-      setScanOpen(false);
       const targetMac = status.address.toUpperCase();
       if (initializedConnectionMacsRef.current.has(targetMac)) return;
       if (pushingRef.current) return;
@@ -2452,6 +2502,7 @@ export default function App() {
             localStorage.setItem('loy_hw_default_synced_' + targetMac, 'true');
           } catch (e) {
             console.warn("[connect] Failed to push default to slot 1:", e);
+            if (e.response?.status === 409) throw e;
           }
         }
 
@@ -2470,49 +2521,8 @@ export default function App() {
           await handlePush(activeStr, false, true, `event-${active.id}-${activeStr}`);
           localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         } else {
-          // If no active event right now: check if this sign has had its calendar preset initialized on hardware
-          const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
-          if (!isCalSynced) {
-            let prevCal = null;
-            try {
-              const stored = localStorage.getItem('loy_last_calendar_preset');
-              if (stored) prevCal = JSON.parse(stored);
-            } catch (e) {}
-            if (!prevCal) {
-              for (const k of Object.keys(allSavedPresets || {})) {
-                if (k !== targetMac && allSavedPresets[k]?.[0]?.preset) {
-                  prevCal = allSavedPresets[k][0].preset;
-                  break;
-                }
-              }
-            }
-            if (prevCal) {
-              console.log("[connect] Pushing cached calendar preset to new sign slot 0:", prevCal.text || prevCal.name);
-              try {
-                const resCal = await savePresetToSign({
-                  slot_id: 0,
-                  address: targetMac,
-                  preset: prevCal
-                });
-                const calThumb = resCal.data?.preview_url
-                  ? `${API_BASE}${resCal.data.preview_url}?t=${Date.now()}`
-                  : prevCal.thumbnail;
-                setAllSavedPresets(prev => {
-                  const curList = normalizeSavedPresets(prev[targetMac]);
-                  curList[0] = {
-                    slotNumber: 1,
-                    hwSlotId: 0,
-                    preset: { ...prevCal, id: 'hw-slot-0', hwSlotId: 0, thumbnail: calThumb, isHardware: false }
-                  };
-                  return { ...prev, [targetMac]: curList };
-                });
-                localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
-              } catch (e) {
-                console.warn("[connect] Failed to push previous calendar preset to slot 0:", e);
-              }
-            }
-          }
-
+          // Calendar slot 0 is sign-specific. Without an active event, never
+          // seed it from another sign's cached calendar preset.
           const savedLastPushedId = localStorage.getItem(`loy_last_pushed_id_${targetMac}`);
           if (savedLastPushedId && savedLastPushedId !== 'hw-slot-1') {
             console.log(`[connect] Resuming previously pushed preset: ${savedLastPushedId}`);
@@ -2540,7 +2550,10 @@ export default function App() {
 
         if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
       };
-      pushDefaultOrActive().catch(e => handleSetPushMessage(`Error: ${e.message}`)).finally(() => {
+      pushDefaultOrActive().catch(e => {
+        if (e.response?.status === 409) initializedConnectionMacsRef.current.delete(targetMac);
+        handleSetPushMessage(`Error: ${e.message}`);
+      }).finally(() => {
         initializingConnectionRef.current = false;
         setPushing(false);
         fetchStatus();
@@ -2703,12 +2716,10 @@ export default function App() {
             });
             setLastPushedId(autoTargetId || 'hw-slot-0');
             localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
-            try {
-              localStorage.setItem('loy_last_calendar_preset', JSON.stringify({ ...eventPresetCopy, id: 'hw-slot-0', thumbnail: savedThumb || eventPresetCopy.thumbnail }));
-            } catch (e) {}
           } catch (saveErr) {
             console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
             handleSetPushMessage(`Error saving to Slot 1: ${saveErr.response?.data?.detail || saveErr.message}`);
+            throw saveErr;
           }
         } else {
           handleSetPushMessage('Error: Sign not connected');
@@ -2771,7 +2782,14 @@ export default function App() {
               onMacInput={handleMacInput}
               onMacBlur={handleMacBlur}
               onConnect={doConnect}
+              connectionTarget={connectionTarget}
+              connectionError={connectionError}
               onDisconnect={handleDisconnect}
+              onBeginChooseSign={() => {
+                autoConnectTried.current = true;
+                choosingSignRef.current = true;
+                return axios.post(`${API_BASE}/pause-reconnect`).catch(() => {});
+              }}
               isConnecting={isConnecting}
               onClear={handleClear}
               isModalOpen={isModalOpen}
@@ -2801,6 +2819,13 @@ export default function App() {
               setPushingPresetTarget={setPushingPresetTarget}
               scanOpen={scanOpen}
               setScanOpen={setScanOpen}
+              passcodeTarget={passcodeTarget}
+              bluetoothPasscode={bluetoothPasscode}
+              setBluetoothPasscode={setBluetoothPasscode}
+              passcodeError={passcodeError}
+              setPasscodeError={setPasscodeError}
+              onSubmitPasscode={submitBluetoothPasscode}
+              onClosePasscode={() => { setPasscodeTarget(null); setBluetoothPasscode(''); setPasscodeError(''); }}
               syncHardwareSlots={syncHardwareSlots}
               fetchStatus={fetchStatus}
               presetView={presetView}
@@ -2862,7 +2887,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, isConnecting, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, syncHardwareSlots, fetchStatus, presetView, setPresetView }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -2881,10 +2906,40 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   });
   const [scanTab, setScanTab] = useState('all');
   const [isScanning, setIsScanning] = useState(false);
+  const [scanFailed, setScanFailed] = useState(false);
   const [scanSearch, setScanSearch] = useState('');
   const [scanPage, setScanPage] = useState(0);
   const [nameEditMode, setNameEditMode] = useState(false);
   const [nameEditValue, setNameEditValue] = useState('');
+  const [passwordSettingsOpen, setPasswordSettingsOpen] = useState(false);
+  const [passwordEnabled, setPasswordEnabled] = useState(null);
+  const [passwordStatusLoading, setPasswordStatusLoading] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [recoveryContact, setRecoveryContact] = useState('');
+  const [passwordSettingsError, setPasswordSettingsError] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
+  useEffect(() => {
+    if (!status.connected) setPasswordSettingsOpen(false);
+  }, [status.connected]);
+  const openPasswordSettings = async () => {
+    setPasswordSettingsError('');
+    const knownStatus = status.password_enabled;
+    setPasswordEnabled(typeof knownStatus === 'boolean' ? knownStatus : null);
+    setPasswordStatusLoading(typeof knownStatus !== 'boolean');
+    setPasswordSettingsOpen(true);
+    if (typeof knownStatus === 'boolean') return;
+    try {
+      const response = await axios.get(`${API_BASE}/sign-password`);
+      setPasswordEnabled(typeof response.data.enabled === 'boolean' ? response.data.enabled : null);
+    } catch (error) {
+      setPasswordSettingsError(error.response?.status === 405
+        ? 'Please restart the LED Sign app to load the updated passcode settings backend.'
+        : (error.response?.data?.detail || 'Please try again: could not read the sign passcode setting.'));
+    } finally {
+      setPasswordStatusLoading(false);
+    }
+  };
   const [assigningSlotIndex, setAssigningSlotIndex] = useState(null);
   const [slotSaveProgress, setSlotSaveProgress] = useState(null);
   const [slotSavePhase, setSlotSavePhase] = useState('');
@@ -2956,17 +3011,21 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     if (forcedTab) setScanTab(forcedTab);
     setScanPage(0);
     setIsScanning(true);
+    setScanFailed(false);
     setScanResults([]);
     try {
       const res = await axios.get(`${API_BASE}/scan`, { timeout: 30000 });
       setScanResults(res.data.filter(d => d.is_led));
     } catch (e) {
       console.error("Scan error or timeout:", e);
+      setScanFailed(true);
     }
     setIsScanning(false);
   };
 
-  const handleScanOpen = () => {
+  const handleScanOpen = async () => {
+    await onBeginChooseSign();
+    onClosePasscode();
     setScanOpen(true);
     setScanSearch('');
     setScanPage(0);
@@ -2975,6 +3034,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
 
   const handleConnectOrScan = () => {
     handleScanOpen();
+  };
+
+  const closeScanPopup = () => {
+    onClosePasscode();
+    setScanOpen(false);
   };
 
   // Helper: detect if a string looks like a raw MAC address
@@ -3003,14 +3067,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   };
 
   const pickDevice = (addr, name) => {
-    setScanOpen(false);
     setIsManualOverride(false);
     setLastPushedId(null);
-    setMacAddress(addr);
-    try {
-      localStorage.setItem('loy_last_connected_mac', addr);
-      localStorage.setItem('loy_mac', addr);
-    } catch (e) {}
+    onMacInput(addr);
     pendingConnectRef.current = { addr, name }; // remember name; only commit to recents on success
     onConnect(addr);
   };
@@ -3632,13 +3691,17 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 </button>
               </div>
             ) : (
-              <div
-                className="mac-display flex items-center gap-2 cursor-pointer group"
-                onClick={() => { setNameEditValue(deviceNames[status.address?.toUpperCase()] || defaultDisplayName); setNameEditMode(true); }}
-                title="Click to name this device"
-              >
-                <span>{deviceNames[status.address?.toUpperCase()] || defaultDisplayName}</span>
-                <Pencil size={12} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div className="mac-display flex items-center gap-2 cursor-pointer group" onClick={() => { setNameEditValue(deviceNames[status.address?.toUpperCase()] || defaultDisplayName); setNameEditMode(true); }} title="Click to name this device">
+                  <span>{deviceNames[status.address?.toUpperCase()] || defaultDisplayName}</span>
+                  <Pencil size={12} className="opacity-0 group-hover:opacity-60 transition-opacity" />
+                </div>
+                <button className="btn-styled" style={{ width: 32, height: 32, padding: 0, display: 'grid', placeItems: 'center' }} onClick={openPasswordSettings} title="Sign settings">
+                  <Settings size={15} />
+                </button>
+                <button className="btn-styled" style={{ width: 32, height: 32, padding: 0, display: 'grid', placeItems: 'center' }} onClick={handleScanOpen} title="Change sign">
+                  <Search size={15} />
+                </button>
               </div>
             )}
           </>
@@ -3702,13 +3765,16 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             )}
           </div>
         )}
+        {connectionError && !scanOpen && (
+          <span role="alert" style={{ color: '#fca5a5', fontSize: 11, maxWidth: 360 }}>{connectionError}</span>
+        )}
 
         {/* Scan popup — floats above, doesn't push layout */}
         <AnimatePresence>
           {scanOpen && (
             <>
               {/* Backdrop to close on click outside */}
-              <div className="fixed inset-0 z-40" onClick={() => setScanOpen(false)} />
+              <div className="fixed inset-0 z-40" onClick={closeScanPopup} />
               
               <motion.div
                 initial={{ opacity: 0, y: -6 }}
@@ -3717,20 +3783,56 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 className="scan-popup glass-panel z-50"
               >
                 <div className="scan-popup-header">
-                  <div className="flex items-center gap-2">
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    {!passcodeTarget && isScanning && <RefreshCw size={12} className="animate-spin text-violet-400" aria-label="Scanning for signs" />}
                     <span className="text-xs font-bold uppercase tracking-widest text-slate-400">
-                      {isScanning ? 'Scanning...' : scanTab === 'recents' ? 'Recent Devices' : 'Nearby Devices'}
+                      {passcodeTarget ? 'Enter Passcode' : isScanning ? 'Scanning...' : scanTab === 'recents' ? 'Recent Devices' : 'Nearby Devices'}
                     </span>
                   </div>
                   <button 
-                    onClick={() => setScanOpen(false)} 
-                    className="btn-styled p-2 rounded-2xl ml-4"
-                    style={{ minWidth: 'auto' }}
+                    onClick={closeScanPopup}
+                    className="modal-close-btn"
+                    style={{ marginLeft: 16 }}
+                    title="Close scan"
                   >
-                    <X size={14} />
+                    <X size={24} />
                   </button>
                 </div>
 
+                {passcodeTarget ? (
+                  <form className="scan-passcode-form" onSubmit={onSubmitPasscode}>
+                    <p className="scan-passcode-description">
+                      Please enter the sign's password to connect.
+                    </p>
+                    <input
+                      autoFocus
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      value={bluetoothPasscode}
+                      onChange={(event) => { setBluetoothPasscode(event.target.value.replace(/\D/g, '').slice(0, 6)); setPasscodeError(''); }}
+                      aria-label="Six-digit Bluetooth Passcode"
+                      className="scan-passcode-input"
+                    />
+                    {passcodeError && <p role="alert" className="scan-passcode-error">{passcodeError}</p>}
+                    <p className="scan-passcode-recovery">
+                      Forgot your Passcode? Open LOY SPACE from the{' '}
+                      <a href="https://apps.apple.com/app/loy-space/id1636648229" target="_blank" rel="noopener noreferrer">App Store</a>
+                      {' '}or{' '}
+                      <a href="https://play.google.com/store/apps/details?id=com.yskd.loywf" target="_blank" rel="noopener noreferrer">Google Play</a>,
+                      select this sign, and tap Retrieve Password.
+                    </p>
+                    <div className="scan-passcode-actions">
+                      <button type="button" className="btn-styled inactive" onClick={onClosePasscode}>
+                        Back
+                      </button>
+                      <button type="submit" className="btn-styled scan-passcode-connect" disabled={isConnecting}>
+                        {isConnecting && <RefreshCw size={12} className="animate-spin" aria-hidden="true" />}
+                        <span>{isConnecting ? 'Connecting...' : 'Connect'}</span>
+                      </button>
+                    </div>
+                  </form>
+                ) : (<>
                 {/* Tabs */}
                 <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
                   <button 
@@ -3807,38 +3909,43 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     const isConnected = status.connected && status.address?.toLowerCase() === dev.address?.toLowerCase();
                     const isDiscovered = scanResults.some(r => r.address?.toLowerCase() === dev.address?.toLowerCase());
                     const isAvailable = isConnected || isDiscovered;
+                    const availabilityLabel = isScanning ? 'Checking' : scanFailed ? 'Unknown' : 'Not seen';
                     
                     return (
                       <div 
                         key={dev.address} 
                         className="scan-item"
+                        aria-disabled={!isAvailable}
+                        title={!isAvailable ? (isScanning ? 'Checking for this sign...' : scanFailed ? 'Availability could not be checked. Please scan again.' : 'Not seen in the latest scan. Please scan again to connect.') : undefined}
                         style={!isAvailable ? {
                           opacity: 0.55,
                           filter: 'grayscale(100%)',
-                          cursor: 'pointer'
+                          cursor: 'not-allowed'
                         } : {
                           cursor: 'pointer'
                         }}
                         onClick={() => {
-                          pickDevice(dev.address, rawName);
+                          if (isAvailable) pickDevice(dev.address, rawName);
                         }}
                       >
-                        <div className="flex flex-col gap-0.5">
-                          <div className="flex items-center gap-2">
-                            <p className="font-bold text-sm text-slate-100" style={!isAvailable ? { color: '#94a3b8' } : {}}>
+                        <div className="scan-item-main">
+                          <div className="scan-item-heading" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto' }}>
+                            <p className="scan-item-name font-bold text-sm text-slate-100" style={!isAvailable ? { color: '#94a3b8' } : {}}>
                               {displayName}
                             </p>
-                            {isConnected ? (
-                              <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(34,197,94,0.15)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)', fontWeight: 600 }}>
+                            {connectionTarget?.toLowerCase() === dev.address?.toLowerCase() ? (
+                              <span className="scan-item-status" style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(167,139,250,0.15)', color: '#c4b5fd', border: '1px solid rgba(167,139,250,0.3)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 5 }}><RefreshCw size={11} className="animate-spin" />Connecting</span>
+                            ) : isConnected ? (
+                              <span className="scan-item-status" style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(34,197,94,0.15)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)', fontWeight: 600 }}>
                                 Connected
                               </span>
                             ) : isAvailable ? (
-                              <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(56,189,248,0.15)', color: '#38bdf8', border: '1px solid rgba(56,189,248,0.3)', fontWeight: 600 }}>
+                              <span className="scan-item-status" style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(56,189,248,0.15)', color: '#38bdf8', border: '1px solid rgba(56,189,248,0.3)', fontWeight: 600 }}>
                                 Available
                               </span>
                             ) : (
-                              <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(255,255,255,0.06)', color: '#94a3b8', border: '1px solid rgba(255,255,255,0.1)', fontWeight: 600 }}>
-                                Offline
+                              <span className="scan-item-status" style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(255,255,255,0.06)', color: '#94a3b8', border: '1px solid rgba(255,255,255,0.1)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                                {isScanning && <RefreshCw size={11} className="animate-spin" />}{availabilityLabel}
                               </span>
                             )}
                           </div>
@@ -3867,6 +3974,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     );
                   })}
                 </div>
+                {connectionError && <p role="alert" style={{ margin: '4px 2px', color: '#fca5a5', fontSize: 11 }}>{connectionError}</p>}
 
                 {/* Pagination */}
                 {totalPages > 1 && (
@@ -3890,6 +3998,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     </button>
                   </div>
                 )}
+                </>)}
               </motion.div>
             </>
           )}
@@ -3986,10 +4095,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         onDrop={!isReserved ? (e) => handleDropOnSlot(e, globalIdx) : undefined}
                         onPointerDown={handlePointerDown}
                         onPointerUp={(e) => handlePointerUp(e, () => playSavedPreset(globalIdx, null))}
-                        className="preset-card empty-slot relative transition-all cursor-pointer"
+                        className={`preset-card empty-slot relative transition-all cursor-pointer ${isReserved ? 'preset-card-reserved' : ''} ${globalIdx === savedDragOverIdx ? 'preset-card-drag-target' : ''}`}
                         style={{
-                          border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : (isReserved ? `1px solid ${reservedColor}22` : undefined),
-                          boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : undefined,
+                          '--reserved-color': reservedColor,
                           opacity: pushing ? (isReserved ? 0.4 : 0.3) : (isReserved ? 0.7 : 1),
                           cursor: pushing ? 'not-allowed' : 'pointer',
                           pointerEvents: pushing ? 'none' : undefined,
@@ -4064,7 +4172,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   return (
                     <div
                       key={slot.hwSlotId !== undefined ? `hw-${slot.hwSlotId}` : `slot-${slot.slotNumber || globalIdx}`}
-                      className="preset-card relative group overflow-hidden transition-all"
+                      className={`preset-card relative group overflow-hidden transition-all ${isReserved ? 'preset-card-reserved' : ''} ${globalIdx === savedDragOverIdx ? 'preset-card-drag-target' : ''}`}
                       onPointerDown={handlePointerDown}
                       onPointerUp={(e) => handlePointerUp(e, () => playSavedPreset(globalIdx, p))}
                       draggable={!isReserved}
@@ -4072,20 +4180,22 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         e.dataTransfer.setData('text/plain', `saved-slot:${globalIdx}`);
                         e.dataTransfer.effectAllowed = 'move';
                         setSavedDraggedIdx(globalIdx);
+                        document.body.classList.add('preset-dragging');
                       } : undefined}
                       onDragEnd={!isReserved ? () => {
                         setSavedDraggedIdx(null);
                         setSavedDragOverIdx(null);
+                        document.body.classList.remove('preset-dragging');
                       } : undefined}
                       onDragOver={!isReserved ? (e) => { e.preventDefault(); setSavedDragOverIdx(globalIdx); } : undefined}
                       onDragLeave={!isReserved ? () => setSavedDragOverIdx(null) : undefined}
                       onDrop={!isReserved ? (e) => handleDropOnSlot(e, globalIdx) : undefined}
                       style={{
+                        '--reserved-color': reservedColor,
                         cursor: pushing ? (isReserved ? 'not-allowed' : 'not-allowed') : (isReserved ? 'pointer' : 'grab'),
                         opacity: globalIdx === savedDraggedIdx ? 0.4 : (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) || (isReservedDefault && pushingPresetTarget.isDefault))) ? 0.6 : 1),
                         transform: globalIdx === savedDraggedIdx ? 'scale(0.98)' : 'none',
-                        border: globalIdx === savedDragOverIdx ? '2px dashed var(--accent-primary)' : (isReserved ? `1px solid ${reservedColor}44` : undefined),
-                        boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : (isReserved ? `0 0 12px ${reservedColor}22` : undefined),
+                        boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : undefined,
                         pointerEvents: (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) || (isReservedDefault && pushingPresetTarget.isDefault)))) ? 'none' : undefined,
                         userSelect: 'none'
                       }}
@@ -4282,6 +4392,38 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             document.body
           )}
         </div>
+      )}
+      {passwordSettingsOpen && createPortal(
+        <div style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'grid', placeItems: 'center', padding: 20, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}>
+          <form className="glass-panel" style={{ width: 'min(100%, 420px)', padding: 26 }} onSubmit={async (event) => {
+            event.preventDefault(); setPasswordSettingsError('');
+            if (passwordEnabled === null) { setPasswordSettingsError('Please wait until the sign reports its passcode setting.'); return; }
+            if (passwordEnabled && (!/^\d{6}$/.test(newPassword) || newPassword !== confirmPassword)) { setPasswordSettingsError('Please enter matching six-digit passcodes.'); return; }
+            const recoveryValue = recoveryContact.trim();
+            const normalizedPhone = recoveryValue.replace(/[\s().-]/g, '');
+            const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(recoveryValue);
+            const validPhone = /^\+?[1-9]\d{6,14}$/.test(normalizedPhone);
+            if (passwordEnabled && !(validEmail || validPhone)) { setPasswordSettingsError('Please enter a valid recovery email address or phone number.'); return; }
+            setSavingPassword(true);
+            try {
+              await axios.put(`${API_BASE}/sign-password`, { enabled: passwordEnabled, ...(passwordEnabled ? { passcode: newPassword, recovery_contact: recoveryContact.trim() } : {}) });
+              if (typeof fetchStatus === 'function') await fetchStatus();
+              setPasswordSettingsOpen(false); setNewPassword(''); setConfirmPassword('');
+            } catch (error) { setPasswordSettingsError(error.response?.data?.detail || error.message); }
+            finally { setSavingPassword(false); }
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><h3 style={{ margin: 0, fontSize: 19 }}>Settings</h3><button type="button" onClick={() => setPasswordSettingsOpen(false)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 0 }} onMouseOver={e => e.currentTarget.style.color='#fff'} onMouseOut={e => e.currentTarget.style.color='#64748b'}><X size={24} /></button></div>
+            <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '20px 0 14px', fontSize: 14, cursor: passwordEnabled === null ? 'not-allowed' : 'pointer', opacity: passwordEnabled === null ? 0.6 : 1, userSelect: 'none' }}><input type="checkbox" checked={passwordEnabled === true} disabled={passwordEnabled === null} onChange={e => setPasswordEnabled(e.target.checked)} style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} /><span style={{ width: 18, height: 18, borderRadius: 6, background: passwordEnabled ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' : 'rgba(255, 255, 255, 0.08)', border: passwordEnabled ? '1px solid rgba(255, 255, 255, 0.3)' : '1px solid rgba(255, 255, 255, 0.2)', boxShadow: passwordEnabled ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', flexShrink: 0 }}>{passwordEnabled && <Check size={13} strokeWidth={3.5} />}</span>Require passcode</label>
+            {passwordEnabled === null && <p role="status" style={{ color: '#94a3b8', fontSize: 12, marginTop: -5, display: 'flex', alignItems: 'center', gap: 6 }}>{passwordStatusLoading && <RefreshCw size={12} className="animate-spin" aria-label="Checking passcode status" />}{passwordStatusLoading ? 'Reading passcode status from sign…' : 'Passcode status unavailable from sign.'}</p>}
+            {passwordEnabled && <>
+              <input className="input-field" inputMode="numeric" maxLength={6} placeholder="New six-digit passcode" value={newPassword} onChange={e => setNewPassword(e.target.value.replace(/\D/g, '').slice(0, 6))} style={{ width: '100%', marginBottom: 10 }} />
+              <input className="input-field" inputMode="numeric" maxLength={6} placeholder="Confirm passcode" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value.replace(/\D/g, '').slice(0, 6))} style={{ width: '100%', marginBottom: 10 }} />
+              <input className="input-field" type="text" placeholder="Recovery email or phone" value={recoveryContact} onChange={e => setRecoveryContact(e.target.value)} style={{ width: '100%' }} />
+            </>}
+            {passwordSettingsError && <p role="alert" style={{ color: '#fca5a5', fontSize: 12 }}>{passwordSettingsError}</p>}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 20 }}><button type="submit" className="btn-styled" style={{ width: 40, height: 38, padding: 0, display: 'grid', placeItems: 'center' }} disabled={savingPassword || passwordEnabled === null} title="Save security settings"><Save size={16} className={savingPassword ? 'animate-pulse' : ''} /></button></div>
+          </form>
+        </div>, document.body
       )}
     </div>
   );
@@ -4853,17 +4995,94 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', id.toString());
     document.body.style.userSelect = 'none';
+    document.body.classList.add('preset-dragging');
+  };
+
+  const syncDefaultPresetToSavedSlot = async (defaultPreset) => {
+    // A new local default invalidates every sign's previous slot-1 upload.
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('loy_hw_default_synced_')) localStorage.removeItem(key);
+    }
+    const presetForSign = { ...defaultPreset };
+    if (presetForSign.mode === 'text') delete presetForSign.pixels;
+    setSavedPresets(prev => {
+      const next = [...prev];
+      next[1] = {
+        slotNumber: 2,
+        hwSlotId: 1,
+        preset: { ...defaultPreset, id: 'hw-slot-1', hwSlotId: 1 }
+      };
+      return next;
+    });
+    if (!status?.connected) return;
+
+    setPresetView('saved');
+    setPushing(true, { type: 'local', id: defaultPreset.id, isDefault: true });
+    setPushMessage('Saving default to Slot 2...');
+    try {
+      const isCurrentlyPlaying = lastPushedId === 'hw-slot-1' || status.display_mode === 'preset-1';
+      const response = await savePresetToSign({
+        slot_id: 1,
+        address: status.address || DEFAULT_MAC,
+        preset: presetForSign,
+        is_currently_playing: isCurrentlyPlaying
+      });
+      const thumbnail = response.data?.preview_url
+        ? `${API_BASE}${response.data.preview_url}?t=${Date.now()}`
+        : defaultPreset.thumbnail;
+      setSavedPresets(prev => {
+        const next = [...prev];
+        next[1] = {
+          slotNumber: 2,
+          hwSlotId: 1,
+          preset: { ...defaultPreset, id: 'hw-slot-1', hwSlotId: 1, thumbnail }
+        };
+        return next;
+      });
+      localStorage.setItem('loy_hw_default_synced_' + status.address.toUpperCase(), 'true');
+      setLastPushedId('hw-slot-1');
+      setPushMessage('Saved to Slot 2!');
+      syncHardwareSlots();
+    } catch (error) {
+      console.warn('[preset-save] Failed to save default to hardware slot 1:', error);
+      setPushMessage('Error saving default to Slot 2');
+    } finally {
+      setPushing(false);
+    }
   };
 
   const handleDragOver = (e, id) => {
+    if (presets.find(p => p.id === id)?.isDefault) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverId(id);
+      return;
+    }
     e.preventDefault();
     if (id !== draggedId) {
       setDragOverId(id);
     }
   };
 
-  const handleDrop = (e, targetId) => {
+  const handleDrop = async (e, targetId) => {
     e.preventDefault();
+    if (presets.find(p => p.id === targetId)?.isDefault) {
+      const replacement = presets.find(p => p.id === draggedId);
+      if (replacement && !replacement.isDefault) {
+        const nextPresets = presets.map(p => ({ ...p, isDefault: p.id === replacement.id }));
+        try {
+          await savePresetsToDB(nextPresets);
+          setPresets(nextPresets);
+          await syncDefaultPresetToSavedSlot({ ...replacement, isDefault: true });
+        } catch (error) {
+          console.error('[preset-default] Could not update local default:', error);
+          setPushMessage('Error changing local default preset');
+        }
+      }
+      setDraggedId(null);
+      setDragOverId(null);
+      return;
+    }
     if (!draggedId || draggedId === targetId) {
       setDraggedId(null);
       setDragOverId(null);
@@ -4892,6 +5111,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     setDraggedId(null);
     setDragOverId(null);
     document.body.style.userSelect = '';
+    document.body.classList.remove('preset-dragging');
   };
 
   const imageObjRef = useRef(null);
@@ -4899,11 +5119,13 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   // Form State for Modal
   const [editingId, setEditingId] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingMedia, setIsLoadingMedia] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [saveProgress, setSaveProgress] = useState(null);
   const processedMediaSignatureRef = useRef('');
   const [animDropdownOpen, setAnimDropdownOpen] = useState(false);
   const fileInputRef = useRef(null);
+  const mediaLoadIdRef = useRef(0);
   const [showGrid, setShowGrid] = useState(true);
   const [showGuides, setShowGuides] = useState(true);
   const [form, setForm] = useState({
@@ -4948,11 +5170,32 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   const handleMediaFile = (file) => {
     if (!file) return;
     setSaveError('');
+    setIsLoadingMedia(true);
+    const loadId = ++mediaLoadIdRef.current;
+    const failMediaLoad = (message) => {
+      if (loadId !== mediaLoadIdRef.current) return;
+      setIsLoadingMedia(false);
+      setSaveError(message);
+    };
+    const finishMediaLoad = (mediaEl, source, fileType) => {
+      if (loadId !== mediaLoadIdRef.current) return;
+      const width = fileType === 'video' ? mediaEl.videoWidth : mediaEl.width;
+      const height = fileType === 'video' ? mediaEl.videoHeight : mediaEl.height;
+      if (!width || !height) {
+        failMediaLoad('This media has no usable dimensions. Please choose another file.');
+        return;
+      }
+      try {
+        imageObjRef.current = mediaEl;
+        initializeMediaCrop(mediaEl, source, fileType);
+        setIsLoadingMedia(false);
+      } catch (error) {
+        failMediaLoad(`Could not load this media: ${error.message}`);
+      }
+    };
 
-    // Tear down the previous source before loading the replacement. This is
-    // especially important for GIFs: otherwise a decoded frame cache can keep
-    // painting the old animation until the new one has finished decoding.
-    imageObjRef.current = null;
+    // Keep the current source intact until the replacement has decoded.
+    // A failed replacement must not leave the existing preview unusable.
 
     const isVideo = file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.mp4') || file.name.toLowerCase().endsWith('.webm');
     const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
@@ -4964,33 +5207,49 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       video.muted = true;
       video.loop = true;
       video.playsInline = true;
-      video.src = url;
       video.onloadedmetadata = () => {
-        imageObjRef.current = video;
+        finishMediaLoad(video, url, 'video');
         video.play().catch(err => console.log('Video play error:', err));
-        initializeMediaCrop(video, url, 'video');
       };
       video.onerror = () => {
-        setUnifiedPushMessage('Unsupported video format or corrupt file. Try converting to MP4/H.264.');
-        setSaveError('Unsupported video format or corrupt file.');
+        failMediaLoad('Unsupported video format or corrupt file. Please try MP4/H.264.');
+        URL.revokeObjectURL(url);
       };
+      video.src = url;
     } else {
       const reader = new FileReader();
-      reader.onload = (re) => {
+      reader.onload = () => {
         const img = new Image();
         img.onload = () => {
-          imageObjRef.current = img;
-          initializeMediaCrop(img, re.target.result, fileType);
+          finishMediaLoad(img, reader.result, fileType);
         };
         img.onerror = () => {
-          setUnifiedPushMessage('Unsupported image format or corrupt file.');
-          setSaveError('Unsupported image format or corrupt file.');
+          failMediaLoad('Unsupported image format or corrupt file. Please choose another image.');
         };
-        img.src = re.target.result;
+        img.src = reader.result;
       };
-      reader.readAsDataURL(file);
+      reader.onerror = () => failMediaLoad('Could not read this file. Please try again.');
+      try {
+        reader.readAsDataURL(file);
+      } catch (error) {
+        failMediaLoad(`Could not read this file: ${error.message}`);
+      }
     }
   };
+
+  const handleMediaInputChange = (event) => {
+    const selectedFile = event.currentTarget.files?.[0];
+    if (!selectedFile) return;
+    event.currentTarget.value = '';
+    handleMediaFile(selectedFile);
+  };
+
+  useEffect(() => {
+    if (!isModalOpen) {
+      mediaLoadIdRef.current += 1;
+      setIsLoadingMedia(false);
+    }
+  }, [isModalOpen]);
 
   // A media file dropped over the preset editor becomes an image/video preset,
   // even while the AI side panel is open. The AI panel handles only drops on
@@ -5525,7 +5784,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   const handleSave = async () => {
-    if (isSaving || pushing) return;
+    if (isSaving || pushing || isLoadingMedia) return;
     setSaveError('');
     const drawingHasContent = Array.isArray(form.pixels) && form.pixels.some(pixel => pixel && pixel !== 0);
     if (form.mode === 'image' && !form.imgSrc) {
@@ -5692,58 +5951,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         isDefault: false
       });
 
-      // If marked as default, keep saved preset slot 2 in sync and push to hardware if connected
-      if (form.isDefault) {
-        const defaultPresetCopy = { ...presetData };
-        if (defaultPresetCopy.mode === 'text') {
-          delete defaultPresetCopy.pixels;
-        }
-
-        // Immediately sync slot 2 in savedPresets state
-        setSavedPresets(prev => {
-          const next = [...prev];
-          next[1] = {
-            slotNumber: 2,
-            preset: { ...savedPreset, id: 'hw-slot-1', thumbnail: thumbnail || presetData.thumbnail }
-          };
-          return next;
-        });
-
-        if (status?.connected) {
-          try {
-            if (typeof setPresetView === 'function') setPresetView('saved');
-            if (typeof setPushing === 'function') setPushing(true);
-            if (typeof setPushMessage === 'function') setPushMessage('Saving default to Slot 2...');
-            const isCurrentlyPlaying = (lastPushedId === 'hw-slot-1') || (status?.display_mode === 'preset-1');
-            const saveRes = await savePresetToSign({
-              slot_id: 1,
-              address: status.address || DEFAULT_MAC,
-              preset: defaultPresetCopy,
-              is_currently_playing: isCurrentlyPlaying
-            });
-            console.log('[preset-save] Saved default preset to hardware slot 1');
-            const savedThumb = saveRes.data?.preview_url 
-              ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}` 
-              : (thumbnail || presetData.thumbnail || null);
-            if (typeof setPushMessage === 'function') setPushMessage('Saved to Slot 2!');
-            setSavedPresets(prev => {
-              const next = [...prev];
-              next[1] = {
-                slotNumber: 2,
-                preset: { ...defaultPresetCopy, id: 'hw-slot-1', thumbnail: savedThumb }
-              };
-              return next;
-            });
-            if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
-            syncHardwareSlots();
-          } catch (saveErr) {
-            console.warn('[preset-save] Failed to save default to hw slot 1:', saveErr);
-            if (typeof setPushMessage === 'function') setPushMessage('Error saving default to Slot 2');
-          } finally {
-            if (typeof setPushing === 'function') setPushing(false);
-          }
-        }
-      }
+      if (form.isDefault) await syncDefaultPresetToSavedSlot(savedPreset);
 
       // Do not push saved preset automatically to the sign
     } catch (err) {
@@ -5763,6 +5971,16 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     (form.mode === 'text' && Boolean((form.text || '').trim())) ||
     (form.mode === 'drawing' && drawingHasContent) ||
     form.mode === 'clock';
+  const canSavePreset = !isSaving && !pushing && !isLoadingMedia && hasRequiredPresetContent;
+
+  const handlePresetEditorKeyDown = (event) => {
+    if (event.key !== 'Enter' || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.target.closest('button, textarea, select, [role="button"], [contenteditable="true"]')) return;
+    if (event.target instanceof HTMLInputElement && ['checkbox', 'radio', 'file', 'color', 'range'].includes(event.target.type)) return;
+    if (!canSavePreset) return;
+    event.preventDefault();
+    handleSave();
+  };
 
   const exportOriginalMedia = () => {
     if (!form.imgSrc) return;
@@ -5924,7 +6142,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               }}
             >
               <Plus className="text-emerald-400" size={24} />
-              <p className="text-xs font-black text-emerald-500/60 uppercase tracking-widest">New Preset</p>
+              <p className="text-xs font-black text-emerald-500/60 uppercase tracking-widest">Create Preset</p>
             </div>
 
             {presets
@@ -5936,21 +6154,21 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               return (
               <div 
                 key={p.id} 
-                className="preset-card relative group overflow-hidden transition-all"
+                className={`preset-card relative group overflow-hidden transition-all ${p.isDefault ? 'preset-card-reserved' : ''} ${p.id === dragOverId ? 'preset-card-drag-target' : ''}`}
                 draggable={!p.isDefault}
                 onDragStart={(e) => handleDragStart(e, p.id)}
                 onDragOver={(e) => handleDragOver(e, p.id)}
                 onDrop={(e) => handleDrop(e, p.id)}
                 onDragEnd={handleDragEnd}
                 style={{
+                  '--reserved-color': '#facc15',
                   cursor: pushing ? 'not-allowed' : (p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'not-allowed')),
                   // Keep media previews true to their saved-preset colors. The
                   // direct-push restriction is communicated by the cursor and
                   // tooltip, not by dimming the artwork itself.
                   opacity: p.id === draggedId ? 0.4 : (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'local' && pushingPresetTarget.id === p.id) || (p.isDefault && pushingPresetTarget.isDefault))) ? 0.6 : 1),
                   transform: p.id === draggedId ? 'scale(0.98)' : 'none',
-                  border: p.id === dragOverId ? '2px dashed var(--accent-primary)' : (p.isDefault ? '1px solid #facc1544' : '1px solid var(--glass-border)'),
-                  boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : (p.isDefault ? '0 0 12px #facc1522' : 'none'),
+                  boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : 'none',
                   pointerEvents: (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'local' && pushingPresetTarget.id === p.id) || (p.isDefault && pushingPresetTarget.isDefault)))) ? 'none' : undefined,
                   transition: 'all 0.15s ease',
                   userSelect: 'none'
@@ -5960,7 +6178,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                   if (status?.connected) {
                     pushPreset(p);
                   } else {
-                    setMsg('Error: Sign is not connected');
+                  setLocalPushMessage('Error: Sign is not connected');
                   }
                 })}
                 title={canPushDirectly ? undefined : 'Please assign animated text, GIFs, and videos to a Saved Preset before pushing.'}
@@ -6043,6 +6261,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 animate={{ scale: 1, opacity: 1, y: 0 }}
                 exit={{ scale: 0.9, opacity: 0, y: 20 }}
                 className={`relative glass-panel ${isSaving ? 'media-processing-lock' : ''}`}
+                onKeyDown={handlePresetEditorKeyDown}
                 style={{ 
                   position: 'relative', 
                   padding: '32px', 
@@ -6063,7 +6282,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               )}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
                 <h3 style={{ fontSize: '24px', fontWeight: 900, margin: 0 }}>{editingId ? 'Edit Preset' : 'Create Preset'}</h3>
-                <button onClick={() => { setIsModalOpen(false); setAnimDropdownOpen(false); }} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer' }} onMouseOver={e => e.currentTarget.style.color='#fff'} onMouseOut={e => e.currentTarget.style.color='#64748b'}><X size={24} /></button>
+                <button className="modal-close-btn" onClick={() => { setIsModalOpen(false); setAnimDropdownOpen(false); }}><X size={24} /></button>
               </div>
 
               <div style={{ marginBottom: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' }}>
@@ -6076,10 +6295,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         id="img-upload" 
                         hidden 
                         accept="image/*,video/*"
-                        onChange={e => {
-                          handleMediaFile(e.target.files?.[0]);
-                          e.target.value = '';
-                        }}
+                        onInput={handleMediaInputChange}
+                        onChange={handleMediaInputChange}
                       />
                       {!form.imgSrc ? (
                         <div 
@@ -6116,22 +6333,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                             <span className="text-sm font-semibold text-slate-300">Select Image/Video</span>
                           </div>
                           {isDraggingOver && (
-                            <div style={{
-                              position: 'absolute',
-                              inset: 0,
-                              backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                              border: '2px dashed #10B981',
-                              borderRadius: '8px',
-                              zIndex: 50,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              color: '#10B981',
-                              fontWeight: 'bold',
-                              pointerEvents: 'none',
-                              backdropFilter: 'blur(4px)'
-                            }}>
+                            <div className="media-drop-overlay">
                               <Upload size={32} className="animate-bounce mb-2" />
                               <span className="text-sm">Drop to Upload Media</span>
                             </div>
@@ -6158,7 +6360,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                             else return;
                             
                             e.preventDefault();
-                            updateForm({ canvasX: newX, canvasY: newY });
+                            setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY }));
                           }}
                           style={{
                             backgroundColor: form.bgColor || '#000000',
@@ -6341,22 +6543,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           })()}
 
                           {isDraggingOver && (
-                            <div style={{
-                              position: 'absolute',
-                              inset: 0,
-                              backgroundColor: 'rgba(16, 185, 129, 0.15)',
-                              border: '2px dashed #10B981',
-                              borderRadius: '8px',
-                              zIndex: 50,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              color: '#10B981',
-                              fontWeight: 'bold',
-                              pointerEvents: 'none',
-                              backdropFilter: 'blur(4px)'
-                            }}>
+                            <div className="media-drop-overlay">
                               <Upload size={32} className="animate-bounce mb-2" />
                               <span className="text-sm">Drop to Upload Media</span>
                             </div>
@@ -6725,6 +6912,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 {/* Image / Video Controls */}
                 {form.mode === 'image' && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '16px' }}>
+                    {isLoadingMedia && <span role="status" className="text-xs text-slate-300" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><RefreshCw size={11} className="animate-spin" />Loading media...</span>}
+                    {saveError && !isLoadingMedia && <span role="alert" className="text-xs text-red-400">{saveError}</span>}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         <button
@@ -7134,7 +7323,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
 
 
-                {saveError && <div role="alert" style={{ color: '#f87171', marginTop: 16 }}>
+                {saveError && form.mode !== 'image' && <div role="alert" style={{ color: '#f87171', marginTop: 16 }}>
                   Error saving preset: {saveError}
                 </div>}
                 <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
@@ -7142,7 +7331,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     className="btn-styled py-4" 
                     style={{ flex: 3 }}
                     onClick={handleSave}
-                    disabled={isSaving || !hasRequiredPresetContent}
+                    disabled={!canSavePreset}
                   >
                     <Save size={16} /> {isSaving ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                       <span>Processing...</span>

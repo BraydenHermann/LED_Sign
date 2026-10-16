@@ -181,6 +181,21 @@ frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80
         gif_bytes = gemini_service._execute_pillow_script(script, output_type="gif")
         self.assertTrue(len(gif_bytes) > 0)
 
+    @unittest.skipUnless(HAS_PIL, "PIL required for animation repair test")
+    def test_invalid_generated_script_is_repaired_once(self):
+        repaired_script = """```python
+from PIL import Image
+frames = [Image.new('RGB', (64, 20), (0, 0, 0)), Image.new('RGB', (64, 20), (255, 255, 255))]
+frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80, loop=0)
+```"""
+        response = {"candidates": [{"content": {"parts": [{"text": repaired_script}]}}]}
+        with patch.object(gemini_service, "_call_gemini_rest", return_value=response) as call:
+            gif_bytes = gemini_service._execute_generated_with_repair(
+                "```python\nif True print('broken')\n```", "Only a ringing phone", "https://example.invalid/model", None, "gif"
+            )
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(Image.open(io.BytesIO(gif_bytes)).size, (64, 20))
+
 
 if __name__ == '__main__':
     unittest.main()

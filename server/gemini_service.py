@@ -455,7 +455,7 @@ def generate_animated_gif(
     ref_guidance = ""
     if has_attachments:
         ref_guidance = f"""
-- REFERENCE CONTEXT: The attached image/media represents the current 64x20 LED sign canvas or reference context. Use this reference to guide your adjustments matching the user's prompt: "{prompt}". Preserve the layout, character styling, or color identity where helpful, but feel free to modify, polish, or redesign elements if that will help the result look significantly better.
+- REFERENCE CONTEXT: The attached image/media represents the current 64x20 LED sign canvas or reference context. Use it only where consistent with the latest request: "{prompt}". If the user rejects an object or effect in the reference, remove it completely; do not preserve unwanted elements.
 """
 
     history_guidance = ""
@@ -468,6 +468,7 @@ def generate_animated_gif(
 The user previously requested:
 {history_text}
 This current request ("{prompt}") is a follow-up or refinement in this ongoing conversation. Incorporate context from the previous requests while addressing the latest prompt.
+The latest request takes priority over both history and the attached canvas. Treat explicit corrections and exclusions as requirements.
 """
 
     instruction = f"""{SYSTEM_CONSTRAINTS}
@@ -486,6 +487,7 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
   Example: frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration={OPTIMAL_FRAME_DURATION_MS}, loop=0)
 - Do NOT import any packages other than PIL (Image, ImageDraw, ImageColor, ImageFilter, ImageFont), math, random, colorsys, itertools, and time.
 - Return ONLY the Python code block wrapped in ```python ... ```.
+- Check that the entire script is valid Python before responding. Do not include placeholders, incomplete expressions, or prose outside the code block.
 """
 
     parts = [{"text": instruction}]
@@ -526,7 +528,7 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
         raise RuntimeError("Gemini did not return any code candidates.")
 
     text_content = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-    gif_bytes = _execute_pillow_script(text_content, output_type="gif")
+    gif_bytes = _execute_generated_with_repair(text_content, prompt, url, api_key, output_type="gif")
 
     pil_gif = Image.open(io.BytesIO(gif_bytes))
     stitched_pixels, durations = convert_gif_to_matrix_pixels(pil_gif)
@@ -559,6 +561,39 @@ def generate_video(
     gif_result["fileType"] = "video"
     gif_result["suggestedName"] = f"Gemini Video: {prompt[:24].strip()}"
     return gif_result
+
+
+def _execute_generated_with_repair(
+    script_text: str, prompt: str, endpoint: str, api_key: Optional[str], output_type: str
+) -> bytes:
+    """Give Gemini two chances to repair its own invalid Pillow script."""
+    current_text = script_text
+    for attempt in range(3):
+        try:
+            return _execute_pillow_script(current_text, output_type=output_type)
+        except RuntimeError as error:
+            if attempt == 2:
+                raise RuntimeError("Gemini returned invalid animation code after two automatic repair attempts.") from error
+            repair_prompt = (
+                f"Repair this complete Python Pillow script for a 64x20 {output_type.upper()} animation. "
+                f"The latest user request is: {prompt!r}. Corrections in that request override any "
+                "earlier image or prompt; do not add objects the user rejected. "
+                f"Execution failed with: {str(error)[:400]}. "
+                "Keep the original intended animation, use only PIL/math/random/colorsys/itertools/time, "
+                "save the result to OUTPUT_PATH, and return only a complete executable ```python code block.\n\n"
+                f"Previous response:\n{current_text}"
+            )
+            repaired = _call_gemini_rest(
+                endpoint,
+                {"contents": [{"parts": [{"text": repair_prompt}]}], "generationConfig": {"temperature": 0.2}},
+                api_key=api_key,
+                timeout=40,
+            )
+            candidates = repaired.get("candidates", [])
+            current_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "") if candidates else ""
+            if not current_text.strip():
+                raise RuntimeError("Gemini could not repair its generated animation code.") from error
+    raise RuntimeError("Gemini did not produce an animation.")
 
 
 def _execute_pillow_script(script_text: str, output_type: str = "gif") -> bytes:

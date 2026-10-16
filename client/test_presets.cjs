@@ -16,7 +16,7 @@ const puppeteer = require('puppeteer');
       const path = new URL(request.url()).pathname;
       let body;
       let status = 200;
-      if (path === '/status') body = { api_version: 2, connected: true, address: 'FF:24:10:29:44:9B', power: true, display_mode: 'preset-8', preview_ts: 1 };
+      if (path === '/status') body = { api_version: 6, connected: true, address: 'FF:24:10:29:44:9B', power: true, display_mode: 'preset-8', preview_ts: 1 };
       else if (path === '/hardware-slots') body = { slots: [{ slot_id: 8, occupied: true, preset_data: preset }] };
       else if (path === '/calendar/today') body = { events: [] };
       else if (path === '/process-video') {

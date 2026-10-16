@@ -67,6 +67,35 @@ class LOYProtocol:
         """
         return self.build_packet(bytes([0x0A, 0x00]))
 
+    def device_info_all_command(self, passcode: str = ""):
+        """Request the device-info bundle used by current LOY apps.
+
+        A password-protected sign expects the optional six-digit Bluetooth
+        passcode immediately after the ``0x0A`` device-info tag.  This is an
+        application protocol credential, not an operating-system Bluetooth
+        pairing PIN.
+        """
+        code = passcode.encode("ascii") if passcode else b""
+        if code and (len(code) != 6 or not code.isdigit()):
+            raise ValueError("The Bluetooth passcode must contain exactly six digits")
+        # 0x1B, 0x04 and 0x06 request the same extended device-info fields
+        # queried by LOY PLAY/LOY SPACE when a connection opens.
+        payload = bytes([0x0A, len(code)]) + code + bytes([0x1B, 0x00, 0x04, 0x00, 0x06, 0x00])
+        return self.build_packet(payload, cmd_type=0xC1, sub_type=0x03)
+
+    def password_set_command(self, passcode: str):
+        code = passcode.encode("ascii")
+        if len(code) != 6 or not code.isdigit():
+            raise ValueError("The Bluetooth passcode must contain exactly six digits")
+        return self.build_packet(bytes([0x37, len(code) + 1, 0x01]) + code)
+
+    def password_disable_command(self):
+        return self.build_packet(bytes([0x37, 0x01, 0x02]))
+
+    def password_status_command(self):
+        """Query the sign's passcode state (the LOY app's get pwd/type 2)."""
+        return self.build_packet(bytes([0x37, 0x01, 0x02]), cmd_type=0xC1, sub_type=0x03)
+
 # Example usage/test
 if __name__ == "__main__":
     proto = LOYProtocol()

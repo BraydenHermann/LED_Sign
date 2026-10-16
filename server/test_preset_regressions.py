@@ -103,6 +103,34 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
             await main.save_preset(self.request())
         self.assertEqual(error.exception.status_code, 409)
 
+    async def test_save_refuses_a_different_connected_sign(self):
+        request = self.request()
+        request.address = "11:22:33:44:55:66"
+        with self.assertRaises(HTTPException) as error:
+            await main.save_preset(request)
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(main.connected_client.writes, [])
+        self.assertFalse(list(Path(self.directory.name).glob("preset_*.json")))
+
+    async def test_queued_save_refuses_sign_that_changed_while_waiting(self):
+        await main.preset_switch_lock.acquire()
+        task = asyncio.create_task(main.save_preset(self.request()))
+        await asyncio.sleep(0)
+        changed_sign = FakeSign()
+        changed_sign.address = "11:22:33:44:55:66"
+        main.connected_client = changed_sign
+        main.preset_switch_lock.release()
+        with self.assertRaises(HTTPException) as error:
+            await task
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(changed_sign.writes, [])
+
+    async def test_play_refuses_a_different_connected_sign(self):
+        with self.assertRaises(HTTPException) as error:
+            await main.play_preset(8, mac="11:22:33:44:55:66")
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertEqual(main.connected_client.writes, [])
+
 
 if __name__ == "__main__":
     unittest.main()

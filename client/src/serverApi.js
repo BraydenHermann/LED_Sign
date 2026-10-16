@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-export const SERVER_API_VERSION = 3;
+export const SERVER_API_VERSION = 6;
 
 export function requireCurrentServer(status) {
   if (!(status?.api_version >= SERVER_API_VERSION)) {

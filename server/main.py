@@ -28,6 +28,10 @@ import math
 import glob
 import time
 import unicodedata
+import hashlib
+import re
+import urllib.parse
+import urllib.request
 from typing import List, Optional, Any, Union
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
@@ -228,11 +232,21 @@ async def calendar_background_loop():
                     except Exception as e:
                         print(f"[calendar] Notification error: {e}")
                 
-                if last_pushed_event_id != event_id:
-                    last_pushed_event_id = event_id
+                # The open dashboard owns its calendar-to-slot workflow. The
+                # server fallback is only needed when no dashboard is active.
+                if time.monotonic() - ui_last_seen_monotonic < 15:
+                    continue
+                sign_mac = (connected_client.address or "").upper() if connected_client and connected_client.is_connected and connection_ready else ""
+                event_key = (sign_mac, event_id)
+                if sign_mac and last_pushed_event_id != event_key:
                     try:
-                        req = PushTextRequest(text=f"{summary} ||| {time_str}")
-                        await push_text(req)
+                        async with preset_switch_lock:
+                            require_connected_sign(sign_mac)
+                            req = PushTextRequest(text=f"{summary} ||| {time_str}")
+                            result = await push_text(req)
+                            if result.get("status") != "success":
+                                raise RuntimeError("Calendar push did not complete")
+                            last_pushed_event_id = event_key
                         print(f"[auto-push] Pushed calendar event to sign: {summary}")
                     except Exception as e:
                         print(f"[auto-push] Failed to push calendar event: {e}")
@@ -275,10 +289,30 @@ current_clock_style: str = "default"
 # Hardware Slots State
 hardware_slots_state = {i: {"slot_id": i, "occupied": False, "key": ""} for i in range(60)}
 notification_buffer = bytearray()
+connected_device_id: str = ""
+RECOVERY_CONTACTS_PATH = os.path.join(_SERVER_DIR, "recovery_contacts.json")
+_auth_reply_waiter: Optional[asyncio.Future] = None
+_auth_reply_sno: Optional[int] = None
+password_enabled: Optional[bool] = None
+password_command_lock = asyncio.Lock()
+password_diagnostic_notifications = 0
 
 # Reconnect state
 last_connected_mac: str = ""
 _reconnect_task: Optional[asyncio.Task] = None
+_suppress_auto_reconnect: bool = False
+_connection_intent: int = 0
+
+
+class PasscodeRequiredError(Exception):
+    """The sign requires authentication or explicitly rejected the code."""
+
+    def __init__(self, error_code=None):
+        self.error_code = error_code
+
+
+class ConnectSupersededError(Exception):
+    """A newer user-selected connection or disconnect replaced this attempt."""
 
 
 @app.post("/ui-heartbeat")
@@ -293,10 +327,14 @@ async def ui_heartbeat():
 async def ui_open():
     return {"open": (time.monotonic() - ui_last_seen_monotonic) < 15.0}
 
-async def _auto_reconnect(mac: str, delay: float = 4.0):
+async def _auto_reconnect(mac: str, delay: float = 4.0, intent: Optional[int] = None):
     """Background task: waits `delay` seconds then tries to reconnect to `mac`."""
     global connected_client, connection_ready, _reconnect_task
     await asyncio.sleep(delay)
+    if _suppress_auto_reconnect or (intent is not None and intent != _connection_intent):
+        print("[auto_reconnect] Suppressed by an intentional disconnect or sign change.")
+        _reconnect_task = None
+        return
     if connected_client and connected_client.is_connected:
         print(f"[auto_reconnect] Already reconnected, skipping.")
         _reconnect_task = None
@@ -304,15 +342,19 @@ async def _auto_reconnect(mac: str, delay: float = 4.0):
     print(f"[auto_reconnect] Attempting reconnect to {mac}...")
     try:
         req = ConnectRequest(address=mac)
-        result = await _connect_internal(req)
+        async with preset_switch_lock:
+            result = await _connect_internal(req, background=True, intent=intent)
         print(f"[auto_reconnect] Reconnect result: {result}")
     except Exception as e:
         print(f"[auto_reconnect] Reconnect failed: {e}")
     _reconnect_task = None
 
 def notification_handler(sender, data: bytearray):
-    global hardware_slots_state, notification_buffer
+    global hardware_slots_state, notification_buffer, _auth_reply_waiter, _auth_reply_sno, connected_device_id, password_enabled, password_diagnostic_notifications
     try:
+        if password_diagnostic_notifications < 20:
+            print(f"[BLE notify] bytes={len(data)} prefix={bytes(data[:2]).hex()}")
+            password_diagnostic_notifications += 1
         notification_buffer.extend(data)
         while len(notification_buffer) >= 10:
             idx = notification_buffer.find(b'\xaa\x55')
@@ -325,7 +367,12 @@ def notification_handler(sender, data: bytearray):
                 break
 
             pkt_len = struct.unpack('<H', notification_buffer[4:6])[0]
-            total_pkt_len = pkt_len + 4
+            # LEN covers SNO through checksum; the six bytes preceding SNO
+            # are not included. Keep the checksum bytes in the packet.
+            total_pkt_len = pkt_len + 6
+            if total_pkt_len < 13 or total_pkt_len > 4096:
+                del notification_buffer[:2]
+                continue
             if len(notification_buffer) < total_pkt_len:
                 break
 
@@ -335,6 +382,40 @@ def notification_handler(sender, data: bytearray):
             cmd_type = packet[8]
             sub_type = packet[9]
             cmd = packet[10]
+            reported_password = None
+            if sub_type == 0x83 and cmd == 0x37 and len(packet) >= 15:
+                value_len = packet[11]
+                if value_len >= 1 and packet[12] in (2, 3):
+                    reported_password = packet[12] == 3
+                    password_enabled = reported_password
+            # Device-info is an ASCII, comma-separated response. The first
+            # field is the vendor hardware identifier used by LOY recovery.
+            if sub_type == 0x83 and cmd == 0x0A and len(packet) > 13:
+                info_len = packet[11]
+                raw_info = packet[12:12 + info_len]
+                try:
+                    candidate = raw_info.decode("ascii").split(",", 1)[0].strip()
+                    if candidate:
+                        connected_device_id = candidate
+                except UnicodeDecodeError:
+                    pass
+
+            # The official app sends its password as part of its first
+            # device-info query. Error 14 requests authentication, whereas
+            # error 13 explicitly rejects a supplied password. Resolve before
+            # this connection is allowed to issue display commands.
+            packet_sno = struct.unpack('<H', packet[6:8])[0]
+            if password_diagnostic_notifications < 20:
+                print(f"[BLE frame] sno={packet_sno} type={cmd_type:02x} sub={sub_type:02x} tag={cmd:02x} bytes={len(packet)}")
+            if (
+                _auth_reply_waiter is not None
+                and not _auth_reply_waiter.done()
+                and packet_sno == _auth_reply_sno
+            ):
+                if sub_type in (0x82, 0x84):
+                    _auth_reply_waiter.set_result({"ok": cmd == 0, "error_code": cmd, "password_enabled": reported_password})
+                elif sub_type == 0x83:
+                    _auth_reply_waiter.set_result({"ok": True, "error_code": 0, "password_enabled": reported_password})
 
             if cmd_type == 0x81 and sub_type == 0x83 and cmd == 0x35:
                 payload = packet[10:-2] if len(packet) > 12 else packet[10:]
@@ -363,6 +444,42 @@ def notification_handler(sender, data: bytearray):
                 print(f"[notification_handler] Hardware slot inventory updated. Occupied slots: {occ_slots}")
     except Exception as e:
         print(f"[notification_handler error] {e}")
+
+
+async def _password_request(packet: bytes, timeout: float = 3.0) -> dict:
+    """Send one password-related request and match its notification by SNO."""
+    global _auth_reply_waiter, _auth_reply_sno
+    async with password_command_lock:
+        _auth_reply_sno = struct.unpack('<H', packet[6:8])[0]
+        _auth_reply_waiter = asyncio.get_running_loop().create_future()
+        request_label = "status" if packet[9] == 0x03 and packet[10] == 0x37 else "device-info" if packet[10] == 0x0A else "password-change"
+        print(f"[password request] {request_label} sno={_auth_reply_sno}")
+        try:
+            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=True)
+            result = await asyncio.wait_for(_auth_reply_waiter, timeout=timeout)
+            print(f"[password reply] {request_label} sno={_auth_reply_sno} ok={result['ok']} state={result.get('password_enabled')}")
+            return result
+        except asyncio.TimeoutError:
+            print(f"[password reply] {request_label} sno={_auth_reply_sno} timed out")
+            raise
+        finally:
+            _auth_reply_waiter = None
+            _auth_reply_sno = None
+
+
+async def _read_sign_password_state() -> Optional[bool]:
+    """Read the device's own password flag; never infer it from local settings."""
+    global password_enabled
+    try:
+        result = await _password_request(protocol.password_status_command())
+    except asyncio.TimeoutError:
+        password_enabled = None
+        return None
+    if not result["ok"]:
+        password_enabled = None
+        return None
+    password_enabled = result.get("password_enabled")
+    return password_enabled
 
 
 # Enable CORS for frontend Vite dev server (port 5173) to backend communication
@@ -398,6 +515,25 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 class ConnectRequest(BaseModel):
     address: str
+    passcode: Optional[str] = None
+
+class SignPasswordRequest(BaseModel):
+    enabled: bool
+    passcode: Optional[str] = None
+    recovery_contact: Optional[str] = None
+
+def _loy_recovery_request(endpoint: str, fields: dict) -> dict:
+    """Use the same vendor recovery API used by the LOY mobile app."""
+    timestamp = str(int(time.time()))
+    fields = {**fields, "ts": timestamp,
+              "token": hashlib.md5(("Z2cjvaB8mbICRoDqvS9X8D3ubz2ecbAn" + timestamp).encode()).hexdigest()}
+    body = urllib.parse.urlencode(fields).encode()
+    request = urllib.request.Request(
+        f"https://store-cdn.popled.cn/api/device/{endpoint}", data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        return _json.loads(response.read().decode("utf-8"))
 
 class PushTextRequest(BaseModel):
     text: Optional[Any] = ""
@@ -808,7 +944,8 @@ async def get_status():
     
     return {
         "connected": connected,
-        "api_version": 4,
+        "password_enabled": password_enabled if connected else None,
+        "api_version": 6,
         "address": address,
         "preview_url": preview_url,
         "preview_ts": preview_ts,
@@ -830,16 +967,32 @@ async def get_status():
 
 connect_lock = asyncio.Lock()
 
-async def _connect_internal(req: ConnectRequest):
+async def _connect_internal(req: ConnectRequest, background: bool = False, intent: Optional[int] = None):
     async with connect_lock:
-        global connected_client, connection_ready
+        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode
+        if intent is not None and intent != _connection_intent:
+            raise HTTPException(status_code=409, detail="Connection replaced by a newer request")
+        if background and (_suppress_auto_reconnect or (connected_client and connected_client.is_connected)):
+            return {"status": "skipped", "reason": "manual connection takes priority"}
         target_mac = (req.address or "").strip().upper()
-        if connected_client and connected_client.is_connected:
+        passcode = (req.passcode or "").strip()
+        if passcode and (len(passcode) != 6 or not passcode.isascii() or not passcode.isdigit()):
+            raise HTTPException(status_code=422, detail="Bluetooth passcode must be exactly six digits")
+        if not passcode and connected_client and connected_client.is_connected and connection_ready:
             if not target_mac or (connected_client.address and connected_client.address.upper() == target_mac):
                 connection_ready = True
                 return {"status": "success", "connected": True, "address": connected_client.address}
 
+        previous_sign_mac = ((getattr(connected_client, "address", None) if connected_client else None) or last_connected_mac or "").upper()
+        # Streaming calendar/flipper frames must not follow the connection to
+        # another physical sign. Cancel the old worker before changing clients.
+        await cancel_active_worker()
+        # Disconnecting the previous sign to switch targets is intentional;
+        # its callback must not schedule a reconnect to that old sign.
+        _suppress_auto_reconnect = True
         connection_ready = False
+        password_enabled = None
+        connected_device_id = ""
         if connected_client:
             try:
                 if connected_client.is_connected:
@@ -857,17 +1010,22 @@ async def _connect_internal(req: ConnectRequest):
             print(f"[connect] Target LED sign: {target_mac or 'auto-discover'}...")
 
             def on_disconnect(c):
-                global connected_client, connection_ready, last_connected_mac, _reconnect_task
+                global connected_client, connection_ready, last_connected_mac, _reconnect_task, _suppress_auto_reconnect, password_enabled, connected_device_id
                 addr = getattr(c, 'address', 'unknown')
                 print(f"[BLE] Device disconnected callback: {addr}")
+                if connected_client is not None and connected_client is not c:
+                    print("[BLE] Ignoring disconnect from a previous sign session.")
+                    return
                 connected_client = None
                 connection_ready = False
+                password_enabled = None
+                connected_device_id = ""
                 # Schedule background auto-reconnect
-                mac_to_reconnect = last_connected_mac or (addr if addr != 'unknown' else '')
-                if mac_to_reconnect and (_reconnect_task is None or _reconnect_task.done()):
+                mac_to_reconnect = addr if addr != 'unknown' else last_connected_mac
+                if (not _suppress_auto_reconnect) and mac_to_reconnect and (_reconnect_task is None or _reconnect_task.done()):
                     print(f"[BLE] Scheduling auto-reconnect to {mac_to_reconnect} in 4s...")
                     loop = asyncio.get_event_loop()
-                    _reconnect_task = loop.create_task(_auto_reconnect(mac_to_reconnect, delay=4.0))
+                    _reconnect_task = loop.create_task(_auto_reconnect(mac_to_reconnect, delay=4.0, intent=_connection_intent))
 
             client = None
             last_connect_error = None
@@ -922,6 +1080,9 @@ async def _connect_internal(req: ConnectRequest):
                         await asyncio.wait_for(scanner.stop(), timeout=2.0)
                     except Exception:
                         pass
+
+                if intent is not None and intent != _connection_intent:
+                    raise ConnectSupersededError()
 
                 if not found_device:
                     if target_mac:
@@ -978,8 +1139,17 @@ async def _connect_internal(req: ConnectRequest):
                 )
 
             client_address = client.address
+            if intent is not None and intent != _connection_intent:
+                raise ConnectSupersededError()
+            if previous_sign_mac and (client_address or "").upper() != previous_sign_mac:
+                current_display_mode = "none"
+                hardware_slots_state.clear()
 
             # Subscribe to notifications for slot query replies
+            # Never carry an incomplete frame from a previous BLE session
+            # into this sign's authentication and status replies.
+            notification_buffer.clear()
+            password_diagnostic_notifications = 0
             try:
                 await client.start_notify(protocol.NOTIFY_UUID, notification_handler)
                 print("[connect] Subscribed to NOTIFY_UUID notifications.")
@@ -987,6 +1157,39 @@ async def _connect_internal(req: ConnectRequest):
                 print(f"[connect] Warning starting notify: {ne}")
 
             connected_client = client
+
+            # Match the LOY app's opening request.  A non-password sign can
+            # reply with extended device information; a protected sign sends
+            # acknowledgement error 14 until the six-digit dev_key is valid.
+            auth_packet = protocol.device_info_all_command(passcode)
+            try:
+                auth_result = await _password_request(auth_packet, timeout=2.5)
+            except asyncio.TimeoutError:
+                auth_result = None
+
+            auth_rejected = auth_result is not None and not auth_result["ok"] and auth_result["error_code"] in (13, 14)
+            # Error 13/14 already proves this sign requires a valid key; do
+            # not spend another request waiting for status before prompting.
+            reported_password = None if auth_rejected else await _read_sign_password_state()
+            if intent is not None and intent != _connection_intent:
+                raise ConnectSupersededError()
+
+            if auth_rejected or (reported_password is True and not passcode):
+                _suppress_auto_reconnect = True
+                try:
+                    await client.stop_notify(protocol.NOTIFY_UUID)
+                    await client.disconnect()
+                except Exception:
+                    pass
+                connected_client = None
+                connection_ready = False
+                raise PasscodeRequiredError(auth_result["error_code"] if auth_rejected else 14)
+            if auth_result is None and reported_password is None:
+                print("[connect] Sign did not answer password queries; status remains unknown")
+            if auth_result is not None and not auth_result["ok"]:
+                raise RuntimeError(f"Sign rejected the device-info request (error {auth_result['error_code']})")
+
+            _suppress_auto_reconnect = False
             connection_ready = True
 
             # Ensure sign display is powered on
@@ -1021,40 +1224,158 @@ async def _connect_internal(req: ConnectRequest):
             except Exception as se:
                 print(f"[connect] Warning initializing slots: {se}")
 
+            if intent is not None and intent != _connection_intent:
+                raise ConnectSupersededError()
             last_connected_mac = client_address.upper() if client_address else ""
-            return {"status": "success", "address": client_address}
+            passcode_status = ("enabled" if reported_password else "disabled") if reported_password is not None else ("authenticated" if auth_result is not None and auth_result["ok"] else "unknown")
+            return {"status": "success", "address": client_address, "passcode_status": passcode_status}
+        except ConnectSupersededError:
+            _suppress_auto_reconnect = True
+            if client is not None and client.is_connected:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            if connected_client is client:
+                connected_client = None
+            connection_ready = False
+            raise HTTPException(status_code=409, detail="Connection replaced by a newer request")
+        except PasscodeRequiredError as exc:
+            invalid = exc.error_code == 13
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "invalid_passcode" if invalid else "passcode_required",
+                        "message": "Incorrect Passcode. Please try again." if invalid
+                                   else "The sign still requires passcode authentication. Please enter its six-digit password."},
+            )
+        except HTTPException:
+            raise
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
             print(f"[connect] FAILED: {type(e).__name__}: {e}")
             if connected_client == client or not (connected_client and connected_client.is_connected):
+                if client is not None and client.is_connected:
+                    _suppress_auto_reconnect = True
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
                 connected_client = None
                 connection_ready = False
             raise HTTPException(status_code=408, detail=f"{type(e).__name__}: {e}")
 
 @app.post("/connect")
 async def connect(req: ConnectRequest):
-    return await _connect_internal(req)
+    global _suppress_auto_reconnect, _connection_intent
+    # A human-selected target takes priority over a pending background retry.
+    _suppress_auto_reconnect = True
+    _connection_intent += 1
+    intent = _connection_intent
+    # A sign cannot change halfway through a flash write or slot playback.
+    async with preset_switch_lock:
+        return await _connect_internal(req, intent=intent)
+
+
+@app.post("/pause-reconnect")
+async def pause_reconnect():
+    """A user is choosing a sign; supersede any old reconnect worker."""
+    global _suppress_auto_reconnect, _connection_intent
+    _suppress_auto_reconnect = True
+    _connection_intent += 1
+    return {"status": "paused"}
 
 @app.post("/disconnect")
 async def disconnect():
-    global connected_client, connection_ready, current_display_mode
-    connection_ready = False
-    if connected_client:
-        try:
-            await connected_client.stop_notify(protocol.NOTIFY_UUID)
-        except Exception:
-            pass
-        try:
-            await connected_client.disconnect()
-        except Exception:
-            pass
-        connected_client = None
-        await asyncio.sleep(0.5)
-        
-    current_display_mode = "none"
+    global connected_client, connection_ready, current_display_mode, password_enabled, connected_device_id, _suppress_auto_reconnect, _connection_intent
+    _suppress_auto_reconnect = True
+    _connection_intent += 1
+    async with preset_switch_lock:
+        async with connect_lock:
+            await cancel_active_worker()
+            connection_ready = False
+            password_enabled = None
+            connected_device_id = ""
+            if connected_client:
+                try:
+                    await connected_client.stop_notify(protocol.NOTIFY_UUID)
+                except Exception:
+                    pass
+                try:
+                    await connected_client.disconnect()
+                except Exception:
+                    pass
+                connected_client = None
+                await asyncio.sleep(0.5)
+            current_display_mode = "none"
         
     return {"status": "success"}
+
+@app.get("/sign-password")
+async def get_sign_password():
+    if not connected_client or not connected_client.is_connected or not connection_ready:
+        raise HTTPException(status_code=409, detail="Please connect to the sign first")
+    # Connection authentication (and a successful password change) already
+    # read this flag from the sign. Query only when that handshake was silent.
+    return {"enabled": password_enabled if password_enabled is not None else await _read_sign_password_state()}
+
+
+@app.put("/sign-password")
+async def set_sign_password(req: SignPasswordRequest):
+    """Configure the sign password and its LOY-hosted recovery contact."""
+    if not connected_client or not connected_client.is_connected or not connection_ready:
+        raise HTTPException(status_code=409, detail="Please connect to the sign before changing its password")
+    if not req.enabled:
+        try:
+            result = await _password_request(protocol.password_disable_command())
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=502, detail="Please try again: the sign did not confirm the passcode change")
+        if not result["ok"] or await _read_sign_password_state() is not False:
+            raise HTTPException(status_code=502, detail="Please try again: the sign did not confirm that the passcode is off")
+        return {"enabled": False}
+    code = (req.passcode or "").strip()
+    contact = (req.recovery_contact or "").strip()
+    if len(code) != 6 or not code.isascii() or not code.isdigit():
+        raise HTTPException(status_code=422, detail="Please enter a passcode with exactly six digits")
+    is_email = re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]{2,}", contact) is not None
+    normalized_phone = re.sub(r"[\s().-]", "", contact)
+    is_phone = re.fullmatch(r"\+?[1-9]\d{6,14}", normalized_phone) is not None
+    if not (is_email or is_phone):
+        raise HTTPException(status_code=422, detail="Please enter a valid recovery email address or phone number")
+    if not connected_device_id:
+        raise HTTPException(status_code=409, detail="Please reconnect: the sign did not provide its device ID")
+    try:
+        password_result = await _password_request(protocol.password_set_command(code))
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=502, detail="Please try again: the sign did not confirm the passcode change")
+    if not password_result["ok"]:
+        raise HTTPException(status_code=502, detail="Please try again: the sign rejected the passcode change")
+    if await _read_sign_password_state() is not True:
+        raise HTTPException(status_code=502, detail="Please try again: the sign did not confirm that the passcode is on")
+    try:
+        result = await asyncio.to_thread(
+            _loy_recovery_request, "save_device_info",
+            {"device": connected_device_id, "type": "1", "data": _json.dumps({"pwd": code, "phone": contact})},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LOY recovery service could not be reached: {exc}")
+    if result.get("status") not in (0, 1, "0", "1", None):
+        raise HTTPException(status_code=502, detail="LOY recovery service rejected the recovery contact")
+    # Keep a local, contact-only record. The passcode intentionally remains
+    # only on the sign and the LOY recovery service.
+    try:
+        existing = {}
+        if os.path.exists(RECOVERY_CONTACTS_PATH):
+            with open(RECOVERY_CONTACTS_PATH, "r", encoding="utf-8") as file:
+                existing = _json.load(file)
+        existing[connected_device_id] = {"contact": contact, "updated_at": datetime.datetime.now().isoformat()}
+        temporary = RECOVERY_CONTACTS_PATH + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as file:
+            _json.dump(existing, file, indent=2)
+        os.replace(temporary, RECOVERY_CONTACTS_PATH)
+    except Exception as exc:
+        print(f"[sign-password] Local recovery-contact record failed: {exc}")
+    return {"enabled": True, "recovery_configured": True}
 
 @app.get("/hardware-slots")
 async def get_hardware_slots(mac: str = ""):
@@ -1185,13 +1506,22 @@ async def play_preset(id: int, mac: str = ""):
         return await _play_preset(id, mac)
 
 
+def require_connected_sign(requested_address: str = "") -> str:
+    if not connected_client or not connected_client.is_connected or not connection_ready:
+        raise HTTPException(status_code=409, detail="Sign is not connected")
+    connected_mac = (connected_client.address or "").replace(":", "").upper()
+    requested_mac = (requested_address or "").replace(":", "").upper()
+    if requested_mac and requested_mac != connected_mac:
+        raise HTTPException(status_code=409, detail="The selected sign changed. Please retry on the connected sign.")
+    return connected_mac.lower()
+
+
 async def _play_preset(id: int, mac: str = ""):
     print(f"[DEBUG] /preset called with id={id}, mac={mac}")
     global connected_client, connection_ready, active_scroller_task, current_display_mode, frames_sent
     import json as _json
 
-    if not connected_client or not connected_client.is_connected or not connection_ready:
-        raise HTTPException(status_code=409, detail="Sign is not connected")
+    mac_str = require_connected_sign(mac)
 
     # Cancel any active scroller/animation task
     if active_scroller_task:
@@ -1199,7 +1529,6 @@ async def _play_preset(id: int, mac: str = ""):
         active_scroller_task = None
 
     try:
-        mac_str = (mac or (connected_client.address if connected_client else "") or "").replace(':', '').lower()
         json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{id}.json")
         gif_path  = os.path.join(STATIC_DIR, f"preset_{mac_str}_{id}.gif")
         if not os.path.exists(json_path) and not os.path.exists(gif_path):
@@ -2927,7 +3256,7 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
 class SavePresetRequest(BaseModel):
     slot_id: int
     preset: PushTextRequest
-    address: str = ""
+    address: str
     progress_id: Optional[str] = None
     is_currently_playing: Optional[bool] = None
 
@@ -2956,8 +3285,10 @@ async def save_preset(req: SavePresetRequest):
 async def _save_preset(req: SavePresetRequest):
     global connected_client, connection_ready, current_speed, active_scroller_task, current_width, current_display_mode, frames_sent
 
-    if not connected_client or not connected_client.is_connected or not connection_ready:
-        raise HTTPException(status_code=409, detail="Sign is not connected")
+    if not req.address.strip():
+        raise HTTPException(status_code=422, detail="A sign address is required to save a preset")
+    mac_str = require_connected_sign(req.address)
+    target_client = connected_client
     
     progress_id = req.progress_id
     written_to_sign = False
@@ -2975,7 +3306,6 @@ async def _save_preset(req: SavePresetRequest):
         
     preset = req.preset
     slot_id = req.slot_id # 0-indexed slot index (0 to 11)
-    mac_str = (req.address or (connected_client.address if connected_client else "") or "").replace(':', '').lower()
     is_playing_target_slot = req.is_currently_playing if req.is_currently_playing is not None else (current_display_mode == f"preset-{slot_id}")
     
     if preset.mode == 'clock':
@@ -3230,8 +3560,9 @@ async def _save_preset(req: SavePresetRequest):
         
         # Live preview files are published only after the transfer succeeds (see below).
 
-        if not connected_client or not connected_client.is_connected or not connection_ready:
-            raise RuntimeError("Sign disconnected before the slot transfer")
+        if connected_client is not target_client:
+            raise HTTPException(status_code=409, detail="The selected sign changed before the slot transfer")
+        require_connected_sign(req.address)
         if connected_client and connected_client.is_connected and connection_ready:
             try:
                 speed = preset.speed if preset.speed is not None else current_speed
@@ -3381,6 +3712,10 @@ async def _save_preset(req: SavePresetRequest):
                         pass
                 raise HTTPException(status_code=500, detail=str(e))
 
+        if connected_client is not target_client:
+            raise HTTPException(status_code=409, detail="The selected sign changed during the slot transfer")
+        require_connected_sign(req.address)
+
         # Only publish the slot and live previews after the transfer and play
         # commands succeeded. Failed writes must not replace the last good cache.
         preset_json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.json")
@@ -3413,6 +3748,8 @@ async def _save_preset(req: SavePresetRequest):
         report_progress(100, "Complete")
         return {"status": "success", "preview_url": f"/static/preset_{mac_str}_{slot_id}.gif", "written_to_sign": written_to_sign}
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()

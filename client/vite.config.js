@@ -10,6 +10,7 @@ export default defineConfig({
     proxy: {
       '/scan': 'http://127.0.0.1:8000',
       '/connect': 'http://127.0.0.1:8000',
+      '/sign-password': 'http://127.0.0.1:8000',
       '/status': 'http://127.0.0.1:8000',
       '/power': 'http://127.0.0.1:8000',
       '/brightness': 'http://127.0.0.1:8000',
