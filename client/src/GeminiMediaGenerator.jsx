@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect, useImperativeHandle } from 'react';
 import { 
   Paperclip, Film, Image as ImageIcon, Upload, X, 
-  RefreshCw, AlertCircle, Layers, ChevronDown, KeyRound
+  RefreshCw, AlertCircle, Layers, ChevronDown, KeyRound,
+  Copy, Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { generateAiMedia, getAiProviders } from './serverApi';
@@ -214,6 +215,34 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         : form?.imgSrc
   );
 
+  // Automatically copy the canvas as an attachment when these AI tabs/panel are opened if media is uploaded
+  const prevExpandedRef = useRef(false);
+  const prevProviderRef = useRef(provider);
+  const prevImgSrcRef = useRef(form?.imgSrc);
+
+  useEffect(() => {
+    const justOpened = isExpanded && !prevExpandedRef.current;
+    const providerSwitched = isExpanded && prevProviderRef.current !== provider;
+    const mediaUploaded = isExpanded && form?.imgSrc && form?.imgSrc !== prevImgSrcRef.current;
+
+    prevExpandedRef.current = isExpanded;
+    prevProviderRef.current = provider;
+    prevImgSrcRef.current = form?.imgSrc;
+
+    if ((justOpened || providerSwitched || mediaUploaded) && Boolean(form?.imgSrc)) {
+      const snapshot = getCanvasSnapshot();
+      if (snapshot) {
+        setAttachments(prev => {
+          if (prev.some(a => a.isCanvasRef && a.data === snapshot.data)) {
+            return prev;
+          }
+          const filtered = prev.filter(a => !a.isCanvasRef);
+          return [snapshot, ...filtered];
+        });
+      }
+    }
+  }, [isExpanded, provider, form?.imgSrc]);
+
   const handleAddFiles = (files) => {
     if (!files || !files.length) return;
     setError('');
@@ -238,6 +267,93 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
     });
   };
 
+  const [copiedAttachmentId, setCopiedAttachmentId] = useState(null);
+
+  const handleCopyAttachment = async (att) => {
+    if (!att?.data) return;
+    try {
+      const res = await fetch(att.data);
+      const blob = await res.blob();
+      let copied = false;
+
+      if (blob.type === 'image/png') {
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blob })
+          ]);
+          copied = true;
+        } catch (e) {
+          console.warn('[GeminiMediaGenerator] ClipboardItem write failed:', e);
+        }
+      } else if (blob.type.startsWith('image/')) {
+        try {
+          const img = new Image();
+          await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+            img.src = att.data;
+          });
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width || 64;
+          canvas.height = img.height || 20;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          const pngBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+          if (pngBlob) {
+            await navigator.clipboard.write([
+              new ClipboardItem({ 'image/png': pngBlob })
+            ]);
+            copied = true;
+          }
+        } catch (e) {
+          console.warn('[GeminiMediaGenerator] Canvas PNG clipboard conversion failed:', e);
+        }
+      }
+
+      if (!copied) {
+        await navigator.clipboard.writeText(att.data);
+      }
+
+      setCopiedAttachmentId(att.id);
+      setTimeout(() => {
+        setCopiedAttachmentId(prev => prev === att.id ? null : prev);
+      }, 2000);
+      if (onNotify) {
+        onNotify(`Copied ${att.name || 'attachment'} to clipboard!`);
+      }
+    } catch (err) {
+      console.warn('[GeminiMediaGenerator] Copy failed, falling back to text:', err);
+      try {
+        await navigator.clipboard.writeText(att.data);
+        setCopiedAttachmentId(att.id);
+        setTimeout(() => {
+          setCopiedAttachmentId(prev => prev === att.id ? null : prev);
+        }, 2000);
+        if (onNotify) {
+          onNotify(`Copied ${att.name || 'attachment'} to clipboard!`);
+        }
+      } catch (fallbackErr) {
+        console.error('[GeminiMediaGenerator] Clipboard write failed completely:', fallbackErr);
+      }
+    }
+  };
+
+  const handleAttachCurrentCanvas = () => {
+    setError('');
+    const snapshot = getCanvasSnapshot();
+    if (!snapshot) {
+      setError('Current canvas does not contain any artwork to copy.');
+      return;
+    }
+    setAttachments(prev => {
+      const filtered = prev.filter(a => !a.isCanvasRef);
+      return [...filtered, snapshot];
+    });
+    if (onNotify) {
+      onNotify(`Attached Canvas to ${provider === 'openai' ? 'OpenAI' : 'Gemini'} prompt!`);
+    }
+  };
+
   useImperativeHandle(ref, () => ({
     handleAddFiles: (files) => {
       handleAddFiles(files);
@@ -251,19 +367,6 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
     getCanvasSnapshot,
     isExpanded: () => isExpanded
   }));
-
-  const handleAttachCurrentCanvas = () => {
-    setError('');
-    const snapshot = getCanvasSnapshot();
-    if (!snapshot) {
-      setError('Current canvas does not contain any artwork to copy.');
-      return;
-    }
-    setAttachments(prev => {
-      const filtered = prev.filter(a => !a.isCanvasRef);
-      return [...filtered, snapshot];
-    });
-  };
 
   const handleRemoveAttachment = (id) => {
     setAttachments(prev => prev.filter(a => a.id !== id));
@@ -1020,6 +1123,25 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                     <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {att.name}
                     </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyAttachment(att)}
+                      style={{ 
+                        background: 'none', 
+                        border: 'none', 
+                        color: copiedAttachmentId === att.id ? '#4ade80' : '#f8fafc', 
+                        cursor: 'pointer', 
+                        padding: '2px', 
+                        display: 'flex', 
+                        alignItems: 'center',
+                        transition: 'color 0.15s ease'
+                      }}
+                      onMouseOver={(e) => { if (copiedAttachmentId !== att.id) e.currentTarget.style.color = isGemini ? '#4796E3' : '#74AA9C'; }}
+                      onMouseOut={(e) => { if (copiedAttachmentId !== att.id) e.currentTarget.style.color = '#f8fafc'; }}
+                      title={copiedAttachmentId === att.id ? "Copied to clipboard!" : `Copy ${att.name || 'file'}`}
+                    >
+                      {copiedAttachmentId === att.id ? <Check size={12} /> : <Copy size={12} />}
+                    </button>
                     <button
                       type="button"
                       onClick={() => handleRemoveAttachment(att.id)}

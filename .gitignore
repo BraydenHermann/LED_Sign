@@ -17,10 +17,12 @@ jadx/
 jadx_new/
 loy_extracted/
 loy_source/
+_loy_static_analysis/
 
 # Credentials & secrets
 server/credentials.json
 server/token.json
+server/recovery_contacts.json
 
 # Scratch scripts and temporary files
 scratch/

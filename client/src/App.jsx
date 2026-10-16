@@ -12,7 +12,7 @@ import {
   FileSearch, Search, RefreshCw, RotateCcw, StretchHorizontal, StretchVertical, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
   Trash2, Pipette, Save, Send, Star, Download, Crosshair, Grid3X3, ScanLine, Type,
-  LogOut, Laptop, Settings
+  LogOut, Laptop, Settings, Hand
 } from 'lucide-react';
 
 const API_BASE = '';
@@ -701,6 +701,7 @@ const PresetCardMedia = ({ preset, now }) => {
       pixels={null}
       speed={preset.speed}
       frameDurationMs={preset.frameDurationMs}
+      frameDurationsMs={preset.frameDurationsMs}
     />;
   }
   if (preset.fileType === 'video' && preset.imgSrc) {
@@ -925,7 +926,7 @@ const PixelatedImageCanvas = ({ pixels, bgColor }) => {
   );
 };
 
-const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor, pixels, speed, frameDurationMs }) => {
+const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor, pixels, speed, frameDurationMs, frameDurationsMs }) => {
   const canvasRef = useRef(null);
   const videoRef = useRef(null);
   const gifBitmapsRef = useRef([]);
@@ -1010,11 +1011,10 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
     }
   }, [fileType, imgSrc]);
 
-  // Canvas render loop. Layout timing prevents a black canvas from being
-  // painted before a stored first animation frame is available.
+  // Canvas render loop. Frame rate matches AnimatedPresetCardPreview exactly.
   useLayoutEffect(() => {
     let animId;
-    let lastFrameTime = performance.now();
+    let timeoutId;
     let currentFrameIdx = 0;
 
     const canvas = canvasRef.current;
@@ -1060,26 +1060,35 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
       }
     }
 
-    const render = (now) => {
-      ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = false;
 
-      // 1) Multi-frame pixels from saved preset
-      if (parsedPixelFrames && parsedPixelFrames.length > 1) {
-        const presetSpeed = speed || 8;
-        const clampedSpeed = Math.max(1, Math.min(15, presetSpeed));
-        const delayMs = frameDurationMs ? Math.max(16, frameDurationMs) : Math.max(50, (0.4 - (clampedSpeed * 0.025)) * 1000);
-        
-        if (now - lastFrameTime >= delayMs) {
-          currentFrameIdx = (currentFrameIdx + 1) % parsedPixelFrames.length;
-          lastFrameTime = now;
-        }
-        ctx.putImageData(parsedPixelFrames[currentFrameIdx % parsedPixelFrames.length], 0, 0);
-        animId = requestAnimationFrame(render);
-        return;
-      }
+    // 1) Multi-frame pixels from saved preset (copied from AnimatedPresetCardPreview)
+    if (parsedPixelFrames && parsedPixelFrames.length > 1) {
+      const numFrames = parsedPixelFrames.length;
+      const presetSpeed = speed || 8;
+      const clampedSpeed = Math.max(1, Math.min(15, presetSpeed));
+      const defaultDelayMs = frameDurationMs
+        ? Math.max(16, frameDurationMs)
+        : Math.max(50, (0.4 - (clampedSpeed * 0.025)) * 1000);
+      const durationsList = Array.isArray(frameDurationsMs) && frameDurationsMs.length > 0 ? frameDurationsMs : null;
 
-      // 2) Video playback
-      if (fileType === 'video') {
+      const play = () => {
+        ctx.putImageData(parsedPixelFrames[currentFrameIdx], 0, 0);
+        const delayMs = Math.max(16, durationsList?.[currentFrameIdx] || defaultDelayMs);
+        currentFrameIdx = (currentFrameIdx + 1) % numFrames;
+        timeoutId = setTimeout(play, delayMs);
+      };
+
+      play();
+
+      return () => {
+        clearTimeout(timeoutId);
+      };
+    }
+
+    // 2) Video playback
+    if (fileType === 'video') {
+      const render = () => {
         const v = videoRef.current;
         if (v && v.readyState >= 2) {
           try {
@@ -1089,19 +1098,24 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
           } catch {}
         }
         animId = requestAnimationFrame(render);
-        return;
-      }
+      };
+      animId = requestAnimationFrame(render);
+      return () => cancelAnimationFrame(animId);
+    }
 
-      // 3) Decoded GIF playback
-      if (fileType === 'gif' && gifBitmapsRef.current.length > 0) {
-        const frames = gifBitmapsRef.current;
-        const curFrame = frames[currentFrameIdx % frames.length];
-        const frameDur = curFrame ? curFrame.duration : 100;
-        if (now - lastFrameTime >= frameDur) {
-          currentFrameIdx = (currentFrameIdx + 1) % frames.length;
-          lastFrameTime = now;
-        }
-        const frameToDraw = frames[currentFrameIdx % frames.length];
+    // 3) Decoded GIF playback (copied timing from AnimatedPresetCardPreview)
+    if (fileType === 'gif' && gifBitmapsRef.current.length > 0) {
+      const frames = gifBitmapsRef.current;
+      const numFrames = frames.length;
+      const presetSpeed = speed || 8;
+      const clampedSpeed = Math.max(1, Math.min(15, presetSpeed));
+      const defaultDelayMs = frameDurationMs
+        ? Math.max(16, frameDurationMs)
+        : Math.max(50, (0.4 - (clampedSpeed * 0.025)) * 1000);
+      const durationsList = Array.isArray(frameDurationsMs) && frameDurationsMs.length > 0 ? frameDurationsMs : null;
+
+      const play = () => {
+        const frameToDraw = frames[currentFrameIdx];
         if (frameToDraw && frameToDraw.bitmap) {
           try {
             ctx.fillStyle = bgColor || '#000000';
@@ -1109,42 +1123,46 @@ const MediaPixelPreview = ({ imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor
             ctx.drawImage(frameToDraw.bitmap, canvasX, canvasY, dw, dh);
           } catch {}
         }
-        animId = requestAnimationFrame(render);
-        return;
-      }
+        const delayMs = Math.max(16, durationsList?.[currentFrameIdx] || frameToDraw?.duration || defaultDelayMs);
+        currentFrameIdx = (currentFrameIdx + 1) % numFrames;
+        timeoutId = setTimeout(play, delayMs);
+      };
 
-      // 4) Single-frame pixels fallback
-      if (pixels && pixels.length >= 1280) {
-        const bgCol = bgColor || '#000000';
-        ctx.fillStyle = bgCol;
-        ctx.fillRect(0, 0, 64, 20);
-        const bgR = parseInt(bgCol.slice(1, 3), 16) || 0;
-        const bgG = parseInt(bgCol.slice(3, 5), 16) || 0;
-        const bgB = parseInt(bgCol.slice(5, 7), 16) || 0;
-        const imgData = ctx.createImageData(64, 20);
-        for (let i = 0; i < 1280; i++) {
-          const p = pixels[i];
-          const idx = i * 4;
-          let r = bgR, g = bgG, b = bgB;
-          if (p && typeof p === 'string' && p.startsWith('#')) {
-            r = parseInt(p.slice(1, 3), 16) || 0;
-            g = parseInt(p.slice(3, 5), 16) || 0;
-            b = parseInt(p.slice(5, 7), 16) || 0;
-          } else if (p && p !== 0) {
-            r = 255; g = 255; b = 255;
-          }
-          imgData.data[idx] = r;
-          imgData.data[idx + 1] = g;
-          imgData.data[idx + 2] = b;
-          imgData.data[idx + 3] = 255;
+      play();
+
+      return () => {
+        clearTimeout(timeoutId);
+      };
+    }
+
+    // 4) Single-frame pixels fallback
+    if (pixels && pixels.length >= 1280) {
+      const bgCol = bgColor || '#000000';
+      ctx.fillStyle = bgCol;
+      ctx.fillRect(0, 0, 64, 20);
+      const bgR = parseInt(bgCol.slice(1, 3), 16) || 0;
+      const bgG = parseInt(bgCol.slice(3, 5), 16) || 0;
+      const bgB = parseInt(bgCol.slice(5, 7), 16) || 0;
+      const imgData = ctx.createImageData(64, 20);
+      for (let i = 0; i < 1280; i++) {
+        const p = pixels[i];
+        const idx = i * 4;
+        let r = bgR, g = bgG, b = bgB;
+        if (p && typeof p === 'string' && p.startsWith('#')) {
+          r = parseInt(p.slice(1, 3), 16) || 0;
+          g = parseInt(p.slice(3, 5), 16) || 0;
+          b = parseInt(p.slice(5, 7), 16) || 0;
+        } else if (p && p !== 0) {
+          r = 255; g = 255; b = 255;
         }
-        ctx.putImageData(imgData, 0, 0);
+        imgData.data[idx] = r;
+        imgData.data[idx + 1] = g;
+        imgData.data[idx + 2] = b;
+        imgData.data[idx + 3] = 255;
       }
-    };
-
-    animId = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(animId);
-  }, [imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor, pixels, gifDecoded, speed, frameDurationMs]);
+      ctx.putImageData(imgData, 0, 0);
+    }
+  }, [imgSrc, fileType, canvasX, canvasY, dw, dh, bgColor, pixels, gifDecoded, speed, frameDurationMs, frameDurationsMs]);
 
   return (
     <>
@@ -1568,6 +1586,7 @@ export default function App() {
     return saved;
   });
   const [isConnecting, setIsConnecting] = useState(false);
+  const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionTarget, setConnectionTarget] = useState(null);
   const [connectionError, setConnectionError] = useState('');
   const [passcodeTarget, setPasscodeTarget] = useState(null);
@@ -1582,6 +1601,19 @@ export default function App() {
   const [localPushMessage, setLocalPushMessage] = useState('');
   const [pushing, setPushingState] = useState(false);
   const [pushingPresetTarget, setPushingPresetTarget] = useState(null);
+  const [slotSaveProgress, setSlotSaveProgress] = useState(null);
+  const [slotSavePhase, setSlotSavePhase] = useState('');
+  const isSignUpdating = Boolean(pushing || slotSavePhase || slotSaveProgress !== null);
+  const isSignUpdatingRef = useRef(false);
+  isSignUpdatingRef.current = isSignUpdating;
+  const autoConnectTried = useRef(false);
+  const manuallyDisconnectedRef = useRef(false);
+
+  const isSignConnecting = Boolean(
+    isConnecting || 
+    (!status.connected && !manuallyDisconnectedRef.current && Boolean(localStorage.getItem('loy_last_connected_mac')) && !autoConnectTried.current && !connectionFailed)
+  );
+
   const [presetView, setPresetView] = useState('local');
   const pushingRef = useRef(false);
 
@@ -1595,10 +1627,6 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    setPresetView(status.connected ? 'saved' : 'local');
-  }, [status.connected]);
-  const autoConnectTried = useRef(false);
   const activeConnectRef = useRef(null);
   const preferredSignRef = useRef(null);
   const choosingSignRef = useRef(false);
@@ -1663,6 +1691,9 @@ export default function App() {
           res.data.address?.toUpperCase() !== preferredSignRef.current.toUpperCase()) {
         return res.data;
       }
+      if (manuallyDisconnectedRef.current && res.data?.connected) {
+        return res.data;
+      }
       // BLE can briefly report disconnected while it is recovering. Keep the
       // last live UI state through two status polls so the page does not race
       // the backend's reconnect worker or visibly flap on a refresh.
@@ -1719,19 +1750,20 @@ export default function App() {
   // Give the user time to choose another sign before trying the last one.
   useEffect(() => {
     const lastConnected = localStorage.getItem('loy_last_connected_mac');
-    if (!hasFetchedStatus || status.connected || !lastConnected || autoConnectTried.current || isConnecting || apiError || scanOpen) return;
+    if (!hasFetchedStatus || status.connected || !lastConnected || autoConnectTried.current || isConnecting || apiError || scanOpen || manuallyDisconnectedRef.current) return;
     const timer = window.setTimeout(() => {
-      if (autoConnectTried.current || preferredSignRef.current || choosingSignRef.current) return;
+      if (autoConnectTried.current || preferredSignRef.current || choosingSignRef.current || manuallyDisconnectedRef.current) return;
       console.log("[auto-connect] Attempting to reconnect to most recently connected sign:", lastConnected);
       autoConnectTried.current = true;
       doConnect(lastConnected, false, true);
-    }, 6000);
+    }, 1200);
     return () => window.clearTimeout(timer);
   }, [hasFetchedStatus, status.connected, isConnecting, apiError, scanOpen]);
 
   const doConnect = async (addr, isRetry = false, isAuto = false, passcode = '') => {
     if (!addr) return;
     if (!isAuto) {
+      manuallyDisconnectedRef.current = false;
       autoConnectTried.current = true;
       preferredSignRef.current = addr;
       choosingSignRef.current = false;
@@ -1816,10 +1848,15 @@ export default function App() {
   };
 
   const handleDisconnect = async () => {
+    manuallyDisconnectedRef.current = true;
+    hadLiveConnectionRef.current = false;
+    disconnectedStatusPollsRef.current = 0;
+    preferredSignRef.current = null;
     activeConnectRef.current?.controller.abort();
     activeConnectRef.current = null;
     setConnectionTarget(null);
     setConnectionError('');
+    setConnectionFailed(false);
     setStatus(prev => ({ ...prev, connected: false, address: null, preview_url: null }));
     setIsConnecting(false);
     autoConnectTried.current = true; // Prevent immediate auto-reconnect loop on manual disconnect
@@ -1867,6 +1904,32 @@ export default function App() {
   };
 
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const isModalOpenRef = useRef(false);
+  isModalOpenRef.current = isModalOpen;
+
+  const scanOpenRef = useRef(false);
+  scanOpenRef.current = scanOpen;
+
+  const wasConnectingRef = useRef(false);
+
+  useEffect(() => {
+    if (isSignConnecting || isSignUpdating || pushing) {
+      setPresetView('local');
+      if (isSignConnecting) {
+        wasConnectingRef.current = true;
+      }
+    } else if (wasConnectingRef.current) {
+      if (status.connected && !isSignUpdating && !pushing) {
+        wasConnectingRef.current = false;
+        if (!isModalOpenRef.current && !scanOpenRef.current) {
+          setPresetView('saved');
+        }
+      }
+    } else if (!status.connected) {
+      setPresetView('local');
+      wasConnectingRef.current = false;
+    }
+  }, [isSignConnecting, status.connected, isModalOpen, scanOpen, isSignUpdating, pushing]);
   const [lastPushedId, setLastPushedId] = useState(null);
 
   useEffect(() => {
@@ -1903,7 +1966,6 @@ export default function App() {
     isManualOverrideRef.current = val;
     setIsManualOverrideState(val);
   };
-  const [connectionFailed, setConnectionFailed] = useState(false);
   const [deviceNames, setDeviceNames] = useState(() => {
     try { return JSON.parse(localStorage.getItem('loy_device_names_v2') || '{}'); }
     catch { return {}; }
@@ -2335,7 +2397,7 @@ export default function App() {
 
   // Auto-push / Blanking / Default logic based on the local clock
   useEffect(() => {
-    if (!status?.connected || !dbLoaded || pushingRef.current || initializingConnectionRef.current ||
+    if (!status?.connected || !dbLoaded || isSignUpdating || pushingRef.current || initializingConnectionRef.current ||
         !initializedConnectionMacsRef.current.has(status.address?.toUpperCase())) return;
 
     // Check for calendar event transitions to clear manual override (5 min early)
@@ -2372,9 +2434,6 @@ export default function App() {
       }
 
       if (targetId !== lastPushedId) {
-        // Calendar/default transitions operate on hardware slots, so expose
-        // that source immediately instead of leaving the UI on Local.
-        setPresetView('saved');
         if (targetContent.type === 'event') {
           // Only capture once for a calendar run. Moving from one calendar
           // event directly into another must keep the original return target.
@@ -2470,8 +2529,6 @@ export default function App() {
       if (pushingRef.current) return;
       initializedConnectionMacsRef.current.add(targetMac);
       initializingConnectionRef.current = true;
-      setPushing(true);
-      setPresetView('saved');
       setIsManualOverride(false);
       isManualOverrideRef.current = false;
 
@@ -2482,6 +2539,7 @@ export default function App() {
         if (def && !isDefaultSynced) {
           console.log("[connect] Pushing local default preset to new sign default slot (slot 1)...");
           try {
+            setPushing(true);
             const resSave = await savePresetToSign({
               slot_id: 1,
               address: targetMac,
@@ -2503,14 +2561,18 @@ export default function App() {
           } catch (e) {
             console.warn("[connect] Failed to push default to slot 1:", e);
             if (e.response?.status === 409) throw e;
+          } finally {
+            setPushing(false);
           }
         }
 
         // 2. Calendar Slot (hardware slot 0, slot 1 in UI)
-        let evs = [];
-        try {
-          evs = await fetchEvents();
-        } catch (e) {}
+        let evs = events;
+        if (!evs || evs.length === 0) {
+          try {
+            evs = await fetchEvents();
+          } catch (e) {}
+        }
 
         const activeEvents = (evs || []).filter(ev => isEventInWindow(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined');
         const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
@@ -2555,8 +2617,10 @@ export default function App() {
         handleSetPushMessage(`Error: ${e.message}`);
       }).finally(() => {
         initializingConnectionRef.current = false;
-        setPushing(false);
         fetchStatus();
+        if (!isModalOpenRef.current && !scanOpenRef.current) {
+          setPresetView('saved');
+        }
       });
     } else if (!status.connected) {
       // Keep the chosen preset across temporary disconnects. The next
@@ -2572,7 +2636,13 @@ export default function App() {
   }, [status.calendar_connected]);
 
   const handlePush = async (payload, manual = false, skipMessages = false, autoTargetId = null) => {
-    if (pushingRef.current && !skipMessages) return;
+    const isPayloadEvent = typeof payload === 'string' || Boolean(payload?.text?.includes('|||'));
+    if ((pushingRef.current || isSignUpdatingRef.current) && !skipMessages) {
+      if (isPayloadEvent && manual) {
+        handleSetPushMessage('Sign is currently updating. Please wait...');
+      }
+      return;
+    }
     pushingRef.current = true;
     if (manual) setIsManualOverride(true);
     setPushing(true);
@@ -2669,8 +2739,10 @@ export default function App() {
           }
         }
       } else if (isEvent) {
-        if (status.connected) {
+        if (status.connected && manual) {
           setPresetView('saved');
+        }
+        if (status.connected) {
           const eventPresetCopy = { ...data };
           delete eventPresetCopy.pixels;
 
@@ -2790,7 +2862,7 @@ export default function App() {
                 choosingSignRef.current = true;
                 return axios.post(`${API_BASE}/pause-reconnect`).catch(() => {});
               }}
-              isConnecting={isConnecting}
+              isConnecting={isSignConnecting}
               onClear={handleClear}
               isModalOpen={isModalOpen}
               onPush={handlePush}
@@ -2830,6 +2902,11 @@ export default function App() {
               fetchStatus={fetchStatus}
               presetView={presetView}
               setPresetView={setPresetView}
+              slotSaveProgress={slotSaveProgress}
+              setSlotSaveProgress={setSlotSaveProgress}
+              slotSavePhase={slotSavePhase}
+              setSlotSavePhase={setSlotSavePhase}
+              isSignUpdating={isSignUpdating}
             />
           </div>
           <MediaView 
@@ -2857,6 +2934,7 @@ export default function App() {
             setLastPushedId={setLastPushedId}
             presetView={presetView}
             setPresetView={setPresetView}
+            isConnecting={isSignConnecting}
           />
         </div>
         <div className="right-column">
@@ -2869,6 +2947,7 @@ export default function App() {
             onPush={handlePush}
             pushMessage={pushMessage || localPushMessage}
             pushing={pushing}
+            isSignUpdating={isSignUpdating}
             cleanName={cleanName}
             setCleanName={setCleanName}
           />
@@ -2887,7 +2966,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, isSignUpdating }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -2909,7 +2988,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [scanFailed, setScanFailed] = useState(false);
   const [scanSearch, setScanSearch] = useState('');
   const [scanPage, setScanPage] = useState(0);
-  const [nameEditMode, setNameEditMode] = useState(false);
   const [nameEditValue, setNameEditValue] = useState('');
   const [passwordSettingsOpen, setPasswordSettingsOpen] = useState(false);
   const [passwordEnabled, setPasswordEnabled] = useState(null);
@@ -2919,11 +2997,27 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [recoveryContact, setRecoveryContact] = useState('');
   const [passwordSettingsError, setPasswordSettingsError] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
+
+  let currentSn = '';
+  const connectedRecent = recents.find(r => r.address === status.address);
+  if (connectedRecent) {
+    let rawName = connectedRecent.name || '';
+    if (rawName.startsWith('HELLO')) {
+      currentSn = 'YS' + rawName.substring(5);
+    } else if (rawName.includes('-')) {
+      currentSn = 'YS' + rawName.split('-')[1];
+    } else if (rawName.startsWith('YS')) {
+      currentSn = rawName;
+    }
+  }
+  const defaultDisplayName = currentSn || status.address;
+
   useEffect(() => {
     if (!status.connected) setPasswordSettingsOpen(false);
   }, [status.connected]);
   const openPasswordSettings = async () => {
     setPasswordSettingsError('');
+    setNameEditValue(deviceNames[status.address?.toUpperCase()] || defaultDisplayName || '');
     const knownStatus = status.password_enabled;
     setPasswordEnabled(typeof knownStatus === 'boolean' ? knownStatus : null);
     setPasswordStatusLoading(typeof knownStatus !== 'boolean');
@@ -2941,8 +3035,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
   };
   const [assigningSlotIndex, setAssigningSlotIndex] = useState(null);
-  const [slotSaveProgress, setSlotSaveProgress] = useState(null);
-  const [slotSavePhase, setSlotSavePhase] = useState('');
   const [savedPage, setSavedPage] = useState(0);
   const isAssignmentReminder = pushMessage === 'Please assign animated text, GIFs, and videos to a Saved Preset before pushing.';
   const previewRef = useRef(null);
@@ -2987,6 +3079,19 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       window.removeEventListener('pointercancel', stop);
     };
   }, [brightnessDragging]);
+
+  const brightnessRailRef = useRef(null);
+  useEffect(() => {
+    const rail = brightnessRailRef.current;
+    if (!rail) return;
+    const preventPageScroll = (e) => {
+      if (status?.connected && !pushing && !isConnecting) {
+        e.preventDefault();
+      }
+    };
+    rail.addEventListener('wheel', preventPageScroll, { passive: false });
+    return () => rail.removeEventListener('wheel', preventPageScroll);
+  }, [status?.connected, pushing, isConnecting]);
 
   const onBrightnessChange = async (rawPct) => {
     if (pushingRef?.current || pushing) return;
@@ -3040,6 +3145,47 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     onClosePasscode();
     setScanOpen(false);
   };
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (assigningSlotIndex !== null) {
+          e.preventDefault();
+          setAssigningSlotIndex(null);
+        } else if (passwordSettingsOpen) {
+          e.preventDefault();
+          setPasswordSettingsOpen(false);
+        } else if (scanOpen) {
+          e.preventDefault();
+          closeScanPopup();
+        }
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        if (scanOpen || passwordSettingsOpen || assigningSlotIndex !== null || isModalOpen) {
+          return;
+        }
+
+        const targetTag = e.target?.tagName?.toLowerCase();
+        const isInputFocused = (targetTag === 'input' && e.target?.type !== 'range') || targetTag === 'textarea' || e.target?.isContentEditable;
+        if (isInputFocused) return;
+
+        e.preventDefault();
+        if (e.repeat) return;
+
+        if (presetView === 'saved') {
+          setPresetView('local');
+        } else if (presetView === 'local') {
+          if (status?.connected && !isSignUpdating) {
+            setPresetView('saved');
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [scanOpen, passwordSettingsOpen, assigningSlotIndex, isModalOpen, isSignUpdating, presetView, status?.connected, setPresetView, onClosePasscode]);
 
   // Helper: detect if a string looks like a raw MAC address
   const isMacAddress = (s) => /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(s);
@@ -3323,7 +3469,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   };
 
   const playSavedPreset = async (globalIdx, preset) => {
-    if (pushingRef?.current || pushing) return;
+    if (pushingRef?.current || pushing || isSignUpdating) return;
     if (!preset) return; // Do nothing when clicking empty slots!
     if (pushingRef) pushingRef.current = true;
 
@@ -3503,37 +3649,54 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     return null;
   })();
 
-  let currentSn = '';
-  const connectedRecent = recents.find(r => r.address === status.address);
-  if (connectedRecent) {
-    let rawName = connectedRecent.name || '';
-    if (rawName.startsWith('HELLO')) {
-      currentSn = 'YS' + rawName.substring(5);
-    } else if (rawName.includes('-')) {
-      currentSn = 'YS' + rawName.split('-')[1];
-    } else if (rawName.startsWith('YS')) {
-      currentSn = rawName;
-    }
-  }
-  const defaultDisplayName = currentSn || status.address;
-
   return (
     <div className="flex flex-col items-center">
       <div className="dashboard-hero">
         {/* Power btn — top aligned */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          <div onClick={togglePower} className={`power-btn ${power ? 'on' : 'off'} ${!status.connected ? 'disabled' : ''}`} title={power ? 'Turn Off' : 'Turn On'}>
+          <div 
+            onClick={isConnecting ? undefined : togglePower} 
+            className={`power-btn ${power ? 'on' : 'off'} ${(!status.connected || isConnecting) ? 'disabled' : ''}`} 
+            style={{ 
+              cursor: (!status.connected || isConnecting) ? 'not-allowed' : 'pointer',
+              pointerEvents: 'auto'
+            }}
+            title={isConnecting ? "Sign is connecting..." : (!status.connected ? "Connect to a sign to control power" : (power ? 'Turn Off' : 'Turn On'))}
+          >
             <Power size={26} />
           </div>
-          <div onClick={() => {
-            if (pushingRef?.current || pushing) return;
-            const defPreset = (presets || []).find(p => p.isDefault);
-            if (defPreset && status?.connected) {
-              setIsManualOverride(true);
-              pushPreset(defPreset);
-            }
-          }} className={`power-btn off ${(!status.connected || pushing) ? 'disabled' : ''}`} style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#f8fafc', opacity: (status.connected && !pushing) ? 1 : 0.2, pointerEvents: (status.connected && !pushing) ? 'auto' : 'none' }} title="Trigger Default Preset" onMouseOver={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)'; e.currentTarget.style.transform = 'scale(1.05)'; }} onMouseOut={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.transform = 'none'; }}>
-            <img src="https://static.thenounproject.com/png/5507757-200.png" alt="Default" width="34" height="34" style={{ filter: 'invert(100%)', opacity: status.connected ? 0.9 : 0.4 }} />
+          <div 
+            onClick={() => {
+              if (isConnecting || pushingRef?.current || pushing) return;
+              const defPreset = (presets || []).find(p => p.isDefault);
+              if (defPreset && status?.connected) {
+                setIsManualOverride(true);
+                pushPreset(defPreset);
+              }
+            }} 
+            className={`power-btn off ${(!status.connected || pushing || isConnecting) ? 'disabled' : ''}`} 
+            style={{ 
+              background: 'rgba(255, 255, 255, 0.04)', 
+              border: '1px solid rgba(255,255,255,0.08)', 
+              color: '#f8fafc', 
+              opacity: (status.connected && !pushing && !isConnecting) ? 1 : 0.2, 
+              pointerEvents: 'auto',
+              cursor: (!status.connected || pushing || isConnecting) ? 'not-allowed' : 'pointer'
+            }} 
+            title={isConnecting ? "Sign is connecting..." : (!status.connected ? "Connect to a sign to trigger default preset" : "Trigger Default Preset")} 
+            onMouseOver={e => { 
+              if (!status.connected || pushing || isConnecting) return;
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; 
+              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)'; 
+              e.currentTarget.style.transform = 'scale(1.05)'; 
+            }} 
+            onMouseOut={e => { 
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; 
+              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; 
+              e.currentTarget.style.transform = 'none'; 
+            }}
+          >
+            <img src="https://static.thenounproject.com/png/5507757-200.png" alt="Default" width="34" height="34" style={{ filter: 'invert(100%)', opacity: (status.connected && !isConnecting) ? 0.9 : 0.4 }} />
           </div>
         </div>
 
@@ -3605,7 +3768,28 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           </div>
 
           <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-            <div className="brightness-rail glass-panel" style={{ opacity: status.connected ? (pushing || isConnecting ? 0.5 : 1) : 0.2, pointerEvents: (status.connected && !pushing && !isConnecting) ? 'auto' : 'none', padding: '12px 16px', flex: 1 }}>
+            <div 
+              ref={brightnessRailRef}
+              className="brightness-rail glass-panel" 
+              onClick={(e) => {
+                const input = e.currentTarget.querySelector('input[type="range"]');
+                if (input && status.connected && !pushing && !isConnecting) input.focus();
+              }}
+              onWheel={(e) => {
+                if (!status.connected || pushing || isConnecting) return;
+                const dir = e.deltaY < 0 ? 1 : -1;
+                const step = e.shiftKey ? 10 : 2;
+                onBrightnessChange(Math.max(7, Math.min(100, Math.round(brightnessRaw) + dir * step)));
+              }}
+              style={{ 
+                opacity: status.connected ? (pushing || isConnecting ? 0.5 : 1) : 0.2, 
+                pointerEvents: 'auto', 
+                cursor: (!status.connected || pushing || isConnecting) ? 'not-allowed' : 'default',
+                padding: '12px 16px', 
+                flex: 1 
+              }}
+              title={isConnecting ? "Sign is connecting..." : (!status.connected ? "Connect to a sign to adjust brightness" : undefined)}
+            >
               <Sun className="text-amber-400 flex-shrink-0" size={17} />
               <div style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', alignItems: 'center' }}>
                 <div aria-hidden="true" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, pointerEvents: 'none', opacity: brightnessDragging ? 1 : 0, transition: 'opacity 0.15s ease' }}>
@@ -3625,22 +3809,35 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 </div>
                 <input 
                   type="range" min="7" max="100" step="0.5"
+                  tabIndex={0}
                   value={brightnessRaw}
-                  onPointerDown={() => setBrightnessDragging(true)}
+                  onPointerDown={(e) => {
+                    e.currentTarget.focus();
+                    setBrightnessDragging(true);
+                  }}
+                  onMouseDown={(e) => e.currentTarget.focus()}
+                  onClick={(e) => e.currentTarget.focus()}
                   onKeyDown={(e) => {
-                    if (['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp'].includes(e.key)) {
+                    const isArrowKey = ['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp'].includes(e.key);
+                    const isPlusKey = e.key === '+' || e.key === '=' || e.code === 'NumpadAdd';
+                    const isMinusKey = e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract';
+
+                    if (isArrowKey || isPlusKey || isMinusKey) {
                       e.preventDefault();
-                      const dir = (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? -1 : 1;
-                      onBrightnessChange(Math.max(7, Math.min(100, Math.round(brightnessRaw) + dir * 5)));
+                      e.stopPropagation();
+                      const dir = (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || isMinusKey) ? -1 : 1;
+                      const step = e.shiftKey ? 10 : 5;
+                      onBrightnessChange(Math.max(7, Math.min(100, Math.round(brightnessRaw) + dir * step)));
                     }
                   }}
                   onChange={(e) => onBrightnessChange(parseFloat(e.target.value))} 
                   className="brightness-slider" 
-                  style={{ position: 'relative', width: '100%', '--fill': `calc(8px + (100% - 16px) * ${(brightnessRaw - 7) / 93})` }}
+                  style={{ position: 'relative', width: '100%', outline: 'none', boxShadow: 'none', '--fill': `calc(8px + (100% - 16px) * ${(brightnessRaw - 7) / 93})`, cursor: (!status.connected || pushing || isConnecting) ? 'not-allowed' : 'pointer' }}
                   disabled={!status.connected || pushing || isConnecting}
+                  title={isConnecting ? "Sign is connecting..." : undefined}
                 />
               </div>
-              <span className="font-bold text-slate-500 text-[10px] text-right flex-shrink-0" style={{ width: '30px', minWidth: '30px', fontVariantNumeric: 'tabular-nums' }}>{Math.round(brightnessRaw)}%</span>
+              <span className="font-bold text-slate-500 text-[10px] text-right flex-shrink-0" style={{ width: '36px', minWidth: '36px', maxWidth: '36px', fontVariantNumeric: 'tabular-nums', display: 'inline-block' }}>{Math.round(brightnessRaw)}%</span>
             </div>
           </div>
         </div>
@@ -3650,60 +3847,58 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       <div className="connection-row" style={{ position: 'relative' }}>
         {status.connected ? (
           <>
-            <button className="btn-disconnect" onClick={onDisconnect}>
-              <Link2Off size={16} /> Disconnect
-            </button>
-            {nameEditMode ? (
-              <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '8px' }}>
-                <input
-                  autoFocus
-                  className="input-field"
-                  style={{ height: '36px', width: '180px', fontSize: 13 }}
-                  value={nameEditValue}
-                  placeholder="Enter device name…"
-                  onChange={e => setNameEditValue(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') {
-                      setDeviceName(status.address, nameEditValue.trim());
-                      setNameEditMode(false);
-                    }
-                    if (e.key === 'Escape') setNameEditMode(false);
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button 
+                className="btn-disconnect" 
+                style={{ height: '42px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                onClick={onDisconnect}
+              >
+                <Link2Off size={16} /> Disconnect
+              </button>
+              <div
+                title={isConnecting ? "Sign is connecting..." : "Change sign"}
+                style={{ display: 'inline-flex', cursor: isConnecting ? 'not-allowed' : 'pointer' }}
+              >
+                <button
+                  className="btn-styled flex items-center justify-center"
+                  disabled={isConnecting}
+                  style={{
+                    height: '42px',
+                    width: '42px',
+                    padding: 0,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundOrigin: 'border-box',
+                    backgroundClip: 'padding-box',
+                    border: 'none',
+                    outline: 'none',
+                    opacity: isConnecting ? 0.4 : 1,
+                    cursor: isConnecting ? 'not-allowed' : 'pointer',
+                    pointerEvents: isConnecting ? 'none' : 'auto'
                   }}
-                />
-                <button 
-                  className="btn-styled" 
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 36, width: 36, padding: 0 }} 
-                  onClick={() => {
-                    setDeviceName(status.address, nameEditValue.trim());
-                    setNameEditMode(false);
-                  }}
-                  title="Save Name"
+                  onClick={isConnecting ? undefined : handleScanOpen}
                 >
-                  <Save size={14} />
-                </button>
-                <button 
-                  className="btn-disconnect" 
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 36, width: 36, padding: 0 }} 
-                  onClick={() => setNameEditMode(false)}
-                  title="Cancel"
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <div className="mac-display flex items-center gap-2 cursor-pointer group" onClick={() => { setNameEditValue(deviceNames[status.address?.toUpperCase()] || defaultDisplayName); setNameEditMode(true); }} title="Click to name this device">
-                  <span>{deviceNames[status.address?.toUpperCase()] || defaultDisplayName}</span>
-                  <Pencil size={12} className="opacity-0 group-hover:opacity-60 transition-opacity" />
-                </div>
-                <button className="btn-styled" style={{ width: 32, height: 32, padding: 0, display: 'grid', placeItems: 'center' }} onClick={openPasswordSettings} title="Sign settings">
-                  <Settings size={15} />
-                </button>
-                <button className="btn-styled" style={{ width: 32, height: 32, padding: 0, display: 'grid', placeItems: 'center' }} onClick={handleScanOpen} title="Change sign">
                   <Search size={15} />
                 </button>
               </div>
-            )}
+            </div>
+            <div 
+              className="mac-display cursor-pointer group" 
+              onClick={() => openPasswordSettings()} 
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '12px',
+                height: '42px',
+                padding: '0 18px',
+                boxSizing: 'border-box',
+                cursor: 'pointer'
+              }}
+              title="Sign settings"
+            >
+              <span style={{ display: 'inline-flex', alignItems: 'center', lineHeight: 1 }}>{deviceNames[status.address?.toUpperCase()] || defaultDisplayName}</span>
+              <Settings size={14} className="text-slate-400 group-hover:text-white transition-colors" style={{ display: 'block', flexShrink: 0 }} />
+            </div>
           </>
         ) : (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -3734,24 +3929,32 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 `Connect${macAddress && deviceNames[macAddress?.toUpperCase()] ? ` (${deviceNames[macAddress.toUpperCase()]})` : ''}`
               )}
             </button>
-            <button
-              className="btn-styled flex items-center justify-center"
-              style={{
-                height: '42px',
-                width: '42px',
-                padding: 0,
-                backgroundRepeat: 'no-repeat',
-                backgroundOrigin: 'border-box',
-                backgroundClip: 'padding-box',
-                border: 'none',
-                outline: 'none',
-                overflow: 'hidden',
-              }}
-              onClick={handleScanOpen}
-              title="Change Sign / Scan Nearby"
+            <div
+              title={isConnecting ? "Sign is connecting..." : "Change sign"}
+              style={{ display: 'inline-flex', cursor: isConnecting ? 'not-allowed' : 'pointer' }}
             >
-              <Search size={15} />
-            </button>
+              <button
+                className="btn-styled flex items-center justify-center"
+                style={{
+                  height: '42px',
+                  width: '42px',
+                  padding: 0,
+                  backgroundRepeat: 'no-repeat',
+                  backgroundOrigin: 'border-box',
+                  backgroundClip: 'padding-box',
+                  border: 'none',
+                  outline: 'none',
+                  overflow: 'hidden',
+                  opacity: isConnecting ? 0.4 : 1,
+                  cursor: isConnecting ? 'not-allowed' : 'pointer',
+                  pointerEvents: isConnecting ? 'none' : 'auto'
+                }}
+                disabled={isConnecting}
+                onClick={isConnecting ? undefined : handleScanOpen}
+              >
+                <Search size={15} />
+              </button>
+            </div>
             {connectionFailed && !isConnecting && (
               <div style={{
                 display: 'flex', alignItems: 'center', gap: '6px',
@@ -3764,9 +3967,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               </div>
             )}
           </div>
-        )}
-        {connectionError && !scanOpen && (
-          <span role="alert" style={{ color: '#fca5a5', fontSize: 11, maxWidth: 360 }}>{connectionError}</span>
         )}
 
         {/* Scan popup — floats above, doesn't push layout */}
@@ -3909,14 +4109,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     const isConnected = status.connected && status.address?.toLowerCase() === dev.address?.toLowerCase();
                     const isDiscovered = scanResults.some(r => r.address?.toLowerCase() === dev.address?.toLowerCase());
                     const isAvailable = isConnected || isDiscovered;
-                    const availabilityLabel = isScanning ? 'Checking' : scanFailed ? 'Unknown' : 'Not seen';
+                    const availabilityLabel = isScanning ? 'Checking' : 'Not Found';
                     
                     return (
                       <div 
                         key={dev.address} 
                         className="scan-item"
                         aria-disabled={!isAvailable}
-                        title={!isAvailable ? (isScanning ? 'Checking for this sign...' : scanFailed ? 'Availability could not be checked. Please scan again.' : 'Not seen in the latest scan. Please scan again to connect.') : undefined}
+                        title={!isAvailable ? (isScanning ? 'Checking for this sign...' : 'Not found in the latest scan. Please scan again to connect.') : undefined}
                         style={!isAvailable ? {
                           opacity: 0.55,
                           filter: 'grayscale(100%)',
@@ -3934,7 +4134,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                               {displayName}
                             </p>
                             {connectionTarget?.toLowerCase() === dev.address?.toLowerCase() ? (
-                              <span className="scan-item-status" style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(167,139,250,0.15)', color: '#c4b5fd', border: '1px solid rgba(167,139,250,0.3)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 5 }}><RefreshCw size={11} className="animate-spin" />Connecting</span>
+                              <span className="scan-item-status" style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(34,197,94,0.15)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 5 }}><RefreshCw size={11} className="animate-spin" />Connecting</span>
                             ) : isConnected ? (
                               <span className="scan-item-status" style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '999px', background: 'rgba(34,197,94,0.15)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)', fontWeight: 600 }}>
                                 Connected
@@ -4045,26 +4245,51 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               )}
             </div>
             <div role="tablist" aria-label="Preset source" onPointerDown={(e) => e.stopPropagation()} style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 12, background: 'rgba(255,255,255,0.05)' }}>
-              <button
-                role="tab"
-                aria-selected={presetView === 'saved'}
-                disabled={!status.connected}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={() => status.connected && setPresetView('saved')}
-                className={`btn-styled ${presetView === 'saved' && status.connected ? '' : 'inactive'}`}
-                style={{ height: 34, padding: '0 14px', fontSize: 14, opacity: status.connected ? 1 : 0.4, cursor: status.connected ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: 6 }}
-                title={status.connected ? 'View saved sign presets' : 'Connect to a sign to view saved presets'}
+              <div
+                title={isConnecting ? "Sign is connecting..." : (!status.connected ? 'Connect to a sign to view saved presets' : (isSignUpdating ? 'Sign is updating...' : 'View saved sign presets'))}
+                style={{ display: 'inline-flex', cursor: (status.connected && !isSignUpdating && !isConnecting) ? 'default' : 'not-allowed' }}
               >
-                <Save size={14} />
-                <span>Saved</span>
-              </button>
+                <button
+                  role="tab"
+                  aria-selected={presetView === 'saved'}
+                  disabled={!status.connected || isSignUpdating || isConnecting}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => status.connected && !isSignUpdating && !isConnecting && setPresetView('saved')}
+                  className={`btn-styled ${presetView === 'saved' && status.connected ? '' : 'inactive'}`}
+                  style={{ 
+                    height: 34, 
+                    padding: '0 14px', 
+                    fontSize: 14, 
+                    opacity: (status.connected && !isSignUpdating && !isConnecting) ? 1 : 0.4, 
+                    cursor: (status.connected && !isSignUpdating && !isConnecting) ? 'pointer' : 'not-allowed', 
+                    display: 'inline-flex', 
+                    alignItems: 'center', 
+                    gap: 6,
+                    pointerEvents: (!status.connected || isSignUpdating || isConnecting) ? 'none' : 'auto'
+                  }}
+                >
+                  <Save size={14} />
+                  <span>Saved</span>
+                </button>
+              </div>
               <button
                 role="tab"
                 aria-selected={presetView === 'local'}
+                disabled={false}
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={() => setPresetView('local')}
                 className={`btn-styled ${presetView === 'local' ? '' : 'inactive'}`}
-                style={{ height: 34, padding: '0 14px', fontSize: 14, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                style={{
+                  height: 34,
+                  padding: '0 14px',
+                  fontSize: 14,
+                  opacity: 1,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6
+                }}
+                title="View local presets"
               >
                 <Laptop size={14} />
                 <span>Local</span>
@@ -4190,13 +4415,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                       onDragOver={!isReserved ? (e) => { e.preventDefault(); setSavedDragOverIdx(globalIdx); } : undefined}
                       onDragLeave={!isReserved ? () => setSavedDragOverIdx(null) : undefined}
                       onDrop={!isReserved ? (e) => handleDropOnSlot(e, globalIdx) : undefined}
+                      title={isSignUpdating ? 'Sign is updating...' : undefined}
                       style={{
                         '--reserved-color': reservedColor,
-                        cursor: pushing ? (isReserved ? 'not-allowed' : 'not-allowed') : (isReserved ? 'pointer' : 'grab'),
-                        opacity: globalIdx === savedDraggedIdx ? 0.4 : (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) || (isReservedDefault && pushingPresetTarget.isDefault))) ? 0.6 : 1),
+                        cursor: isSignUpdating ? 'not-allowed' : (isReserved ? 'pointer' : 'grab'),
+                        opacity: globalIdx === savedDraggedIdx ? 0.4 : (isSignUpdating && !(pushingPresetTarget && ((pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) || (isReservedDefault && pushingPresetTarget.isDefault))) ? 0.6 : 1),
                         transform: globalIdx === savedDraggedIdx ? 'scale(0.98)' : 'none',
                         boxShadow: globalIdx === savedDragOverIdx ? 'var(--neon-shadow)' : undefined,
-                        pointerEvents: (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) || (isReservedDefault && pushingPresetTarget.isDefault)))) ? 'none' : undefined,
+                        pointerEvents: (isSignUpdating && !(pushingPresetTarget && ((pushingPresetTarget.type === 'saved' && pushingPresetTarget.globalIdx === globalIdx) || (isReservedDefault && pushingPresetTarget.isDefault)))) ? 'none' : undefined,
                         userSelect: 'none'
                       }}
                     >
@@ -4336,6 +4562,15 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                               }
                             }
                           }}
+                          disabled={pushing}
+                          onMouseOver={e => {
+                            if (pushing) return;
+                            e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)';
+                          }}
+                          onMouseOut={e => {
+                            if (pushing) return;
+                            e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)';
+                          }}
                           className="btn-disconnect flex items-center"
                           style={{
                             padding: '4px 12px',
@@ -4344,7 +4579,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                             background: 'rgba(239, 68, 68, 0.1)',
                             border: '1px solid rgba(239, 68, 68, 0.2)',
                             color: '#ef4444',
-                            whiteSpace: 'nowrap'
+                            whiteSpace: 'nowrap',
+                            opacity: pushing ? 0.45 : 1,
+                            cursor: pushing ? 'not-allowed' : 'pointer'
                           }}
                           title="Clear Slot"
                         >
@@ -4394,34 +4631,103 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         </div>
       )}
       {passwordSettingsOpen && createPortal(
-        <div style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'grid', placeItems: 'center', padding: 20, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}>
+        <div 
+          style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'grid', placeItems: 'center', padding: 20, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPasswordSettingsOpen(false);
+          }}
+        >
           <form className="glass-panel" style={{ width: 'min(100%, 420px)', padding: 26 }} onSubmit={async (event) => {
-            event.preventDefault(); setPasswordSettingsError('');
-            if (passwordEnabled === null) { setPasswordSettingsError('Please wait until the sign reports its passcode setting.'); return; }
-            if (passwordEnabled && (!/^\d{6}$/.test(newPassword) || newPassword !== confirmPassword)) { setPasswordSettingsError('Please enter matching six-digit passcodes.'); return; }
-            const recoveryValue = recoveryContact.trim();
-            const normalizedPhone = recoveryValue.replace(/[\s().-]/g, '');
-            const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(recoveryValue);
-            const validPhone = /^\+?[1-9]\d{6,14}$/.test(normalizedPhone);
-            if (passwordEnabled && !(validEmail || validPhone)) { setPasswordSettingsError('Please enter a valid recovery email address or phone number.'); return; }
-            setSavingPassword(true);
-            try {
-              await axios.put(`${API_BASE}/sign-password`, { enabled: passwordEnabled, ...(passwordEnabled ? { passcode: newPassword, recovery_contact: recoveryContact.trim() } : {}) });
-              if (typeof fetchStatus === 'function') await fetchStatus();
-              setPasswordSettingsOpen(false); setNewPassword(''); setConfirmPassword('');
-            } catch (error) { setPasswordSettingsError(error.response?.data?.detail || error.message); }
-            finally { setSavingPassword(false); }
+            event.preventDefault();
+            setPasswordSettingsError('');
+            if (status.address) {
+              setDeviceName(status.address, nameEditValue.trim());
+            }
+            if (passwordEnabled === true) {
+              if (!/^\d{6}$/.test(newPassword) || newPassword !== confirmPassword) {
+                setPasswordSettingsError('Please enter matching six-digit passcodes.');
+                return;
+              }
+              const recoveryValue = recoveryContact.trim();
+              const normalizedPhone = recoveryValue.replace(/[\s().-]/g, '');
+              const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(recoveryValue);
+              const validPhone = /^\+?[1-9]\d{6,14}$/.test(normalizedPhone);
+              if (!(validEmail || validPhone)) {
+                setPasswordSettingsError('Please enter a valid recovery email address or phone number.');
+                return;
+              }
+            }
+            if (passwordEnabled !== null) {
+              setSavingPassword(true);
+              try {
+                await axios.put(`${API_BASE}/sign-password`, {
+                  enabled: passwordEnabled,
+                  ...(passwordEnabled ? { passcode: newPassword, recovery_contact: recoveryContact.trim() } : {})
+                });
+                if (typeof fetchStatus === 'function') await fetchStatus();
+              } catch (error) {
+                setPasswordSettingsError(error.response?.data?.detail || error.message);
+                return;
+              } finally {
+                setSavingPassword(false);
+              }
+            }
+            setPasswordSettingsOpen(false);
+            setNewPassword('');
+            setConfirmPassword('');
           }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><h3 style={{ margin: 0, fontSize: 19 }}>Settings</h3><button type="button" onClick={() => setPasswordSettingsOpen(false)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 0 }} onMouseOver={e => e.currentTarget.style.color='#fff'} onMouseOut={e => e.currentTarget.style.color='#64748b'}><X size={24} /></button></div>
-            <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '20px 0 14px', fontSize: 14, cursor: passwordEnabled === null ? 'not-allowed' : 'pointer', opacity: passwordEnabled === null ? 0.6 : 1, userSelect: 'none' }}><input type="checkbox" checked={passwordEnabled === true} disabled={passwordEnabled === null} onChange={e => setPasswordEnabled(e.target.checked)} style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} /><span style={{ width: 18, height: 18, borderRadius: 6, background: passwordEnabled ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' : 'rgba(255, 255, 255, 0.08)', border: passwordEnabled ? '1px solid rgba(255, 255, 255, 0.3)' : '1px solid rgba(255, 255, 255, 0.2)', boxShadow: passwordEnabled ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', flexShrink: 0 }}>{passwordEnabled && <Check size={13} strokeWidth={3.5} />}</span>Require passcode</label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ margin: 0, fontSize: 19 }}>Settings</h3>
+              <button 
+                type="button" 
+                onClick={() => setPasswordSettingsOpen(false)} 
+                style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 0 }} 
+                onMouseOver={e => e.currentTarget.style.color='#fff'} 
+                onMouseOut={e => e.currentTarget.style.color='#64748b'}
+              >
+                <X size={24} />
+              </button>
+            </div>
+
+            {/* Sign Name input above the require passcode toggle */}
+            <div style={{ marginTop: '20px', marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '8px' }}>
+                Sign Name
+              </label>
+              <input
+                className="input-field"
+                style={{ width: '100%', fontSize: '13px', padding: '10px 14px' }}
+                value={nameEditValue}
+                placeholder="Enter sign name…"
+                onChange={e => setNameEditValue(e.target.value)}
+              />
+            </div>
+
+            <label style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '0 0 14px', fontSize: 14, cursor: passwordEnabled === null ? 'not-allowed' : 'pointer', opacity: passwordEnabled === null ? 0.6 : 1, userSelect: 'none' }}>
+              <input type="checkbox" checked={passwordEnabled === true} disabled={passwordEnabled === null} onChange={e => setPasswordEnabled(e.target.checked)} style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
+              <span style={{ width: 18, height: 18, borderRadius: 6, background: passwordEnabled ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' : 'rgba(255, 255, 255, 0.08)', border: passwordEnabled ? '1px solid rgba(255, 255, 255, 0.3)' : '1px solid rgba(255, 255, 255, 0.2)', boxShadow: passwordEnabled ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', flexShrink: 0 }}>
+                {passwordEnabled && <Check size={13} strokeWidth={3.5} />}
+              </span>
+              Require passcode
+            </label>
             {passwordEnabled === null && <p role="status" style={{ color: '#94a3b8', fontSize: 12, marginTop: -5, display: 'flex', alignItems: 'center', gap: 6 }}>{passwordStatusLoading && <RefreshCw size={12} className="animate-spin" aria-label="Checking passcode status" />}{passwordStatusLoading ? 'Reading passcode status from sign…' : 'Passcode status unavailable from sign.'}</p>}
             {passwordEnabled && <>
               <input className="input-field" inputMode="numeric" maxLength={6} placeholder="New six-digit passcode" value={newPassword} onChange={e => setNewPassword(e.target.value.replace(/\D/g, '').slice(0, 6))} style={{ width: '100%', marginBottom: 10 }} />
               <input className="input-field" inputMode="numeric" maxLength={6} placeholder="Confirm passcode" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value.replace(/\D/g, '').slice(0, 6))} style={{ width: '100%', marginBottom: 10 }} />
               <input className="input-field" type="text" placeholder="Recovery email or phone" value={recoveryContact} onChange={e => setRecoveryContact(e.target.value)} style={{ width: '100%' }} />
             </>}
-            {passwordSettingsError && <p role="alert" style={{ color: '#fca5a5', fontSize: 12 }}>{passwordSettingsError}</p>}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 20 }}><button type="submit" className="btn-styled" style={{ width: 40, height: 38, padding: 0, display: 'grid', placeItems: 'center' }} disabled={savingPassword || passwordEnabled === null} title="Save security settings"><Save size={16} className={savingPassword ? 'animate-pulse' : ''} /></button></div>
+            {passwordSettingsError && <p role="alert" style={{ color: '#fca5a5', fontSize: 12, marginTop: 10 }}>{passwordSettingsError}</p>}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 20 }}>
+              <button 
+                type="submit" 
+                className="btn-styled" 
+                style={{ width: 40, height: 38, padding: 0, display: 'grid', placeItems: 'center' }} 
+                disabled={savingPassword} 
+                title="Save settings"
+              >
+                <Save size={16} className={savingPassword ? 'animate-pulse' : ''} />
+              </button>
+            </div>
           </form>
         </div>, document.body
       )}
@@ -4430,7 +4736,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
 }
 
 /* ─── Calendar ───────────────────────────────────────────────────────── */
-function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName }) {
+function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating }) {
   const [calError, setCalError] = useState('');
 
   useEffect(() => {
@@ -4578,6 +4884,7 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
               now={now}
               onPush={onPush}
               cleanName={cleanName}
+              isSignUpdating={isSignUpdating}
             />
           ))}
         </div>
@@ -4601,7 +4908,7 @@ function formatEventTime(ev) {
   }
 }
 
-function EventCard({ ev, now, onPush, cleanName }) {
+function EventCard({ ev, now, onPush, cleanName, isSignUpdating }) {
   const isClean = cleanName !== false;
   const timeStr = formatEventTime(ev);
   const rawSummary = ev?.summary || 'Untitled Event';
@@ -4610,6 +4917,7 @@ function EventCard({ ev, now, onPush, cleanName }) {
   const isActive = isEventActive(ev, now);
 
   const handleCardClick = (e) => {
+    if (isSignUpdating) return;
     // If the click was on the link (title/time), don't push
     if (e.target.closest('a')) return;
     const displayStr = getEventDisplayString(ev, isClean);
@@ -4620,13 +4928,14 @@ function EventCard({ ev, now, onPush, cleanName }) {
     <div
       className="glass-panel transition-all group"
       onClick={handleCardClick}
+      title={isSignUpdating ? 'Sign is updating...' : undefined}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 16,
         padding: isActive && !isDeclined ? '15px 21px' : '14px 20px',
-        cursor: 'pointer',
-        opacity: isDeclined ? 0.5 : 1,
+        cursor: isSignUpdating ? 'not-allowed' : (isDeclined ? 'default' : 'pointer'),
+        opacity: isDeclined ? 0.5 : (isSignUpdating ? 0.55 : 1),
         filter: isDeclined ? 'grayscale(0.8)' : 'none',
         position: 'relative',
         overflow: 'hidden',
@@ -4637,7 +4946,7 @@ function EventCard({ ev, now, onPush, cleanName }) {
           backgroundClip: 'padding-box',
           border: 'none',
           outline: 'none',
-          boxShadow: 'var(--neon-shadow)',
+          boxShadow: isSignUpdating ? 'none' : 'var(--neon-shadow)',
         } : {})
       }}
     >
@@ -4731,7 +5040,7 @@ function hexToHsl(hex) {
   return { h: h * 360, s: s * 100, l: l * 100 };
 }
 
-function HslColorSlider({ label, value, onChange }) {
+function HslColorSlider({ label, value, onChange, disabled = false }) {
   const [localHex, setLocalHex] = useState(value);
   const colorInputRef = useRef(null);
 
@@ -4761,6 +5070,7 @@ function HslColorSlider({ label, value, onChange }) {
   };
 
   const handleHexChange = (e) => {
+    if (disabled) return;
     const val = e.target.value;
     setLocalHex(val);
     if (isValidHex(val)) {
@@ -4769,6 +5079,7 @@ function HslColorSlider({ label, value, onChange }) {
   };
 
   const handleHexBlur = () => {
+    if (disabled) return;
     if (!isValidHex(localHex)) {
       setLocalHex(value);
     } else {
@@ -4791,6 +5102,7 @@ function HslColorSlider({ label, value, onChange }) {
   })();
 
   const handlePickColor = async () => {
+    if (disabled) return;
     if (window.EyeDropper) {
       try {
         const eyeDropper = new window.EyeDropper();
@@ -4808,7 +5120,7 @@ function HslColorSlider({ label, value, onChange }) {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', opacity: disabled ? 0.45 : 1, pointerEvents: disabled ? 'none' : 'auto', cursor: disabled ? 'not-allowed' : 'default' }}>
       <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '12px', flexWrap: 'nowrap', justifyContent: 'space-between' }}>
         <span style={{ fontSize: '10px', fontWeight: 'bold', color: '#64748b', textTransform: 'uppercase', whiteSpace: 'nowrap', marginLeft: '4px' }}>{label}</span>
         
@@ -4816,6 +5128,7 @@ function HslColorSlider({ label, value, onChange }) {
           <input 
             type="text"
             value={localHex}
+            disabled={disabled}
             onChange={handleHexChange}
             onBlur={handleHexBlur}
             className="input-field"
@@ -4831,13 +5144,15 @@ function HslColorSlider({ label, value, onChange }) {
               textAlign: 'center',
               background: 'rgba(255,255,255,0.03)',
               border: '1px solid rgba(255,255,255,0.08)',
-              fontFamily: 'monospace'
+              fontFamily: 'monospace',
+              cursor: disabled ? 'not-allowed' : 'text'
             }}
           />
           <button
             type="button"
-            onClick={handlePickColor}
-            title="Pick color from screen"
+            disabled={disabled}
+            onClick={disabled ? undefined : handlePickColor}
+            title={disabled ? undefined : "Pick color from screen"}
             style={{
               width: '24px',
               height: '24px',
@@ -4847,17 +5162,19 @@ function HslColorSlider({ label, value, onChange }) {
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              cursor: 'pointer',
+              cursor: disabled ? 'not-allowed' : 'pointer',
               transition: 'all 0.15s ease',
               color: '#94a3b8',
               flexShrink: 0
             }}
             onMouseOver={e => {
+              if (disabled) return;
               e.currentTarget.style.background = 'rgba(255,255,255,0.08)';
               e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)';
               e.currentTarget.style.color = '#ffffff';
             }}
             onMouseOut={e => {
+              if (disabled) return;
               e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
               e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)';
               e.currentTarget.style.color = '#94a3b8';
@@ -4866,7 +5183,7 @@ function HslColorSlider({ label, value, onChange }) {
             <Pipette size={12} />
           </button>
           <div 
-            onClick={() => colorInputRef.current?.click()}
+            onClick={disabled ? undefined : () => colorInputRef.current?.click()}
             style={{
               width: '32px',
               height: '18px',
@@ -4876,9 +5193,9 @@ function HslColorSlider({ label, value, onChange }) {
               border: '2px solid rgba(255,255,255,0.2)',
               transition: 'background-color 0.2s, box-shadow 0.2s',
               flexShrink: 0,
-              cursor: 'pointer'
+              cursor: disabled ? 'not-allowed' : 'pointer'
             }}
-            title="Click to open color selector"
+            title={disabled ? undefined : "Click to open color selector"}
           />
         </div>
       </div>
@@ -4890,12 +5207,12 @@ function HslColorSlider({ label, value, onChange }) {
             height: '28px', 
             borderRadius: '99px', 
             background: 'linear-gradient(to right, hsl(0,100%,50%), hsl(60,100%,50%) 18%, hsl(120,100%,50%) 36%, hsl(180,100%,50%) 54%, hsl(240,100%,50%) 72%, hsl(300,100%,50%) 90%, #ffffff 90%, #ffffff 95%, #000000 95%, #000000 100%)', 
-            cursor: 'pointer',
+            cursor: disabled ? 'not-allowed' : 'pointer',
             border: 'none',
             boxShadow: 'none',
             overflow: 'hidden'
           }}
-          onMouseDown={(e) => {
+          onMouseDown={disabled ? undefined : (e) => {
             const bar = e.currentTarget;
             const handleMove = (moveEvent) => {
               const rect = bar.getBoundingClientRect();
@@ -4940,7 +5257,8 @@ function HslColorSlider({ label, value, onChange }) {
         ref={colorInputRef}
         type="color"
         value={safeColorValue}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => !disabled && onChange(e.target.value)}
+        disabled={disabled}
         style={{ display: 'none' }}
       />
     </div>
@@ -4948,7 +5266,7 @@ function HslColorSlider({ label, value, onChange }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting }) {
   const fontReady = useFontReady();
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
@@ -5115,6 +5433,70 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   const imageObjRef = useRef(null);
+  const initialFormRef = useRef(null);
+
+  const isPresetFormDirty = (cur, init) => {
+    if (!init || !cur) return false;
+    if (cur.mode !== init.mode) return true;
+    if ((cur.name || '') !== (init.name || '')) return true;
+    if (Boolean(cur.isDefault) !== Boolean(init.isDefault)) return true;
+
+    if (cur.mode === 'text') {
+      if ((cur.text || '') !== (init.text || '')) return true;
+      if ((cur.textColor || '#ffffff').toLowerCase() !== (init.textColor || '#ffffff').toLowerCase()) return true;
+      if ((cur.bgColor || '#000000').toLowerCase() !== (init.bgColor || '#000000').toLowerCase()) return true;
+      if ((cur.animation || 'continuous left shift') !== (init.animation || 'continuous left shift')) return true;
+      if (Number(cur.speed ?? 8) !== Number(init.speed ?? 8)) return true;
+      if (Number(cur.rotation ?? 0) !== Number(init.rotation ?? 0)) return true;
+      return false;
+    }
+
+    if (cur.mode === 'drawing') {
+      if ((cur.textColor || '#ffffff').toLowerCase() !== (init.textColor || '#ffffff').toLowerCase()) return true;
+      if ((cur.bgColor || '#000000').toLowerCase() !== (init.bgColor || '#000000').toLowerCase()) return true;
+      const curPixels = Array.isArray(cur.pixels) ? cur.pixels : [];
+      const initPixels = Array.isArray(init.pixels) ? init.pixels : [];
+      if (curPixels.length !== initPixels.length) return true;
+      for (let i = 0; i < curPixels.length; i++) {
+        const cp = curPixels[i] || 0;
+        const ip = initPixels[i] || 0;
+        const normCp = typeof cp === 'string' ? cp.toLowerCase() : cp;
+        const normIp = typeof ip === 'string' ? ip.toLowerCase() : ip;
+        if (normCp !== normIp) return true;
+      }
+      return false;
+    }
+
+    if (cur.mode === 'clock') {
+      if ((cur.timeFormat || '12h') !== (init.timeFormat || '12h')) return true;
+      if (Boolean(cur.showSeconds !== false) !== Boolean(init.showSeconds !== false)) return true;
+      if ((cur.clockStyle || 'default') !== (init.clockStyle || 'default')) return true;
+      return false;
+    }
+
+    if (cur.mode === 'image') {
+      if (cur.imgSrc !== init.imgSrc) return true;
+      if (cur.fileType !== init.fileType) return true;
+      if (Math.abs((cur.canvasX || 0) - (init.canvasX || 0)) > 0.01) return true;
+      if (Math.abs((cur.canvasY || 0) - (init.canvasY || 0)) > 0.01) return true;
+      if (Math.abs((cur.zoom || 1) - (init.zoom || 1)) > 0.001) return true;
+      if (cur.dwBase !== init.dwBase) return true;
+      if (cur.dhBase !== init.dhBase) return true;
+      if ((cur.bgColor || '#000000').toLowerCase() !== (init.bgColor || '#000000').toLowerCase()) return true;
+      if (cur.frameDurationMs !== init.frameDurationMs) return true;
+      if (cur.speed !== init.speed) return true;
+
+      const curDurations = Array.isArray(cur.frameDurationsMs) ? cur.frameDurationsMs : [];
+      const initDurations = Array.isArray(init.frameDurationsMs) ? init.frameDurationsMs : [];
+      if (curDurations.length !== initDurations.length) return true;
+      for (let i = 0; i < curDurations.length; i++) {
+        if (curDurations[i] !== initDurations[i]) return true;
+      }
+      return false;
+    }
+
+    return false;
+  };
 
   // Form State for Modal
   const [editingId, setEditingId] = useState(null);
@@ -5127,7 +5509,16 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   const fileInputRef = useRef(null);
   const mediaLoadIdRef = useRef(0);
   const [showGrid, setShowGrid] = useState(true);
-  const [showGuides, setShowGuides] = useState(true);
+  const [showGuides, setShowGuides] = useState(false);
+
+  const closePresetModal = () => {
+    if (isSaving) return;
+    setIsModalOpen(false);
+    setAnimDropdownOpen(false);
+    setEditingId(null);
+    setSaveError('');
+    initialFormRef.current = null;
+  };
   const [form, setForm] = useState({
     name: '', 
     text: '', 
@@ -5176,6 +5567,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       if (loadId !== mediaLoadIdRef.current) return;
       setIsLoadingMedia(false);
       setSaveError(message);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     };
     const finishMediaLoad = (mediaEl, source, fileType) => {
       if (loadId !== mediaLoadIdRef.current) return;
@@ -5189,6 +5581,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         imageObjRef.current = mediaEl;
         initializeMediaCrop(mediaEl, source, fileType);
         setIsLoadingMedia(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
       } catch (error) {
         failMediaLoad(`Could not load this media: ${error.message}`);
       }
@@ -5237,10 +5630,17 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
   };
 
+  const openMediaFilePicker = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+
   const handleMediaInputChange = (event) => {
-    const selectedFile = event.currentTarget.files?.[0];
+    const selectedFile = event.target.files?.[0];
     if (!selectedFile) return;
-    event.currentTarget.value = '';
+    setForm(prev => ({ ...prev, mode: 'image' }));
     handleMediaFile(selectedFile);
   };
 
@@ -5292,6 +5692,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     setIsDraggingOver(false);
     const file = e.dataTransfer.files?.[0];
     if (file) {
+      setForm(prev => ({ ...prev, mode: 'image' }));
       handleMediaFile(file);
     }
   };
@@ -5317,7 +5718,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   // page behind the editor.
   useEffect(() => {
     const container = containerRef.current;
-    if (!isModalOpen || form.mode !== 'image' || !container) return;
+    if (!isModalOpen || (form.mode !== 'image' && form.mode !== 'drawing') || !container) return;
     const preventPageScroll = (event) => {
       event.preventDefault();
     };
@@ -5381,20 +5782,18 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     
     const pixels = runCropRender(mediaEl, canvasX, canvasY, dwBase * zoom, dhBase * zoom, form.bgColor || '#000000');
     
-    setForm(prev => {
-      if (prev.mode !== 'image') return prev;
-      return {
-        ...prev,
-        imgSrc,
-        fileType,
-        canvasX,
-        canvasY,
-        zoom,
-        dwBase,
-        dhBase,
-        pixels
-      };
-    });
+    setForm(prev => ({
+      ...prev,
+      mode: 'image',
+      imgSrc,
+      fileType,
+      canvasX,
+      canvasY,
+      zoom,
+      dwBase,
+      dhBase,
+      pixels
+    }));
   };
 
   // Clipboard paste support (CTRL + V)
@@ -5436,44 +5835,61 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     return () => window.removeEventListener('paste', handlePaste);
   }, [isModalOpen, form.mode, isAiExpanded]);
 
-  // Global arrow key support for cropping (no need to click to focus first)
+  // Global arrow key support for cropping and canvas panning (no need to click to focus first)
   useEffect(() => {
-    if (!isModalOpen || form.mode !== 'image' || !form.imgSrc) return;
+    if (!isModalOpen || (form.mode !== 'image' && form.mode !== 'drawing')) return;
+    if (form.mode === 'image' && !form.imgSrc) return;
 
     const handleKeyDown = (e) => {
       // Don't intercept if user is typing in an input
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       
       const step = e.shiftKey ? 5 : 1;
-      let newX = form.canvasX;
-      let newY = form.canvasY;
       
-      if (e.key === 'ArrowUp') newY -= step;
-      else if (e.key === 'ArrowDown') newY += step;
-      else if (e.key === 'ArrowLeft') newX -= step;
-      else if (e.key === 'ArrowRight') newX += step;
-      else return;
+      if (form.mode === 'image') {
+        let newX = form.mediaCanvasX ?? form.canvasX ?? 0;
+        let newY = form.mediaCanvasY ?? form.canvasY ?? 0;
+        
+        if (e.key === 'ArrowUp') newY -= step;
+        else if (e.key === 'ArrowDown') newY += step;
+        else if (e.key === 'ArrowLeft') newX -= step;
+        else if (e.key === 'ArrowRight') newX += step;
+        else return;
 
-      e.preventDefault();
-      
-      let nextPixels = form.pixels;
-      if (imageObjRef.current) {
-        nextPixels = runCropRender(
-          imageObjRef.current,
-          newX,
-          newY,
-          (form.dwBase || 64) * (form.zoom || 1),
-          (form.dhBase || 20) * (form.zoom || 1),
-          form.bgColor || '#000000'
-        );
+        e.preventDefault();
+        
+        if (imageObjRef.current) {
+          const currentZoom = form.mediaZoom ?? form.zoom ?? 1;
+          const nextPixels = runCropRender(
+            imageObjRef.current,
+            newX,
+            newY,
+            (form.dwBase || 64) * currentZoom,
+            (form.dhBase || 20) * currentZoom,
+            form.bgColor || '#000000'
+          );
+          setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY, mediaCanvasX: newX, mediaCanvasY: newY, pixels: nextPixels }));
+        } else {
+          setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY, mediaCanvasX: newX, mediaCanvasY: newY }));
+        }
+      } else if (form.mode === 'drawing') {
+        let newX = form.drawCanvasX || 0;
+        let newY = form.drawCanvasY || 0;
+        
+        if (e.key === 'ArrowUp') newY -= step;
+        else if (e.key === 'ArrowDown') newY += step;
+        else if (e.key === 'ArrowLeft') newX -= step;
+        else if (e.key === 'ArrowRight') newX += step;
+        else return;
+
+        e.preventDefault();
+        setForm(prev => ({ ...prev, drawCanvasX: newX, drawCanvasY: newY }));
       }
-      
-      setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY, pixels: nextPixels }));
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isModalOpen, form.mode, form.imgSrc, form.canvasX, form.canvasY, form.dwBase, form.dhBase, form.zoom, form.bgColor, form.pixels]);
+  }, [isModalOpen, form.mode, form.imgSrc, form.canvasX, form.canvasY, form.mediaCanvasX, form.mediaCanvasY, form.drawCanvasX, form.drawCanvasY, form.dwBase, form.dhBase, form.zoom, form.mediaZoom, form.bgColor, form.pixels]);
 
   useEffect(() => {
     if (isModalOpen && form.mode === 'image' && form.imgSrc) {
@@ -5515,6 +5931,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
 
   const [isEraserActive, setIsEraserActive] = useState(false);
+  const [isPanActive, setIsPanActive] = useState(false);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const isSpacePressedRef = useRef(false);
+  const isDragActive = isPanActive || isSpacePressed;
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
   const [previewTime, setPreviewTime] = useState(new Date());
@@ -5522,15 +5942,53 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
   const editingModeRef = useRef(null);
 
-  // Reset eraser, undo/redo stacks, and editing mode ref on modal toggle
+  // Reset eraser, pan, undo/redo stacks, and editing mode ref on modal toggle
   useEffect(() => {
     setIsEraserActive(false);
+    setIsPanActive(false);
+    setIsSpacePressed(false);
+    isSpacePressedRef.current = false;
     setUndoStack([]);
     setRedoStack([]);
     if (!isModalOpen) {
       editingModeRef.current = null;
     }
   }, [isModalOpen]);
+
+  // Spacebar pan mode support in drawing editor
+  useEffect(() => {
+    if (!isModalOpen || form.mode !== 'drawing') return;
+    const onKeyDown = (e) => {
+      const isTextInput = (e.target.tagName === 'INPUT' && e.target.type !== 'range') || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable;
+      if (e.code === 'Space' && !isTextInput) {
+        e.preventDefault();
+        if (!isSpacePressedRef.current) {
+          isSpacePressedRef.current = true;
+          setIsSpacePressed(true);
+        }
+        const container = containerRef.current?.classList?.contains('preview-box')
+          ? containerRef.current
+          : containerRef.current?.querySelector?.('.preview-box');
+        if (container) container.style.cursor = 'grab';
+      }
+    };
+    const onKeyUp = (e) => {
+      if (e.code === 'Space') {
+        isSpacePressedRef.current = false;
+        setIsSpacePressed(false);
+        const container = containerRef.current?.classList?.contains('preview-box')
+          ? containerRef.current
+          : containerRef.current?.querySelector?.('.preview-box');
+        if (container) container.style.cursor = isPanActive ? 'grab' : 'crosshair';
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, [isModalOpen, form.mode, isPanActive]);
 
   // The editor owns scroll while it is open; the document behind the overlay
   // must remain fixed.
@@ -5784,7 +6242,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   const handleSave = async () => {
-    if (isSaving || pushing || isLoadingMedia) return;
+    if (isSaving || isLoadingMedia) return;
     setSaveError('');
     const drawingHasContent = Array.isArray(form.pixels) && form.pixels.some(pixel => pixel && pixel !== 0);
     if (form.mode === 'image' && !form.imgSrc) {
@@ -5971,16 +6429,32 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     (form.mode === 'text' && Boolean((form.text || '').trim())) ||
     (form.mode === 'drawing' && drawingHasContent) ||
     form.mode === 'clock';
-  const canSavePreset = !isSaving && !pushing && !isLoadingMedia && hasRequiredPresetContent;
+  const hasFormChanges = isPresetFormDirty(form, initialFormRef.current);
+  const canSavePreset = !isSaving && !isLoadingMedia && hasRequiredPresetContent && hasFormChanges;
 
-  const handlePresetEditorKeyDown = (event) => {
-    if (event.key !== 'Enter' || event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-    if (event.target.closest('button, textarea, select, [role="button"], [contenteditable="true"]')) return;
-    if (event.target instanceof HTMLInputElement && ['checkbox', 'radio', 'file', 'color', 'range'].includes(event.target.type)) return;
-    if (!canSavePreset) return;
-    event.preventDefault();
-    handleSave();
-  };
+  useEffect(() => {
+    if (!isModalOpen) return;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        if (!isSaving) {
+          event.preventDefault();
+          closePresetModal();
+        }
+        return;
+      }
+      if (event.key === 'Enter') {
+        if (event.isComposing || event.repeat) return;
+        if (event.target?.closest('[data-ai-side-panel]')) return;
+        if (event.target?.tagName === 'BUTTON' && event.target?.innerText?.toLowerCase().includes('delete')) return;
+        if (canSavePreset) {
+          event.preventDefault();
+          handleSave();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isModalOpen, isSaving, form, canSavePreset, handleSave]);
 
   const exportOriginalMedia = () => {
     if (!form.imgSrc) return;
@@ -6015,7 +6489,43 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     processedMediaSignatureRef.current = JSON.stringify([
       p.imgSrc, fileType, p.canvasX, p.canvasY, p.zoom, p.dwBase, p.dhBase, p.bgColor
     ]);
-    setForm({ ...p, fileType, pixels: normalizedPixels, animation: p.animation || 'continuous left shift' });
+    if (p.imgSrc) {
+      if (fileType === 'video') {
+        const video = document.createElement('video');
+        video.muted = true;
+        video.loop = true;
+        video.playsInline = true;
+        video.onloadedmetadata = () => {
+          imageObjRef.current = video;
+        };
+        video.src = p.imgSrc;
+      } else {
+        const img = new Image();
+        img.onload = () => {
+          imageObjRef.current = img;
+        };
+        img.src = p.imgSrc;
+      }
+    } else {
+      imageObjRef.current = null;
+    }
+
+    const initialForm = {
+      ...p,
+      fileType,
+      pixels: [...normalizedPixels],
+      animation: p.animation || 'continuous left shift',
+      mediaZoom: p.mediaZoom ?? p.zoom ?? 1,
+      mediaCanvasX: p.mediaCanvasX ?? p.canvasX ?? 0,
+      mediaCanvasY: p.mediaCanvasY ?? p.canvasY ?? 0,
+      mediaPixels: (p.mode === 'image' || p.imgSrc) ? [...(p.pixels || [])] : null,
+      drawZoom: p.drawZoom ?? 1,
+      drawCanvasX: p.drawCanvasX ?? 0,
+      drawCanvasY: p.drawCanvasY ?? 0,
+      drawPixels: p.mode === 'drawing' ? [...normalizedPixels] : Array(64 * 20).fill(0)
+    };
+    initialFormRef.current = initialForm;
+    setForm(initialForm);
     setIsModalOpen(true);
   };
 
@@ -6023,9 +6533,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     if (e) e.stopPropagation();
     setPresets(presets.filter(p => p.id !== (id || editingId)));
     if (!id) {
-      setIsModalOpen(false);
-      setAnimDropdownOpen(false);
-      setEditingId(null);
+      closePresetModal();
     }
   };
 
@@ -6138,7 +6646,20 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 cursor: 'pointer'
               }}
               onClick={() => {
-                editingModeRef.current = 'text'; setEditingId(null); setForm({name: '', text: '', textColor: '#ffffff', bgColor: '#000000', animation: 'continuous left shift', speed: 8, rotation: 0, mode: 'text', pixels: Array(64 * 20).fill(0), spacing: 1, views: 1, imgSrc: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20, timeFormat: '12h', showSeconds: true, clockStyle: 'default', isDefault: false}); setIsModalOpen(true);
+                editingModeRef.current = 'text'; setEditingId(null);
+                imageObjRef.current = null;
+                const initialForm = {
+                  name: '', text: '', textColor: '#ffffff', bgColor: '#000000',
+                  animation: 'continuous left shift', speed: 8, rotation: 0,
+                  mode: 'text', pixels: Array(64 * 20).fill(0), spacing: 1, views: 1,
+                  imgSrc: null, canvasX: 0, canvasY: 0, zoom: 1, dwBase: 64, dhBase: 20,
+                  mediaZoom: 1, mediaCanvasX: 0, mediaCanvasY: 0, mediaPixels: null,
+                  drawZoom: 1, drawCanvasX: 0, drawCanvasY: 0, drawPixels: Array(64 * 20).fill(0),
+                  timeFormat: '12h', showSeconds: true, clockStyle: 'default', isDefault: false
+                };
+                initialFormRef.current = initialForm;
+                setForm(initialForm);
+                setIsModalOpen(true);
               }}
             >
               <Plus className="text-emerald-400" size={24} />
@@ -6151,6 +6672,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               ?.map(p => {
               const isClock = p.mode === 'clock' || p.id === 'clock-default';
               const canPushDirectly = canPushLocalPresetDirectly(p);
+              const isThisPresetPushing = pushing && pushingPresetTarget && (
+                (pushingPresetTarget.type === 'local' && pushingPresetTarget.id === p.id) ||
+                (p.isDefault && pushingPresetTarget.isDefault)
+              );
               return (
               <div 
                 key={p.id} 
@@ -6162,23 +6687,27 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 onDragEnd={handleDragEnd}
                 style={{
                   '--reserved-color': '#facc15',
-                  cursor: pushing ? 'not-allowed' : (p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'not-allowed')),
-                  // Keep media previews true to their saved-preset colors. The
-                  // direct-push restriction is communicated by the cursor and
-                  // tooltip, not by dimming the artwork itself.
-                  opacity: p.id === draggedId ? 0.4 : (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'local' && pushingPresetTarget.id === p.id) || (p.isDefault && pushingPresetTarget.isDefault))) ? 0.6 : 1),
+                  cursor: isThisPresetPushing ? 'wait' : (p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'pointer')),
+                  opacity: p.id === draggedId ? 0.4 : (isConnecting ? 1 : (pushing && !isThisPresetPushing ? 0.8 : 1)),
                   transform: p.id === draggedId ? 'scale(0.98)' : 'none',
                   boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : 'none',
-                  pointerEvents: (pushing && !(pushingPresetTarget && ((pushingPresetTarget.type === 'local' && pushingPresetTarget.id === p.id) || (p.isDefault && pushingPresetTarget.isDefault)))) ? 'none' : undefined,
                   transition: 'all 0.15s ease',
                   userSelect: 'none'
                 }}
                 onPointerDown={handlePointerDown}
                 onPointerUp={(e) => handlePointerUp(e, () => {
+                  if (isConnecting) {
+                    setLocalPushMessage('Sign is currently connecting. Please wait...');
+                    return;
+                  }
+                  if (pushing) {
+                    setLocalPushMessage('Sign is currently updating. Please wait...');
+                    return;
+                  }
                   if (status?.connected) {
                     pushPreset(p);
                   } else {
-                  setLocalPushMessage('Error: Sign is not connected');
+                    setLocalPushMessage('Error: Sign is not connected');
                   }
                 })}
                 title={canPushDirectly ? undefined : 'Please assign animated text, GIFs, and videos to a Saved Preset before pushing.'}
@@ -6238,8 +6767,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', overflow: 'hidden' }}>
             <motion.div 
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}
-              onClick={() => { setIsModalOpen(false); setAnimDropdownOpen(false); }}
+              style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)', cursor: isSaving ? 'not-allowed' : 'default' }}
+              onClick={() => !isSaving && closePresetModal()}
             />
             <div 
               style={{ 
@@ -6261,7 +6790,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 animate={{ scale: 1, opacity: 1, y: 0 }}
                 exit={{ scale: 0.9, opacity: 0, y: 20 }}
                 className={`relative glass-panel ${isSaving ? 'media-processing-lock' : ''}`}
-                onKeyDown={handlePresetEditorKeyDown}
                 style={{ 
                   position: 'relative', 
                   padding: '32px', 
@@ -6282,10 +6810,18 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               )}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
                 <h3 style={{ fontSize: '24px', fontWeight: 900, margin: 0 }}>{editingId ? 'Edit Preset' : 'Create Preset'}</h3>
-                <button className="modal-close-btn" onClick={() => { setIsModalOpen(false); setAnimDropdownOpen(false); }}><X size={24} /></button>
+                <button 
+                  className="modal-close-btn" 
+                  disabled={isSaving}
+                  onClick={() => !isSaving && closePresetModal()}
+                  style={{ opacity: isSaving ? 0.4 : 1, cursor: isSaving ? 'not-allowed' : 'pointer' }}
+                  title={isSaving ? undefined : "Close"}
+                >
+                  <X size={24} />
+                </button>
               </div>
 
-              <div style={{ marginBottom: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' }}>
+              <div style={{ marginBottom: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%', opacity: isSaving ? 0.5 : 1, pointerEvents: isSaving ? 'none' : 'auto' }}>
                 <div className="preview-stack opacity-100 scale-100" style={{ margin: '0 auto', width: '100%', maxWidth: 'var(--preview-width)' }}>
                   {form.mode === 'image' ? (
                     <>
@@ -6295,13 +6831,12 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         id="img-upload" 
                         hidden 
                         accept="image/*,video/*"
-                        onInput={handleMediaInputChange}
                         onChange={handleMediaInputChange}
                       />
                       {!form.imgSrc ? (
                         <div 
                           ref={containerRef}
-                          onClick={() => fileInputRef.current?.click()}
+                          onClick={openMediaFilePicker}
                           onDragEnter={handleMediaDragOver}
                           onDragOver={handleMediaDragOver}
                           onDragLeave={handleMediaDragLeave}
@@ -6421,7 +6956,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 ...prev,
                                 canvasX: newCanvasX,
                                 canvasY: newCanvasY,
-                                pixels: nextPixels
+                                mediaCanvasX: newCanvasX,
+                                mediaCanvasY: newCanvasY,
+                                pixels: nextPixels,
+                                mediaPixels: nextPixels
                               }));
                             };
                             
@@ -6462,6 +7000,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                               zoom: newZoom,
                               canvasX: newX,
                               canvasY: newY,
+                              mediaZoom: newZoom,
+                              mediaCanvasX: newX,
+                              mediaCanvasY: newY,
                               pixels: nextPixels
                             }));
                           }}
@@ -6479,6 +7020,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                             pixels={form.pixels}
                             speed={form.speed}
                             frameDurationMs={form.frameDurationMs}
+                            frameDurationsMs={form.frameDurationsMs}
                           />
 
                           {/* 64x20 Pixel Matrix Grid */}
@@ -6553,61 +7095,193 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     </>
                   ) : form.mode === 'drawing' ? (
                     <div 
-                      onMouseDown={(e) => {
-                        if (form.mode !== 'drawing') return;
-                        setUndoStack(prev => [...prev, [...form.pixels]]);
-                        setRedoStack([]);
-                      }}
+                      ref={containerRef}
                       className="preview-box"
+                      tabIndex={0}
                       style={{ 
-                        display: 'grid', 
-                        gridTemplateColumns: 'repeat(64, 1fr)', 
-                        gridTemplateRows: 'repeat(20, 1fr)', 
-                        gap: '1px', 
-                        background: form.bgColor || '#000000', 
-                        padding: '4px', 
+                        position: 'relative',
                         width: '100%', 
                         aspectRatio: '64/20', 
-                        boxSizing: 'border-box'
+                        boxSizing: 'border-box',
+                        overflow: 'hidden',
+                        backgroundColor: '#000000',
+                        userSelect: 'none',
+                        overscrollBehavior: 'contain',
+                        cursor: isDragActive ? 'grab' : 'crosshair'
                       }}
+                      onWheel={(e) => {
+                        e.preventDefault();
+                        const zoomFactor = e.deltaY < 0 ? 1.05 : 0.95;
+                        const currentZoom = form.drawZoom || 1.0;
+                        const newZoom = Math.min(Math.max(currentZoom * zoomFactor, 0.1), 10.0);
+                        const oldZoom = currentZoom;
+                        const oldX = form.drawCanvasX || 0;
+                        const oldY = form.drawCanvasY || 0;
+                        const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                        const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                        setForm(prev => ({ ...prev, drawZoom: newZoom, drawCanvasX: newX, drawCanvasY: newY }));
+                      }}
+                      onMouseDown={(e) => {
+                        const isPan = isDragActive || e.button === 1 || e.button === 2;
+                        if (isPan) {
+                          e.preventDefault();
+                          const container = e.currentTarget;
+                          const scale = (container.clientWidth || 512) / 64;
+                          const startX = e.clientX;
+                          const startY = e.clientY;
+                          const initialCanvasX = form.drawCanvasX || 0;
+                          const initialCanvasY = form.drawCanvasY || 0;
+                          
+                          container.style.cursor = 'grabbing';
+                          
+                          const handleDragMove = (moveEvent) => {
+                            const dx = moveEvent.clientX - startX;
+                            const dy = moveEvent.clientY - startY;
+                            
+                            let newCanvasX = initialCanvasX + dx / scale;
+                            let newCanvasY = initialCanvasY + dy / scale;
+                            
+                            const snapThreshold = 2.0;
+                            const canvasW = 64 * (form.drawZoom || 1);
+                            const canvasH = 20 * (form.drawZoom || 1);
+                            
+                            if (Math.abs(newCanvasX + canvasW / 2 - 32) < snapThreshold) {
+                              newCanvasX = 32 - canvasW / 2;
+                            }
+                            if (Math.abs(newCanvasY + canvasH / 2 - 10) < snapThreshold) {
+                              newCanvasY = 10 - canvasH / 2;
+                            }
+                            if (Math.abs(newCanvasX) < snapThreshold) newCanvasX = 0;
+                            if (Math.abs(newCanvasX + canvasW - 64) < snapThreshold) newCanvasX = 64 - canvasW;
+                            if (Math.abs(newCanvasY) < snapThreshold) newCanvasY = 0;
+                            if (Math.abs(newCanvasY + canvasH - 20) < snapThreshold) newCanvasY = 20 - canvasH;
+                            
+                            setForm(prev => ({
+                              ...prev,
+                              drawCanvasX: newCanvasX,
+                              drawCanvasY: newCanvasY
+                            }));
+                          };
+                          
+                          const handleDragEnd = () => {
+                            container.style.cursor = isDragActive ? 'grab' : 'crosshair';
+                            window.removeEventListener('mousemove', handleDragMove);
+                            window.removeEventListener('mouseup', handleDragEnd);
+                          };
+                          
+                          window.addEventListener('mousemove', handleDragMove);
+                          window.addEventListener('mouseup', handleDragEnd);
+                          return;
+                        }
+                        
+                        if (e.button === 0) {
+                          setUndoStack(prev => [...prev, [...form.pixels]]);
+                          setRedoStack([]);
+                        }
+                      }}
+                      onContextMenu={(e) => e.preventDefault()}
                     >
-                      {(Array.isArray(form.pixels) ? form.pixels : Array(1280).fill(0)).map((p, i) => {
-                        const activeColor = form.textColor || '#ffffff';
+                      {/* Scalable, pannable drawing matrix */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          left: `${((form.drawCanvasX || 0) / 64) * 100}%`,
+                          top: `${((form.drawCanvasY || 0) / 20) * 100}%`,
+                          width: `${(form.drawZoom || 1) * 100}%`,
+                          height: `${(form.drawZoom || 1) * 100}%`,
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(64, 1fr)',
+                          gridTemplateRows: 'repeat(20, 1fr)',
+                          gap: showGrid ? '1px' : '0px',
+                          background: showGrid ? 'rgba(255, 255, 255, 0.08)' : (form.bgColor || '#000000'),
+                          boxSizing: 'border-box'
+                        }}
+                      >
+                        {(Array.isArray(form.pixels) ? form.pixels : Array(1280).fill(0)).map((p, i) => {
+                          const activeColor = form.textColor || '#ffffff';
+                          return (
+                            <div 
+                              key={i} 
+                              onMouseDown={(e) => {
+                                const isPan = isDragActive || e.button === 1 || e.button === 2;
+                                if (isPan) return;
+                                if (e.button !== 0) return;
+                                e.preventDefault();
+                                const next = [...form.pixels];
+                                const currentColor = form.textColor || '#ffffff';
+                                if (isEraserActive) {
+                                  next[i] = 0;
+                                } else {
+                                  next[i] = next[i] === currentColor ? 0 : currentColor;
+                                }
+                                setForm(prev => ({ ...prev, pixels: next, drawPixels: next }));
+                              }}
+                              onMouseEnter={(e) => {
+                                const isPan = isDragActive;
+                                if (isPan || form.mode !== 'drawing' || e.buttons !== 1) return;
+                                const next = [...form.pixels];
+                                const currentColor = form.textColor || '#ffffff';
+                                if (isEraserActive) {
+                                  next[i] = 0;
+                                } else {
+                                  next[i] = currentColor;
+                                }
+                                setForm(prev => ({ ...prev, pixels: next, drawPixels: next }));
+                              }}
+                              onDragStart={(e) => e.preventDefault()}
+                              style={{ 
+                                background: (p && p !== 0 ? (typeof p === 'string' && p.startsWith('#') ? p : activeColor) : (form.bgColor || '#000000')),
+                                cursor: isDragActive ? 'inherit' : 'crosshair',
+                                userSelect: 'none'
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+
+                      {/* Photoshop-style Centering Guides */}
+                      {showGuides && (() => {
+                        const canvasW = 64 * (form.drawZoom || 1);
+                        const canvasH = 20 * (form.drawZoom || 1);
+                        const isHCenter = Math.abs(((form.drawCanvasX || 0) + canvasW / 2) - 32) < 0.35;
+                        const isVCenter = Math.abs(((form.drawCanvasY || 0) + canvasH / 2) - 10) < 0.35;
                         return (
-                          <div 
-                            key={i} 
-                            onMouseDown={(e) => {
-                              e.preventDefault();
-                              if (form.mode !== 'drawing') return;
-                              const next = [...form.pixels];
-                              const currentColor = form.textColor || '#ffffff';
-                              if (isEraserActive) {
-                                next[i] = 0;
-                              } else {
-                                next[i] = next[i] === currentColor ? 0 : currentColor;
-                              }
-                              setForm({...form, pixels: next});
-                            }}
-                            onMouseEnter={(e) => {
-                              if (form.mode !== 'drawing' || e.buttons !== 1) return;
-                              const next = [...form.pixels];
-                              const currentColor = form.textColor || '#ffffff';
-                              if (isEraserActive) {
-                                next[i] = 0;
-                              } else {
-                                next[i] = currentColor;
-                              }
-                              setForm({...form, pixels: next});
-                            }}
-                            onDragStart={(e) => e.preventDefault()}
-                            style={{ 
-                              background: (p && p !== 0 ? (typeof p === 'string' && p.startsWith('#') ? p : activeColor) : (form.bgColor || '#000000')),
-                              cursor: 'crosshair',
-                              userSelect: 'none'
-                            }}
-                          />
+                          <>
+                            {/* Vertical Center Guide (x=32) */}
+                            <div 
+                              style={{
+                                position: 'absolute',
+                                left: '50%',
+                                top: 0,
+                                bottom: 0,
+                                width: isHCenter ? '2px' : '1px',
+                                transform: 'translateX(-50%)',
+                                backgroundColor: isHCenter ? '#f43f5e' : 'rgba(244, 63, 94, 0.4)',
+                                boxShadow: isHCenter ? '0 0 8px #f43f5e, 0 0 2px #ffffff' : 'none',
+                                pointerEvents: 'none',
+                                zIndex: 12,
+                                transition: 'all 0.1s ease'
+                              }} 
+                            />
+                            {/* Horizontal Center Guide (y=10) */}
+                            <div 
+                              style={{
+                                position: 'absolute',
+                                top: '50%',
+                                left: 0,
+                                right: 0,
+                                height: isVCenter ? '2px' : '1px',
+                                transform: 'translateY(-50%)',
+                                backgroundColor: isVCenter ? '#f43f5e' : 'rgba(244, 63, 94, 0.4)',
+                                boxShadow: isVCenter ? '0 0 8px #f43f5e, 0 0 2px #ffffff' : 'none',
+                                pointerEvents: 'none',
+                                zIndex: 12,
+                                transition: 'all 0.1s ease'
+                              }} 
+                            />
+                          </>
                         );
-                      })}
+                      })()}
                     </div>
                   ) : (
                     <div className="preview-box">
@@ -6626,23 +7300,29 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     
                     <div style={{ display: 'flex', gap: '8px' }}>
                       <button 
-                        onClick={() => { editingModeRef.current = 'text'; setForm({...form, mode: 'text'}); }}
+                        disabled={isSaving}
+                        onClick={() => { if (isSaving) return; editingModeRef.current = 'text'; setForm({...form, mode: 'text'}); }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'text' ? 'inactive' : ''}`}
-                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', opacity: isSaving ? 0.45 : undefined, cursor: isSaving ? 'not-allowed' : 'pointer' }}
                       >
                         <Type size={12} />
                         <span>TEXT</span>
                       </button>
                       <button 
+                        disabled={isSaving}
                         onClick={() => {
+                          if (isSaving) return;
                           editingModeRef.current = 'drawing';
+                          setIsPanActive(false);
                           if (form.mode !== 'drawing') {
                             setForm(prev => {
                               const originalPreset = presets?.find(pr => pr.id === editingId);
                               const isOriginalDrawing = originalPreset && originalPreset.mode === 'drawing';
                               
                               let nextPixels;
-                              if (isOriginalDrawing) {
+                              if (prev.drawPixels && Array.isArray(prev.drawPixels) && prev.drawPixels.length === 1280) {
+                                nextPixels = prev.drawPixels;
+                              } else if (isOriginalDrawing) {
                                 nextPixels = originalPreset.pixels || Array(64 * 20).fill(0);
                               } else {
                                 nextPixels = Array(64 * 20).fill(0);
@@ -6655,40 +7335,74 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 return 0;
                               });
                               
-                              return { ...prev, mode: 'drawing', pixels: normalized };
+                              return { 
+                                ...prev, 
+                                mode: 'drawing', 
+                                mediaPixels: prev.mode === 'image' ? prev.pixels : prev.mediaPixels,
+                                pixels: normalized 
+                              };
                             });
                           }
                         }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'drawing' ? 'inactive' : ''}`}
-                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', opacity: isSaving ? 0.45 : undefined, cursor: isSaving ? 'not-allowed' : 'pointer' }}
                       >
                         <Pencil size={12} />
                         <span>DRAW</span>
                       </button>
                       <button 
+                        disabled={isSaving}
                         onClick={() => { 
+                          if (isSaving) return;
                           editingModeRef.current = 'image'; 
                           setForm(prev => {
                             const originalPreset = presets?.find(pr => pr.id === editingId);
                             const originalImgSrc = (originalPreset && (originalPreset.mode === 'image' || originalPreset.imgSrc)) ? originalPreset.imgSrc : null;
                             const targetImgSrc = prev.imgSrc || originalImgSrc;
+                            const restoredZoom = prev.mediaZoom ?? 1;
+                            const restoredX = prev.mediaCanvasX ?? 0;
+                            const restoredY = prev.mediaCanvasY ?? 0;
+                            
+                            let nextPixels = prev.mediaPixels;
+                            if (!nextPixels && originalPreset && (originalPreset.mode === 'image' || originalPreset.imgSrc) && originalPreset.pixels) {
+                              nextPixels = originalPreset.pixels;
+                            }
+                            if (!nextPixels) {
+                              if (targetImgSrc && imageObjRef.current) {
+                                nextPixels = runCropRender(
+                                  imageObjRef.current,
+                                  restoredX,
+                                  restoredY,
+                                  (prev.dwBase || 64) * restoredZoom,
+                                  (prev.dhBase || 20) * restoredZoom,
+                                  prev.bgColor || '#000000'
+                                );
+                              } else {
+                                nextPixels = Array(64 * 20).fill(0);
+                              }
+                            }
                             return {
                               ...prev,
                               mode: 'image',
-                              pixels: targetImgSrc ? prev.pixels : Array(64 * 20).fill(0)
+                              zoom: restoredZoom,
+                              canvasX: restoredX,
+                              canvasY: restoredY,
+                              drawPixels: prev.mode === 'drawing' ? prev.pixels : prev.drawPixels,
+                              pixels: nextPixels
                             };
                           }); 
                         }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'image' ? 'inactive' : ''}`}
-                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', opacity: isSaving ? 0.45 : undefined, cursor: isSaving ? 'not-allowed' : 'pointer' }}
                       >
                         <ImageIcon size={12} />
                         <span>MEDIA</span>
                       </button>
                       <button 
-                        onClick={() => { editingModeRef.current = 'clock'; setForm({...form, mode: 'clock'}); }}
+                        disabled={isSaving}
+                        onClick={() => { if (isSaving) return; editingModeRef.current = 'clock'; setForm({...form, mode: 'clock'}); }}
                         className={`btn-styled text-[10px] px-4 py-1.5 rounded-full transition-all ${form.mode !== 'clock' ? 'inactive' : ''}`}
-                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                        style={{ fontSize: 10, fontWeight: 900, flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', opacity: isSaving ? 0.45 : undefined, cursor: isSaving ? 'not-allowed' : 'pointer' }}
                       >
                         <Clock size={12} />
                         <span>CLOCK</span>
@@ -6696,14 +7410,14 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     </div>
                     
                     {/* Default Toggle */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingRight: '4px', paddingTop: '12px', paddingBottom: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingRight: '4px', paddingTop: '12px', paddingBottom: '12px', opacity: isSaving ? 0.45 : 1, pointerEvents: isSaving ? 'none' : 'auto' }}>
                       <div 
-                        onClick={() => setForm(prev => ({ ...prev, isDefault: !prev.isDefault }))}
+                        onClick={() => !isSaving && setForm(prev => ({ ...prev, isDefault: !prev.isDefault }))}
                         style={{ 
                           fontSize: '13px', 
                           fontWeight: 700, 
                           color: '#cbd5e1', 
-                          cursor: 'pointer', 
+                          cursor: isSaving ? 'not-allowed' : 'pointer', 
                           display: 'flex', 
                           alignItems: 'center', 
                           gap: '8px',
@@ -6737,173 +7451,303 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     </div>
                   </div>
 
-                  {form.mode === 'drawing' ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', marginTop: '8px', padding: '16px', background: 'rgba(255,255,255,0.02)', borderRadius: '20px', border: '1px solid rgba(255,255,255,0.05)' }}>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
-                        <HslColorSlider 
-                          label="Pen Colour" 
-                          value={form.textColor || '#ffffff'} 
-                          onChange={val => setForm(prev => ({ ...prev, textColor: val }))} 
-                        />
-                        <HslColorSlider 
-                          label="Background Colour" 
-                          value={form.bgColor || '#000000'} 
-                          onChange={val => setForm(prev => ({ ...prev, bgColor: val }))} 
-                        />
+                  {form.mode === 'drawing' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '16px' }}>
+                      {/* Action Buttons Row */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                          {/* Clear Canvas */}
+                          <button
+                            type="button"
+                            disabled={isSaving}
+                            onClick={() => {
+                              if (isSaving) return;
+                              setUndoStack(prev => [...prev, [...form.pixels]]);
+                              setRedoStack([]);
+                              setForm(prev => ({ ...prev, pixels: Array(64 * 20).fill(0), drawPixels: Array(64 * 20).fill(0) }));
+                            }}
+                            className="btn-styled text-[10px] px-3 py-2 flex items-center justify-center gap-1.5"
+                            style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                            title={isSaving ? undefined : "Clear Canvas"}
+                          >
+                            <img src="https://static.thenounproject.com/png/5507757-200.png" alt="Clear" width="13" height="13" style={{ width: '13px', height: '13px', objectFit: 'contain', display: 'block', filter: isSaving ? 'invert(50%)' : 'invert(100%)', opacity: isSaving ? 0.35 : 1.0 }} />
+                          </button>
+
+                          {/* Eraser Tool */}
+                          <button
+                            type="button"
+                            disabled={isSaving}
+                            onClick={() => {
+                              if (isSaving) return;
+                              setIsEraserActive(prev => !prev);
+                              if (!isEraserActive) setIsPanActive(false);
+                            }}
+                            className={`btn-styled text-[10px] px-3 py-2 flex items-center justify-center gap-1.5 ${!isEraserActive ? 'inactive' : ''}`}
+                            style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                            title={isSaving ? undefined : "Eraser Tool"}
+                          >
+                            <Eraser size={13} />
+                          </button>
+
+                          {/* Undo Button */}
+                          <button
+                            type="button"
+                            disabled={undoStack.length === 0 || isSaving}
+                            onClick={() => {
+                              if (undoStack.length === 0 || isSaving) return;
+                              const previous = undoStack[undoStack.length - 1];
+                              setUndoStack(undoStack.slice(0, -1));
+                              setRedoStack(prev => [...prev, [...form.pixels]]);
+                              setForm(prev => ({ ...prev, pixels: previous, drawPixels: previous }));
+                            }}
+                            className={`btn-styled text-[10px] px-3 py-2 flex items-center justify-center gap-1.5 ${undoStack.length === 0 ? 'inactive' : ''}`}
+                            style={{ borderRadius: '12px', opacity: (undoStack.length > 0 && !isSaving) ? 1 : 0.35, cursor: (undoStack.length > 0 && !isSaving) ? 'pointer' : 'not-allowed', pointerEvents: isSaving ? 'none' : 'auto' }}
+                            title={isSaving ? undefined : "Undo"}
+                          >
+                            <Undo2 size={13} />
+                          </button>
+
+                          {/* Redo Button */}
+                          <button
+                            type="button"
+                            disabled={redoStack.length === 0 || isSaving}
+                            onClick={() => {
+                              if (redoStack.length === 0 || isSaving) return;
+                              const next = redoStack[redoStack.length - 1];
+                              setRedoStack(redoStack.slice(0, -1));
+                              setUndoStack(prev => [...prev, [...form.pixels]]);
+                              setForm(prev => ({ ...prev, pixels: next, drawPixels: next }));
+                            }}
+                            className={`btn-styled text-[10px] px-3 py-2 flex items-center justify-center gap-1.5 ${redoStack.length === 0 ? 'inactive' : ''}`}
+                            style={{ borderRadius: '12px', opacity: (redoStack.length > 0 && !isSaving) ? 1 : 0.35, cursor: (redoStack.length > 0 && !isSaving) ? 'pointer' : 'not-allowed', pointerEvents: isSaving ? 'none' : 'auto' }}
+                            title={isSaving ? undefined : "Redo"}
+                          >
+                            <Redo2 size={13} />
+                          </button>
+                        </div>
+
+                        {/* Visual Tools (Drag canvas, Pixel matrix, Centering Guides) */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          {/* Drag / Draw Canvas Button */}
+                          <button
+                            type="button"
+                            disabled={isSaving}
+                            onClick={() => {
+                              if (isSaving) return;
+                              setIsPanActive(prev => !prev);
+                              if (!isPanActive) setIsEraserActive(false);
+                            }}
+                            className={`btn-styled text-[10px] px-3 py-2 flex items-center justify-center gap-1.5 ${!isDragActive ? 'inactive' : ''}`}
+                            style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                            title={isSaving ? undefined : (isDragActive ? "Draw mode" : "Drag canvas")}
+                          >
+                            {isDragActive ? <Hand size={13} /> : <Pencil size={13} />}
+                          </button>
+
+                          {/* Toggle Pixel Matrix Grid Button */}
+                          <button
+                            type="button"
+                            disabled={isSaving}
+                            onClick={() => !isSaving && setShowGrid(prev => !prev)}
+                            className={`btn-styled text-[10px] px-3 py-2 flex items-center justify-center gap-1.5 ${!showGrid ? 'inactive' : ''}`}
+                            style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                            title={isSaving ? undefined : "Toggle pixel matrix grid"}
+                          >
+                            <Grid3X3 size={13} />
+                          </button>
+
+                          {/* Toggle Centering Guides Button */}
+                          <button
+                            type="button"
+                            disabled={isSaving}
+                            onClick={() => !isSaving && setShowGuides(prev => !prev)}
+                            className={`btn-styled text-[10px] px-3 py-2 flex items-center justify-center gap-1.5 ${!showGuides ? 'inactive' : ''}`}
+                            style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                            title={isSaving ? undefined : "Toggle centering guides"}
+                          >
+                            <ScanLine size={13} />
+                          </button>
+                        </div>
                       </div>
 
-                      {/* Action Buttons (Clear & Eraser) */}
-                      <div style={{ display: 'flex', gap: '20px', justifyContent: 'center', marginTop: '12px' }}>
-                        {/* Clean Button */}
-                        <button
-                          onClick={() => {
-                            setUndoStack(prev => [...prev, [...form.pixels]]);
-                            setRedoStack([]);
-                            setForm(prev => ({ ...prev, pixels: Array(64 * 20).fill(0) }));
+                      {/* Nested controls container to match Media spacing */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '4px' }}>
+                        {/* Zoom Slider Rail */}
+                        <div 
+                          className="brightness-rail glass-panel" 
+                          onClick={(e) => {
+                            const input = e.currentTarget.querySelector('input[type="range"]');
+                            if (input && !isSaving) input.focus();
                           }}
-                          type="button"
-                          style={{
-                            width: '64px',
-                            height: '64px',
-                            borderRadius: '16px',
-                            background: 'rgba(255, 255, 255, 0.04)',
-                            border: '1px solid rgba(255, 255, 255, 0.08)',
-                            color: '#f8fafc',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s',
-                            outline: 'none',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
+                          onWheel={(e) => {
+                            if (isSaving) return;
+                            e.preventDefault();
+                            const dir = e.deltaY < 0 ? 1 : -1;
+                            const step = e.shiftKey ? 0.5 : 0.05;
+                            const currentZoom = form.drawZoom || 1.0;
+                            const newZoom = Math.min(10.0, Math.max(0.1, Math.round((currentZoom + dir * step) * 100) / 100));
+                            const oldZoom = currentZoom;
+                            const oldX = form.drawCanvasX || 0;
+                            const oldY = form.drawCanvasY || 0;
+                            const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                            const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                            setForm(prev => ({
+                              ...prev,
+                              drawZoom: newZoom,
+                              drawCanvasX: newX,
+                              drawCanvasY: newY
+                            }));
                           }}
-                          onMouseOver={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)'; e.currentTarget.style.transform = 'scale(1.05)'; }}
-                          onMouseOut={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.transform = 'none'; }}
-                          title="Clear Canvas"
+                          style={{ padding: '12px 16px', width: '100%', display: 'flex', alignItems: 'center', gap: '14px', opacity: isSaving ? 0.35 : 1, pointerEvents: isSaving ? 'none' : 'auto', cursor: isSaving ? 'not-allowed' : 'default' }}
                         >
-                          <img src="https://static.thenounproject.com/png/5507757-200.png" alt="Clear" width="30" height="30" style={{ filter: 'invert(100%)', opacity: 1.0 }} />
-                        </button>
+                          <Search className="text-emerald-400 flex-shrink-0" size={17} />
+                          <div style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', alignItems: 'center' }}>
+                            <input 
+                              type="range" min="0.1" max="10.0" step="0.05" 
+                              tabIndex={0}
+                              value={form.drawZoom || 1} 
+                              disabled={isSaving}
+                              onPointerDown={(e) => e.currentTarget.focus()}
+                              onMouseDown={(e) => e.currentTarget.focus()}
+                              onClick={(e) => e.currentTarget.focus()}
+                              onKeyDown={(e) => {
+                                const isArrowKey = ['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp'].includes(e.key);
+                                const isPlusKey = e.key === '+' || e.key === '=' || e.code === 'NumpadAdd';
+                                const isMinusKey = e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract';
 
-                        {/* Eraser Button */}
-                        <button
-                          onClick={() => {
-                            setIsEraserActive(!isEraserActive);
-                          }}
-                          type="button"
-                          style={{ 
-                            width: '64px', 
-                            height: '64px', 
-                            borderRadius: '16px', 
-                            background: isEraserActive 
-                              ? 'linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(236, 72, 153, 0.2))'
-                              : 'rgba(255, 255, 255, 0.04)',
-                            border: isEraserActive
-                              ? '1px solid rgba(139, 92, 246, 0.5)'
-                              : '1px solid rgba(255, 255, 255, 0.08)',
-                            color: isEraserActive ? '#f472b6' : '#f8fafc',
-                            boxShadow: isEraserActive ? '0 0 16px rgba(139, 92, 246, 0.2)' : 'none',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s',
-                            outline: 'none',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
-                          }}
-                          onMouseOver={e => {
-                            e.currentTarget.style.transform = 'scale(1.05)';
-                            if (!isEraserActive) {
+                                if (e.code === 'Space' || e.key === ' ') {
+                                  e.preventDefault();
+                                  return;
+                                }
+
+                                if (isArrowKey || isPlusKey || isMinusKey) {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  const dir = (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || isMinusKey) ? -1 : 1;
+                                  const step = e.shiftKey ? 0.5 : 0.05;
+                                  const currentZoom = form.drawZoom || 1.0;
+                                  const newZoom = Math.min(10.0, Math.max(0.1, Math.round((currentZoom + dir * step) * 100) / 100));
+                                  const oldZoom = currentZoom;
+                                  const oldX = form.drawCanvasX || 0;
+                                  const oldY = form.drawCanvasY || 0;
+                                  const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                                  const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                                  setForm(prev => ({
+                                    ...prev,
+                                    drawZoom: newZoom,
+                                    drawCanvasX: newX,
+                                    drawCanvasY: newY
+                                  }));
+                                }
+                              }}
+                              onChange={e => {
+                                if (isSaving) return;
+                                const newZoom = parseFloat(e.target.value);
+                                const oldZoom = form.drawZoom || 1.0;
+                                const oldX = form.drawCanvasX || 0;
+                                const oldY = form.drawCanvasY || 0;
+                                const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                                const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                                setForm(prev => ({
+                                  ...prev,
+                                  drawZoom: newZoom,
+                                  drawCanvasX: newX,
+                                  drawCanvasY: newY
+                                }));
+                              }}
+                              className="brightness-slider"
+                              style={{
+                                position: 'relative',
+                                width: '100%',
+                                outline: 'none',
+                                boxShadow: 'none',
+                                '--fill': `calc(8px + (100% - 16px) * ${Math.max(0, Math.min(1, ((form.drawZoom || 1) - 0.1) / 9.9))})`,
+                                cursor: isSaving ? 'not-allowed' : 'pointer'
+                              }}
+                            />
+                          </div>
+                          <span className="font-bold text-slate-400 text-[11px] text-right flex-shrink-0" style={{ width: '42px', minWidth: '42px', maxWidth: '42px', flexShrink: 0, fontVariantNumeric: 'tabular-nums', display: 'inline-block' }}>{(form.drawZoom || 1).toFixed(1)}x</span>
+                          <div
+                            className="power-btn off"
+                            style={{
+                              width: '34px',
+                              height: '34px',
+                              borderRadius: '10px',
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              border: '1px solid rgba(255, 255, 255, 0.08)',
+                              color: '#f8fafc',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: isSaving ? 'not-allowed' : 'pointer',
+                              opacity: isSaving ? 0.45 : 1,
+                              transition: 'all 0.2s',
+                              flexShrink: 0
+                            }}
+                            title={isSaving ? undefined : "Reset Zoom (1.0x)"}
+                            onMouseOver={e => {
+                              if (isSaving) return;
                               e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
                               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
-                            }
-                          }}
-                          onMouseOut={e => {
-                            e.currentTarget.style.transform = 'none';
-                            if (!isEraserActive) {
+                              e.currentTarget.style.transform = 'scale(1.05)';
+                            }}
+                            onMouseOut={e => {
+                              if (isSaving) return;
                               e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
                               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
-                            }
-                          }}
-                          title="Eraser Tool"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={isEraserActive ? 'text-pink-400' : 'text-slate-300'} aria-hidden="true"><path d="M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21"></path><path d="m5.082 11.09 8.828 8.828"></path></svg>
-                        </button>
+                              e.currentTarget.style.transform = 'none';
+                            }}
+                            onClick={() => {
+                              if (isSaving) return;
+                              setForm(prev => ({
+                                ...prev,
+                                drawZoom: 1.0,
+                                drawCanvasX: 0,
+                                drawCanvasY: 0
+                              }));
+                            }}
+                          >
+                            <RotateCcw size={16} />
+                          </div>
+                        </div>
 
-                        {/* Undo Button */}
-                        <button
-                          onClick={() => {
-                            if (undoStack.length === 0) return;
-                            const previous = undoStack[undoStack.length - 1];
-                            setUndoStack(undoStack.slice(0, -1));
-                            setRedoStack(prev => [...prev, [...form.pixels]]);
-                            setForm(prev => ({ ...prev, pixels: previous }));
-                          }}
-                          type="button"
-                          disabled={undoStack.length === 0}
-                          style={{
-                            width: '64px',
-                            height: '64px',
-                            borderRadius: '16px',
-                            background: 'rgba(255, 255, 255, 0.04)',
-                            border: '1px solid rgba(255, 255, 255, 0.08)',
-                            color: '#f8fafc',
-                            cursor: undoStack.length ? 'pointer' : 'not-allowed',
-                            transition: 'all 0.2s',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            opacity: undoStack.length ? 1 : 0.5,
-                          }}
-                          onMouseOver={e => { if (undoStack.length) { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)'; e.currentTarget.style.transform = 'scale(1.05)'; } }}
-                          onMouseOut={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.transform = 'none'; }}
-                          title="Undo"
-                        >
-                          <Undo2 size={24} className="text-slate-300" />
-                        </button>
-
-                        {/* Redo Button */}
-                        <button
-                          onClick={() => {
-                            if (redoStack.length === 0) return;
-                            const next = redoStack[redoStack.length - 1];
-                            setRedoStack(redoStack.slice(0, -1));
-                            setUndoStack(prev => [...prev, [...form.pixels]]);
-                            setForm(prev => ({ ...prev, pixels: next }));
-                          }}
-                          type="button"
-                          disabled={redoStack.length === 0}
-                          style={{
-                            width: '64px',
-                            height: '64px',
-                            borderRadius: '16px',
-                            background: 'rgba(255, 255, 255, 0.04)',
-                            border: '1px solid rgba(255, 255, 255, 0.08)',
-                            color: '#f8fafc',
-                            cursor: redoStack.length ? 'pointer' : 'not-allowed',
-                            transition: 'all 0.2s',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            opacity: redoStack.length ? 1 : 0.5,
-                          }}
-                          onMouseOver={e => { if (redoStack.length) { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.15)'; e.currentTarget.style.transform = 'scale(1.05)'; } }}
-                          onMouseOut={e => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)'; e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)'; e.currentTarget.style.transform = 'none'; }}
-                          title="Redo"
-                        >
-                          <Redo2 size={24} className="text-slate-300" />
-                        </button>
+                        {/* Pen Colour and Background Colour Sliders */}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px', opacity: isSaving ? 0.35 : 1, pointerEvents: isSaving ? 'none' : 'auto' }}>
+                          <HslColorSlider 
+                            label="Pen Colour" 
+                            value={form.textColor || '#ffffff'} 
+                            onChange={val => setForm(prev => ({ ...prev, textColor: val }))} 
+                            disabled={isSaving}
+                          />
+                          <HslColorSlider 
+                            label="Background Colour" 
+                            value={form.bgColor || '#000000'} 
+                            onChange={val => setForm(prev => ({ ...prev, bgColor: val }))} 
+                            disabled={isSaving}
+                          />
+                        </div>
                       </div>
                     </div>
-                  ) : form.mode === 'text' ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  )}
+
+                  {form.mode === 'text' ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', opacity: isSaving ? 0.35 : 1, pointerEvents: isSaving ? 'none' : 'auto' }}>
                       <label className="text-[10px] font-bold text-slate-500 uppercase ml-1">Display Text (Max 25 chars)</label>
                       <input 
                         className="input-field w-full" 
                         value={form.text} 
                         maxLength={25}
+                        disabled={isSaving}
                         onChange={e => {
+                          if (isSaving) return;
                           const val = e.target.value;
                           setForm(prev => ({...prev, text: val}));
                         }} 
                         placeholder="Type something..."
+                        style={{
+                          opacity: isSaving ? 0.35 : 1,
+                          cursor: isSaving ? 'not-allowed' : 'text'
+                        }}
                       />
                     </div>
                   ) : null}
@@ -6913,40 +7757,52 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 {form.mode === 'image' && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '16px' }}>
                     {isLoadingMedia && <span role="status" className="text-xs text-slate-300" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><RefreshCw size={11} className="animate-spin" />Loading media...</span>}
-                    {saveError && !isLoadingMedia && <span role="alert" className="text-xs text-red-400">{saveError}</span>}
+                    {saveError && !isLoadingMedia && <span role="alert" style={{ color: '#f87171', fontSize: '12px', fontWeight: 600 }}>{saveError}</span>}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         <button
                           type="button"
-                          onClick={() => fileInputRef.current?.click()}
+                          disabled={isSaving}
+                          onClick={isSaving ? undefined : openMediaFilePicker}
                           className="btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5"
-                          style={{ borderRadius: '12px' }}
-                          title="Upload image or video"
+                          style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                          title={isSaving ? undefined : "Upload image or video"}
                         >
                           <Upload size={13} />
                         </button>
                           {form.imgSrc && (
                             <button
                               type="button"
-                              onClick={exportOriginalMedia}
+                              disabled={isSaving}
+                              onClick={isSaving ? undefined : exportOriginalMedia}
                               className="btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5"
-                              style={{ borderRadius: '12px' }}
-                              title="Download the original uploaded media at its original quality"
+                              style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                              title={isSaving ? undefined : "Download the original uploaded media at its original quality"}
                             >
                               <Download size={13} />
                             </button>
                           )}
                         <button
                           type="button"
-                          onClick={() => setIsAiExpanded(prev => !prev)}
+                          disabled={isSaving}
+                          onClick={() => !isSaving && setIsAiExpanded(prev => !prev)}
                           className={`btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5 transition-all ${!isAiExpanded ? 'inactive' : ''}`}
                           aria-label={`Create with ${aiProvider === 'gemini' ? 'Gemini' : 'OpenAI'}`}
                           style={{
                             borderRadius: '12px',
-                            background: aiProvider === 'gemini' ? 'linear-gradient(to right, #4796E3 0%, #9177C7 50%, #CA6673 100%)' : '#74AA9C',
-                            border: 'none',
-                            color: '#ffffff',
-                            boxShadow: aiProvider === 'gemini'
+                            opacity: isSaving ? 0.35 : 1,
+                            cursor: isSaving ? 'not-allowed' : 'pointer',
+                            pointerEvents: isSaving ? 'none' : 'auto',
+                            background: isSaving
+                              ? 'rgba(255, 255, 255, 0.05)'
+                              : aiProvider === 'gemini'
+                              ? 'linear-gradient(to right, #4796E3 0%, #9177C7 50%, #CA6673 100%)'
+                              : '#74AA9C',
+                            border: isSaving ? '1px solid rgba(255, 255, 255, 0.08)' : 'none',
+                            color: isSaving ? '#64748b' : '#ffffff',
+                            boxShadow: isSaving
+                              ? 'none'
+                              : aiProvider === 'gemini'
                               ? '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(71, 150, 227, 0.25)'
                               : '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 8px rgba(116, 170, 156, 0.25)'
                           }}
@@ -6961,35 +7817,38 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         {form.imgSrc && (
                           <button
                             type="button"
+                            disabled={isSaving}
                             onClick={() => {
-                              if (!imageObjRef.current) return;
+                              if (isSaving || !imageObjRef.current) return;
                               const newX = (64 - form.dwBase * form.zoom) / 2;
                               const newY = (20 - form.dhBase * form.zoom) / 2;
                               const nextPixels = runCropRender(imageObjRef.current, newX, newY, form.dwBase * form.zoom, form.dhBase * form.zoom, form.bgColor || '#000000');
-                              setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY, pixels: nextPixels }));
+                              setForm(prev => ({ ...prev, canvasX: newX, canvasY: newY, mediaCanvasX: newX, mediaCanvasY: newY, pixels: nextPixels, mediaPixels: nextPixels }));
                             }}
                             className="btn-styled text-[10px] px-3 py-2"
-                            style={{ borderRadius: '12px' }}
-                            title="Center media"
+                            style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                            title={isSaving ? undefined : "Center media"}
                           >
                             <Crosshair size={13} />
                           </button>
                         )}
                         <button
                           type="button"
-                          onClick={() => setShowGrid(prev => !prev)}
+                          disabled={isSaving}
+                          onClick={() => !isSaving && setShowGrid(prev => !prev)}
                           className={`btn-styled text-[10px] px-3 py-2 ${!showGrid ? 'inactive' : ''}`}
-                          style={{ borderRadius: '12px' }}
-                          title="Toggle pixel matrix grid"
+                          style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                          title={isSaving ? undefined : "Toggle pixel matrix grid"}
                         >
                           <Grid3X3 size={13} />
                         </button>
                         <button
                           type="button"
-                          onClick={() => setShowGuides(prev => !prev)}
+                          disabled={isSaving}
+                          onClick={() => !isSaving && setShowGuides(prev => !prev)}
                           className={`btn-styled text-[10px] px-3 py-2 ${!showGuides ? 'inactive' : ''}`}
-                          style={{ borderRadius: '12px' }}
-                          title="Toggle centering guides"
+                          style={{ borderRadius: '12px', opacity: isSaving ? 0.35 : 1, cursor: isSaving ? 'not-allowed' : 'pointer', pointerEvents: isSaving ? 'none' : 'auto' }}
+                          title={isSaving ? undefined : "Toggle centering guides"}
                         >
                           <ScanLine size={13} />
                         </button>
@@ -6999,42 +7858,147 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     {form.imgSrc && (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '4px' }}>
                         {/* Zoom Slider */}
-                        <div className="brightness-rail glass-panel" style={{ padding: '12px 16px', width: '100%', display: 'flex', alignItems: 'center', gap: '14px' }}>
+                        <div 
+                          className="brightness-rail glass-panel" 
+                          onClick={(e) => {
+                            const input = e.currentTarget.querySelector('input[type="range"]');
+                            if (input && !isSaving) input.focus();
+                          }}
+                          onWheel={(e) => {
+                            if (isSaving || !imageObjRef.current) return;
+                            e.preventDefault();
+                            const dir = e.deltaY < 0 ? 1 : -1;
+                            const step = e.shiftKey ? 0.5 : 0.05;
+                            const currentZoom = form.zoom || 1.0;
+                            const newZoom = Math.min(10.0, Math.max(0.1, Math.round((currentZoom + dir * step) * 100) / 100));
+                            const oldZoom = currentZoom;
+                            const oldX = form.canvasX || 0;
+                            const oldY = form.canvasY || 0;
+                            const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                            const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                            const nextPixels = runCropRender(
+                              imageObjRef.current,
+                              newX,
+                              newY,
+                              form.dwBase * newZoom,
+                              form.dhBase * newZoom,
+                              form.bgColor || '#000000'
+                            );
+                            setForm(prev => ({
+                              ...prev,
+                              zoom: newZoom,
+                              canvasX: newX,
+                              canvasY: newY,
+                              mediaZoom: newZoom,
+                              mediaCanvasX: newX,
+                              mediaCanvasY: newY,
+                              pixels: nextPixels,
+                              mediaPixels: nextPixels
+                            }));
+                          }}
+                          style={{ padding: '12px 16px', width: '100%', display: 'flex', alignItems: 'center', gap: '14px', opacity: isSaving ? 0.35 : 1, pointerEvents: isSaving ? 'none' : 'auto', cursor: isSaving ? 'not-allowed' : 'default' }}
+                        >
                           <Search className="text-emerald-400 flex-shrink-0" size={17} />
-                          <input 
-                            type="range" min="0.1" max="10.0" step="0.05" 
-                            value={form.zoom || 1} 
-                            onChange={e => {
-                              const newZoom = parseFloat(e.target.value);
-                              if (!imageObjRef.current) return;
-                              const oldZoom = form.zoom || 1.0;
-                              const oldX = form.canvasX || 0;
-                              const oldY = form.canvasY || 0;
-                              
-                              const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
-                              const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
-                              
-                              const nextPixels = runCropRender(
-                                imageObjRef.current,
-                                newX,
-                                newY,
-                                form.dwBase * newZoom,
-                                form.dhBase * newZoom,
-                                form.bgColor || '#000000'
-                              );
-                              
-                              setForm(prev => ({
-                                ...prev,
-                                zoom: newZoom,
-                                canvasX: newX,
-                                canvasY: newY,
-                                pixels: nextPixels
-                              }));
-                            }}
-                            className="h-slider"
-                            style={{ flex: 1 }}
-                          />
-                          <span className="font-bold text-slate-400 w-12 text-[11px] text-right">{(form.zoom || 1).toFixed(1)}x</span>
+                          <div style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', alignItems: 'center' }}>
+                            <input 
+                              type="range" min="0.1" max="10.0" step="0.05" 
+                              tabIndex={0}
+                              value={form.zoom || 1} 
+                              disabled={isSaving}
+                              onPointerDown={(e) => e.currentTarget.focus()}
+                              onMouseDown={(e) => e.currentTarget.focus()}
+                              onClick={(e) => e.currentTarget.focus()}
+                              onKeyDown={(e) => {
+                                const isArrowKey = ['ArrowLeft', 'ArrowDown', 'ArrowRight', 'ArrowUp'].includes(e.key);
+                                const isPlusKey = e.key === '+' || e.key === '=' || e.code === 'NumpadAdd';
+                                const isMinusKey = e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract';
+
+                                if (e.code === 'Space' || e.key === ' ') {
+                                  e.preventDefault();
+                                  return;
+                                }
+
+                                if (isArrowKey || isPlusKey || isMinusKey) {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  const dir = (e.key === 'ArrowLeft' || e.key === 'ArrowDown' || isMinusKey) ? -1 : 1;
+                                  const step = e.shiftKey ? 0.5 : 0.05;
+                                  const currentZoom = form.zoom || 1.0;
+                                  const newZoom = Math.min(10.0, Math.max(0.1, Math.round((currentZoom + dir * step) * 100) / 100));
+                                  if (!imageObjRef.current) {
+                                    setForm(prev => ({ ...prev, zoom: newZoom, mediaZoom: newZoom }));
+                                    return;
+                                  }
+                                  const oldZoom = currentZoom;
+                                  const oldX = form.canvasX || 0;
+                                  const oldY = form.canvasY || 0;
+                                  const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                                  const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                                  const nextPixels = runCropRender(
+                                    imageObjRef.current,
+                                    newX,
+                                    newY,
+                                    form.dwBase * newZoom,
+                                    form.dhBase * newZoom,
+                                    form.bgColor || '#000000'
+                                  );
+                                  setForm(prev => ({
+                                    ...prev,
+                                    zoom: newZoom,
+                                    canvasX: newX,
+                                    canvasY: newY,
+                                    mediaZoom: newZoom,
+                                    mediaCanvasX: newX,
+                                    mediaCanvasY: newY,
+                                    pixels: nextPixels,
+                                    mediaPixels: nextPixels
+                                  }));
+                                }
+                              }}
+                              onChange={e => {
+                                if (isSaving) return;
+                                const newZoom = parseFloat(e.target.value);
+                                if (!imageObjRef.current) return;
+                                const oldZoom = form.zoom || 1.0;
+                                const oldX = form.canvasX || 0;
+                                const oldY = form.canvasY || 0;
+                                
+                                const newX = 32 - (32 - oldX) * (newZoom / oldZoom);
+                                const newY = 10 - (10 - oldY) * (newZoom / oldZoom);
+                                
+                                const nextPixels = runCropRender(
+                                  imageObjRef.current,
+                                  newX,
+                                  newY,
+                                  form.dwBase * newZoom,
+                                  form.dhBase * newZoom,
+                                  form.bgColor || '#000000'
+                                );
+                                
+                                setForm(prev => ({
+                                  ...prev,
+                                  zoom: newZoom,
+                                  canvasX: newX,
+                                  canvasY: newY,
+                                  mediaZoom: newZoom,
+                                  mediaCanvasX: newX,
+                                  mediaCanvasY: newY,
+                                  pixels: nextPixels,
+                                  mediaPixels: nextPixels
+                                }));
+                              }}
+                              className="brightness-slider"
+                              style={{
+                                position: 'relative',
+                                width: '100%',
+                                outline: 'none',
+                                boxShadow: 'none',
+                                '--fill': `calc(8px + (100% - 16px) * ${Math.max(0, Math.min(1, ((form.zoom || 1) - 0.1) / 9.9))})`,
+                                cursor: isSaving ? 'not-allowed' : 'pointer'
+                              }}
+                            />
+                          </div>
+                          <span className="font-bold text-slate-400 text-[11px] text-right flex-shrink-0" style={{ width: '42px', minWidth: '42px', maxWidth: '42px', flexShrink: 0, fontVariantNumeric: 'tabular-nums', display: 'inline-block' }}>{(form.zoom || 1).toFixed(1)}x</span>
                           <div
                             className="power-btn off"
                             style={{
@@ -7047,23 +8011,26 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center',
-                              cursor: 'pointer',
+                              cursor: isSaving ? 'not-allowed' : 'pointer',
+                              opacity: isSaving ? 0.45 : 1,
                               transition: 'all 0.2s',
                               flexShrink: 0
                             }}
-                            title="Fit to Width"
+                            title={isSaving ? undefined : "Fit to Width"}
                             onMouseOver={e => {
+                              if (isSaving) return;
                               e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
                               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
                               e.currentTarget.style.transform = 'scale(1.05)';
                             }}
                             onMouseOut={e => {
+                              if (isSaving) return;
                               e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
                               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
                               e.currentTarget.style.transform = 'none';
                             }}
                             onClick={() => {
-                              if (!imageObjRef.current) return;
+                              if (isSaving || !imageObjRef.current) return;
                               const targetZoom = Math.min(Math.max(64 / (form.dwBase || 64), 0.1), 10.0);
                               const newX = 0;
                               const newY = (20 - (form.dhBase || 20) * targetZoom) / 2;
@@ -7080,7 +8047,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 zoom: targetZoom,
                                 canvasX: newX,
                                 canvasY: newY,
-                                pixels: nextPixels
+                                mediaZoom: targetZoom,
+                                mediaCanvasX: newX,
+                                mediaCanvasY: newY,
+                                pixels: nextPixels,
+                                mediaPixels: nextPixels
                               }));
                             }}
                           >
@@ -7099,23 +8070,26 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center',
-                              cursor: 'pointer',
+                              cursor: isSaving ? 'not-allowed' : 'pointer',
+                              opacity: isSaving ? 0.45 : 1,
                               transition: 'all 0.2s',
                               flexShrink: 0
                             }}
-                            title="Fit to Height"
+                            title={isSaving ? undefined : "Fit to Height"}
                             onMouseOver={e => {
+                              if (isSaving) return;
                               e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
                               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
                               e.currentTarget.style.transform = 'scale(1.05)';
                             }}
                             onMouseOut={e => {
+                              if (isSaving) return;
                               e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
                               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
                               e.currentTarget.style.transform = 'none';
                             }}
                             onClick={() => {
-                              if (!imageObjRef.current) return;
+                              if (isSaving || !imageObjRef.current) return;
                               const targetZoom = Math.min(Math.max(20 / (form.dhBase || 20), 0.1), 10.0);
                               const newY = 0;
                               const newX = (64 - (form.dwBase || 64) * targetZoom) / 2;
@@ -7132,7 +8106,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 zoom: targetZoom,
                                 canvasX: newX,
                                 canvasY: newY,
-                                pixels: nextPixels
+                                mediaZoom: targetZoom,
+                                mediaCanvasX: newX,
+                                mediaCanvasY: newY,
+                                pixels: nextPixels,
+                                mediaPixels: nextPixels
                               }));
                             }}
                           >
@@ -7151,23 +8129,26 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center',
-                              cursor: 'pointer',
+                              cursor: isSaving ? 'not-allowed' : 'pointer',
+                              opacity: isSaving ? 0.45 : 1,
                               transition: 'all 0.2s',
                               flexShrink: 0
                             }}
-                            title="Reset Zoom (1.0x)"
+                            title={isSaving ? undefined : "Reset Zoom (1.0x)"}
                             onMouseOver={e => {
+                              if (isSaving) return;
                               e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
                               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.15)';
                               e.currentTarget.style.transform = 'scale(1.05)';
                             }}
                             onMouseOut={e => {
+                              if (isSaving) return;
                               e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
                               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.08)';
                               e.currentTarget.style.transform = 'none';
                             }}
                             onClick={() => {
-                              if (!imageObjRef.current) return;
+                              if (isSaving || !imageObjRef.current) return;
                               const newZoom = 1.0;
                               const oldZoom = form.zoom || 1.0;
                               const oldX = form.canvasX || 0;
@@ -7187,7 +8168,11 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 zoom: newZoom,
                                 canvasX: newX,
                                 canvasY: newY,
-                                pixels: nextPixels
+                                mediaZoom: newZoom,
+                                mediaCanvasX: newX,
+                                mediaCanvasY: newY,
+                                pixels: nextPixels,
+                                mediaPixels: nextPixels
                               }));
                             }}
                           >
@@ -7199,6 +8184,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         <HslColorSlider 
                           label="Background Colour" 
                           value={form.bgColor || '#000000'} 
+                          disabled={isSaving}
                           onChange={val => {
                             setForm(prev => ({ ...prev, bgColor: val }));
                             if (imageObjRef.current) {
@@ -7210,7 +8196,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 form.dhBase * (form.zoom || 1),
                                 val
                               );
-                              setForm(prev => ({ ...prev, bgColor: val, pixels: nextPixels }));
+                              setForm(prev => ({ ...prev, bgColor: val, pixels: nextPixels, mediaPixels: nextPixels }));
                             }
                           }} 
                         />
@@ -7225,11 +8211,13 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     <HslColorSlider 
                       label="Text Colour" 
                       value={form.textColor || '#ffffff'} 
+                      disabled={isSaving}
                       onChange={val => setForm(prev => ({ ...prev, textColor: val }))} 
                     />
                     <HslColorSlider 
                       label="Background Colour" 
                       value={form.bgColor || '#000000'} 
+                      disabled={isSaving}
                       onChange={val => setForm(prev => ({ ...prev, bgColor: val }))} 
                     />
                   </div>
@@ -7244,11 +8232,13 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                       <button
                         type="button"
                         className="input-field"
+                        disabled={isSaving}
                         style={{
                           width: '100%',
                           background: '#1a1a1f',
                           color: '#fff',
-                          cursor: 'pointer',
+                          cursor: isSaving ? 'not-allowed' : 'pointer',
+                          opacity: isSaving ? 0.45 : 1,
                           padding: '10px 14px',
                           borderRadius: '14px',
                           display: 'flex',
@@ -7256,7 +8246,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           justifyContent: 'space-between',
                           textAlign: 'left'
                         }}
-                        onClick={() => setAnimDropdownOpen(prev => !prev)}
+                        onClick={() => !isSaving && setAnimDropdownOpen(prev => !prev)}
                       >
                         <span style={{ fontSize: '12px', textTransform: 'none', whiteSpace: 'nowrap' }}>{form.animation || 'continuous left shift'}</span>
                         <ChevronDown 
@@ -7266,7 +8256,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         />
                       </button>
 
-                      {animDropdownOpen && (
+                      {animDropdownOpen && !isSaving && (
                         <>
                           <div 
                             className="fixed inset-0 z-40" 
@@ -7328,10 +8318,21 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 </div>}
                 <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
                   <button 
-                    className="btn-styled py-4" 
-                    style={{ flex: 3 }}
+                    className={`btn-styled py-4 ${isSaving ? 'btn-save-processing' : ''}`}
+                    style={{ 
+                      flex: 3,
+                      background: (!canSavePreset || isSaving) ? 'rgba(255, 255, 255, 0.08)' : undefined,
+                      color: (!canSavePreset || isSaving) ? '#94a3b8' : '#ffffff',
+                      opacity: (!canSavePreset || isSaving) ? 0.5 : 1,
+                      cursor: (!canSavePreset || isSaving) ? 'not-allowed' : 'pointer',
+                      boxShadow: (!canSavePreset || isSaving) ? 'none' : undefined,
+                      transform: (!canSavePreset || isSaving) ? 'none' : undefined,
+                      pointerEvents: (!canSavePreset || isSaving) ? 'none' : 'auto',
+                      transition: (!canSavePreset || isSaving) ? 'none' : 'all 0.2s ease',
+                      filter: (!canSavePreset || isSaving) ? 'grayscale(1)' : 'none'
+                    }}
                     onClick={handleSave}
-                    disabled={!canSavePreset}
+                    disabled={!canSavePreset || isSaving}
                   >
                     <Save size={16} /> {isSaving ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                       <span>Processing...</span>
@@ -7346,11 +8347,30 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                   </button>
                   {editingId && (
                     <button 
-                      className="btn-styled py-4 bg-red-500/10 border-red-500/20 text-red-400 hover:bg-red-500/20" 
-                      style={{ flex: 1, minWidth: 'auto' }}
-                      onClick={() => deletePreset()}
+                      type="button"
+                      className="btn-disconnect py-4" 
+                      style={{ 
+                        flex: 1, 
+                        minWidth: 'auto', 
+                        justifyContent: 'center',
+                        background: 'rgba(239, 68, 68, 0.1)',
+                        border: '1px solid rgba(239, 68, 68, 0.2)',
+                        color: '#ef4444',
+                        opacity: isSaving ? 0.45 : 1, 
+                        cursor: isSaving ? 'not-allowed' : 'pointer' 
+                      }}
+                      onMouseOver={e => {
+                        if (isSaving) return;
+                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)';
+                      }}
+                      onMouseOut={e => {
+                        if (isSaving) return;
+                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)';
+                      }}
+                      disabled={isSaving}
+                      onClick={() => !isSaving && deletePreset()}
                     >
-                      <Trash2 size={18} /> Delete
+                      <Trash2 size={16} /> Delete
                     </button>
                   )}
                 </div>
@@ -7361,6 +8381,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
             <AnimatePresence>
               {isAiExpanded && form.mode === 'image' && (
                 <motion.div
+                  data-ai-side-panel="true"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
@@ -7376,14 +8397,17 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     overflowY: 'auto',
                     borderRadius: '24px',
                     display: 'flex',
-                    flexDirection: 'column'
+                    flexDirection: 'column',
+                    opacity: isSaving ? 0.45 : 1,
+                    pointerEvents: isSaving ? 'none' : 'auto',
+                    cursor: isSaving ? 'not-allowed' : 'default'
                   }}
                 >
                   <GeminiMediaGenerator 
                     ref={aiGeneratorRef}
                     isExpanded={true}
                     onToggleExpand={setIsAiExpanded}
-                    onCloseSidePanel={() => setIsAiExpanded(false)}
+                    onCloseSidePanel={() => !isSaving && setIsAiExpanded(false)}
                     onProviderChange={setAiProvider}
                     form={form} 
                     setForm={setForm} 

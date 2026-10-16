@@ -1287,9 +1287,12 @@ async def pause_reconnect():
 
 @app.post("/disconnect")
 async def disconnect():
-    global connected_client, connection_ready, current_display_mode, password_enabled, connected_device_id, _suppress_auto_reconnect, _connection_intent
+    global connected_client, connection_ready, current_display_mode, password_enabled, connected_device_id, _suppress_auto_reconnect, _connection_intent, _reconnect_task
     _suppress_auto_reconnect = True
     _connection_intent += 1
+    if _reconnect_task and not _reconnect_task.done():
+        _reconnect_task.cancel()
+        _reconnect_task = None
     async with preset_switch_lock:
         async with connect_lock:
             await cancel_active_worker()

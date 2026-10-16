@@ -76,7 +76,17 @@ body {
   overflow: hidden;
 }
 .btn-styled:hover { transform: scale(1.02); box-shadow: var(--neon-shadow); }
-.btn-styled:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
+.btn-styled:disabled { 
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #94a3b8 !important;
+  opacity: 0.5 !important; 
+  cursor: not-allowed !important; 
+  transform: none !important; 
+  box-shadow: none !important; 
+  pointer-events: auto !important; 
+  transition: none !important;
+  filter: grayscale(1) !important;
+}
 .btn-styled.inactive {
   background: rgba(255,255,255,0.05);
   color: var(--text-muted);
@@ -247,6 +257,37 @@ img.scrolling-preview {
   align-items: center;
   gap: 14px;
   border-radius: 18px;
+  border: 1px solid var(--glass-border);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  position: relative;
+  overscroll-behavior: contain;
+}
+
+.brightness-rail::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border: 1.5px solid transparent;
+  border-radius: inherit;
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary)) border-box;
+  -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 10;
+  box-sizing: border-box;
+}
+
+.brightness-rail:focus-within {
+  border-color: transparent !important;
+  box-shadow: 0 0 16px rgba(139, 92, 246, 0.4), 0 0 20px rgba(236, 72, 153, 0.25) !important;
+}
+
+.brightness-rail:focus-within::after {
+  opacity: 1;
 }
 
 .preset-card {
@@ -513,6 +554,35 @@ body.preset-dragging .preset-card.empty-slot.preset-card-reserved { border-color
   box-sizing: border-box;
   background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.brightness-slider,
+.brightness-slider:focus,
+.brightness-slider:focus-visible,
+.brightness-slider:active,
+.brightness-rail input[type="range"],
+.brightness-rail input[type="range"]:focus,
+.brightness-rail input[type="range"]:focus-visible,
+.brightness-rail input[type="range"]:active {
+  outline: none !important;
+  box-shadow: none !important;
+  -webkit-tap-highlight-color: transparent !important;
+}
+
+.brightness-slider::-webkit-slider-thumb:focus,
+.brightness-slider::-webkit-slider-thumb:focus-visible,
+.brightness-slider::-moz-range-thumb:focus,
+.brightness-slider::-moz-range-thumb:focus-visible {
+  outline: none !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4) !important;
+}
+
+.brightness-slider::-webkit-slider-runnable-track:focus,
+.brightness-slider::-webkit-slider-runnable-track:focus-visible,
+.brightness-slider::-moz-range-track:focus,
+.brightness-slider::-moz-range-track:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 /* ── Connection row ── */
@@ -790,3 +860,40 @@ body.preset-dragging .preset-card.empty-slot.preset-card-reserved { border-color
   animation: spin 1s linear infinite;
   display: inline-block;
 }
+
+/* Media / Preset saving locked state: dims all inputs & buttons while saving/updating */
+.media-processing-lock {
+  cursor: not-allowed;
+}
+.media-processing-lock button,
+.media-processing-lock input,
+.media-processing-lock textarea,
+.media-processing-lock select,
+.media-processing-lock [role="slider"],
+.media-processing-lock .preview-box,
+.media-processing-lock .h-slider,
+.media-processing-lock .power-btn,
+.media-processing-lock .brightness-rail {
+  opacity: 0.45 !important;
+  cursor: not-allowed !important;
+  pointer-events: none !important;
+  box-shadow: none !important;
+}
+.media-processing-lock button img,
+.media-processing-lock button svg {
+  opacity: 0.45 !important;
+}
+
+.btn-save-processing,
+.btn-save-processing:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #94a3b8 !important;
+  opacity: 0.5 !important;
+  cursor: not-allowed !important;
+  pointer-events: none !important;
+  box-shadow: none !important;
+  transform: none !important;
+  transition: none !important;
+  filter: grayscale(1) !important;
+}
+
