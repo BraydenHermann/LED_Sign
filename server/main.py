@@ -33,7 +33,7 @@ import hashlib
 import re
 import urllib.parse
 import urllib.request
-from typing import List, Optional, Any, Union
+from typing import List, Optional, Any, Union, Dict
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -303,6 +303,7 @@ last_connected_mac: str = ""
 _reconnect_task: Optional[asyncio.Task] = None
 _suppress_auto_reconnect: bool = False
 _connection_intent: int = 0
+_session_passcodes: Dict[str, str] = {}
 
 
 class PasscodeRequiredError(Exception):
@@ -330,7 +331,7 @@ async def ui_open():
 
 async def _auto_reconnect(mac: str, delay: float = 4.0, intent: Optional[int] = None):
     """Background task: waits `delay` seconds then tries to reconnect to `mac`."""
-    global connected_client, connection_ready, _reconnect_task
+    global connected_client, connection_ready, _reconnect_task, _session_passcodes
     await asyncio.sleep(delay)
     if _suppress_auto_reconnect or (intent is not None and intent != _connection_intent):
         print("[auto_reconnect] Suppressed by an intentional disconnect or sign change.")
@@ -342,7 +343,9 @@ async def _auto_reconnect(mac: str, delay: float = 4.0, intent: Optional[int] = 
         return
     print(f"[auto_reconnect] Attempting reconnect to {mac}...")
     try:
-        req = ConnectRequest(address=mac)
+        norm_mac = (mac or "").strip().upper()
+        saved_passcode = _session_passcodes.get(norm_mac)
+        req = ConnectRequest(address=mac, passcode=saved_passcode)
         async with preset_switch_lock:
             result = await _connect_internal(req, background=True, intent=intent)
         print(f"[auto_reconnect] Reconnect result: {result}")
@@ -970,13 +973,17 @@ connect_lock = asyncio.Lock()
 
 async def _connect_internal(req: ConnectRequest, background: bool = False, intent: Optional[int] = None):
     async with connect_lock:
-        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode
+        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode, _session_passcodes
         if intent is not None and intent != _connection_intent:
             raise HTTPException(status_code=409, detail="Connection replaced by a newer request")
         if background and (_suppress_auto_reconnect or (connected_client and connected_client.is_connected)):
             return {"status": "skipped", "reason": "manual connection takes priority"}
         target_mac = (req.address or "").strip().upper()
         passcode = (req.passcode or "").strip()
+        if not passcode:
+            passcode = _session_passcodes.get(target_mac) or (
+                _session_passcodes.get(last_connected_mac) if last_connected_mac else ""
+            ) or ""
         if passcode and (len(passcode) != 6 or not passcode.isascii() or not passcode.isdigit()):
             raise HTTPException(status_code=422, detail="Bluetooth passcode must be exactly six digits")
         if not passcode and connected_client and connected_client.is_connected and connection_ready:
@@ -1228,6 +1235,13 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             if intent is not None and intent != _connection_intent:
                 raise ConnectSupersededError()
             last_connected_mac = client_address.upper() if client_address else ""
+            if passcode:
+                if last_connected_mac:
+                    _session_passcodes[last_connected_mac] = passcode
+                if target_mac:
+                    _session_passcodes[target_mac] = passcode
+                if client_address:
+                    _session_passcodes[client_address.upper()] = passcode
             passcode_status = ("enabled" if reported_password else "disabled") if reported_password is not None else ("authenticated" if auth_result is not None and auth_result["ok"] else "unknown")
             return {"status": "success", "address": client_address, "passcode_status": passcode_status}
         except ConnectSupersededError:
@@ -1243,6 +1257,11 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             raise HTTPException(status_code=409, detail="Connection replaced by a newer request")
         except PasscodeRequiredError as exc:
             invalid = exc.error_code == 13
+            if invalid:
+                if target_mac in _session_passcodes:
+                    _session_passcodes.pop(target_mac, None)
+                if last_connected_mac in _session_passcodes:
+                    _session_passcodes.pop(last_connected_mac, None)
             raise HTTPException(
                 status_code=401,
                 detail={"code": "invalid_passcode" if invalid else "passcode_required",
@@ -1327,8 +1346,10 @@ async def get_sign_password():
 @app.put("/sign-password")
 async def set_sign_password(req: SignPasswordRequest):
     """Configure the sign password and its LOY-hosted recovery contact."""
+    global _session_passcodes
     if not connected_client or not connected_client.is_connected or not connection_ready:
         raise HTTPException(status_code=409, detail="Please connect to the sign before changing its password")
+    curr_mac = ((getattr(connected_client, "address", None) if connected_client else None) or last_connected_mac or "").upper()
     if not req.enabled:
         try:
             result = await _password_request(protocol.password_disable_command())
@@ -1336,6 +1357,8 @@ async def set_sign_password(req: SignPasswordRequest):
             raise HTTPException(status_code=502, detail="Please try again: the sign did not confirm the passcode change")
         if not result["ok"] or await _read_sign_password_state() is not False:
             raise HTTPException(status_code=502, detail="Please try again: the sign did not confirm that the passcode is off")
+        if curr_mac:
+            _session_passcodes.pop(curr_mac, None)
         return {"enabled": False}
     code = (req.passcode or "").strip()
     contact = (req.recovery_contact or "").strip()
@@ -1356,6 +1379,8 @@ async def set_sign_password(req: SignPasswordRequest):
         raise HTTPException(status_code=502, detail="Please try again: the sign rejected the passcode change")
     if await _read_sign_password_state() is not True:
         raise HTTPException(status_code=502, detail="Please try again: the sign did not confirm that the passcode is on")
+    if curr_mac:
+        _session_passcodes[curr_mac] = code
     try:
         result = await asyncio.to_thread(
             _loy_recovery_request, "save_device_info",

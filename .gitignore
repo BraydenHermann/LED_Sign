@@ -23,6 +23,7 @@ _loy_static_analysis/
 server/credentials.json
 server/token.json
 server/recovery_contacts.json
+server/.oauth_pending.json
 
 # Scratch scripts and temporary files
 scratch/

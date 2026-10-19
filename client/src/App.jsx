@@ -1609,6 +1609,33 @@ export default function App() {
   const autoConnectTried = useRef(false);
   const manuallyDisconnectedRef = useRef(false);
 
+  const sessionPasscodesRef = useRef({});
+  const getSessionPasscode = (addr) => {
+    if (!addr) return '';
+    const norm = addr.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+    try {
+      const fromSession = sessionStorage.getItem(`loy_session_passcode_${norm}`);
+      if (fromSession) return fromSession;
+    } catch (e) {}
+    return sessionPasscodesRef.current[norm] || '';
+  };
+  const setSessionPasscode = (addr, code) => {
+    if (!addr || !code) return;
+    const norm = addr.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+    sessionPasscodesRef.current[norm] = code;
+    try {
+      sessionStorage.setItem(`loy_session_passcode_${norm}`, code);
+    } catch (e) {}
+  };
+  const clearSessionPasscode = (addr) => {
+    if (!addr) return;
+    const norm = addr.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+    delete sessionPasscodesRef.current[norm];
+    try {
+      sessionStorage.removeItem(`loy_session_passcode_${norm}`);
+    } catch (e) {}
+  };
+
   const isSignConnecting = Boolean(
     isConnecting || 
     (!status.connected && !manuallyDisconnectedRef.current && Boolean(localStorage.getItem('loy_last_connected_mac')) && !autoConnectTried.current && !connectionFailed)
@@ -1700,6 +1727,7 @@ export default function App() {
       if (res.data?.connected) {
         hadLiveConnectionRef.current = true;
         disconnectedStatusPollsRef.current = 0;
+        autoConnectTried.current = false;
       } else if (hadLiveConnectionRef.current) {
         disconnectedStatusPollsRef.current += 1;
         if (disconnectedStatusPollsRef.current < 3) return res.data;
@@ -1749,19 +1777,20 @@ export default function App() {
 
   // Give the user time to choose another sign before trying the last one.
   useEffect(() => {
-    const lastConnected = localStorage.getItem('loy_last_connected_mac');
-    if (!hasFetchedStatus || status.connected || !lastConnected || autoConnectTried.current || isConnecting || apiError || scanOpen || manuallyDisconnectedRef.current) return;
+    const target = preferredSignRef.current || localStorage.getItem('loy_last_connected_mac');
+    if (!hasFetchedStatus || status.connected || !target || autoConnectTried.current || isConnecting || apiError || scanOpen || manuallyDisconnectedRef.current) return;
     const timer = window.setTimeout(() => {
-      if (autoConnectTried.current || preferredSignRef.current || choosingSignRef.current || manuallyDisconnectedRef.current) return;
-      console.log("[auto-connect] Attempting to reconnect to most recently connected sign:", lastConnected);
+      if (autoConnectTried.current || choosingSignRef.current || manuallyDisconnectedRef.current) return;
+      console.log("[auto-connect] Attempting to reconnect to sign:", target);
       autoConnectTried.current = true;
-      doConnect(lastConnected, false, true);
+      doConnect(target, false, true);
     }, 1200);
     return () => window.clearTimeout(timer);
   }, [hasFetchedStatus, status.connected, isConnecting, apiError, scanOpen]);
 
   const doConnect = async (addr, isRetry = false, isAuto = false, passcode = '') => {
     if (!addr) return;
+    const effectivePasscode = passcode || getSessionPasscode(addr) || getSessionPasscode(localStorage.getItem('loy_last_connected_mac'));
     if (!isAuto) {
       manuallyDisconnectedRef.current = false;
       autoConnectTried.current = true;
@@ -1784,7 +1813,7 @@ export default function App() {
     console.log(`[connect] ${isRetry ? 'Retry attempt' : 'Connecting'} to:`, addr, isAuto ? '(auto)' : '');
     try {
       const timeoutMs = 75000;
-      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr, ...(passcode ? { passcode } : {}) }, { timeout: timeoutMs, signal: controller.signal });
+      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr, ...(effectivePasscode ? { passcode: effectivePasscode } : {}) }, { timeout: timeoutMs, signal: controller.signal });
       if (activeConnectRef.current?.id !== requestId) return;
       const connectedAddr = resPost.data?.address || addr;
       if (connectedAddr && connectedAddr.toUpperCase().startsWith('FF:24:10:29:') && (!isAuto || !choosingSignRef.current)) {
@@ -1799,7 +1828,13 @@ export default function App() {
         if (!choosingSignRef.current) setScanOpen(false);
         setConnectionFailed(false);
         if (!isAuto) setConnectionTarget(null);
-        if (passcode) setPasscodeTarget(null);
+        if (effectivePasscode) {
+          setSessionPasscode(addr, effectivePasscode);
+          setSessionPasscode(connectedAddr, effectivePasscode);
+          if (res.data.address) setSessionPasscode(res.data.address, effectivePasscode);
+          setPasscodeTarget(null);
+          setBluetoothPasscode(effectivePasscode);
+        }
         if (!isAuto || !choosingSignRef.current) {
           localStorage.setItem('loy_last_connected_mac', res.data.address || connectedAddr);
           localStorage.setItem('loy_mac', res.data.address || connectedAddr);
@@ -1813,15 +1848,20 @@ export default function App() {
       if (controller.signal.aborted) return;
       console.error(`[connect] ${isRetry ? 'Retry' : 'Attempt 1'} failed:`, e.message);
       if (e.response?.status === 401 && ['passcode_required', 'invalid_passcode'].includes(e.response?.data?.detail?.code)) {
-        // Keep the credential transient: it is never written to browser
+        // Keep the credential transient: it is never written to persistent
         // storage, recent-device entries, or backend logs.
+        if (e.response.data.detail.code === 'invalid_passcode') {
+          clearSessionPasscode(addr);
+          clearSessionPasscode(localStorage.getItem('loy_last_connected_mac'));
+        }
         autoConnectTried.current = true;
         setConnectionTarget(null);
         setScanOpen(true);
         setPasscodeTarget(addr);
+        setBluetoothPasscode(getSessionPasscode(addr));
         setPasscodeError(e.response.data.detail.code === 'invalid_passcode'
           ? 'Incorrect Passcode. Please try again.'
-          : passcode ? 'The sign still requires authentication. Please check the Passcode and try again.' : '');
+          : effectivePasscode ? 'The sign still requires authentication. Please check the Passcode and try again.' : '');
         return;
       }
       if (!e.response) {
@@ -2898,6 +2938,8 @@ export default function App() {
               setPasscodeError={setPasscodeError}
               onSubmitPasscode={submitBluetoothPasscode}
               onClosePasscode={() => { setPasscodeTarget(null); setBluetoothPasscode(''); setPasscodeError(''); }}
+              setSessionPasscode={setSessionPasscode}
+              clearSessionPasscode={clearSessionPasscode}
               syncHardwareSlots={syncHardwareSlots}
               fetchStatus={fetchStatus}
               presetView={presetView}
@@ -2966,7 +3008,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, isSignUpdating }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, isSignUpdating }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -4664,6 +4706,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   enabled: passwordEnabled,
                   ...(passwordEnabled ? { passcode: newPassword, recovery_contact: recoveryContact.trim() } : {})
                 });
+                const currentAddr = status?.address || macAddress;
+                if (passwordEnabled) {
+                  if (typeof setSessionPasscode === 'function') setSessionPasscode(currentAddr, newPassword);
+                  setBluetoothPasscode(newPassword);
+                } else {
+                  if (typeof clearSessionPasscode === 'function') clearSessionPasscode(currentAddr);
+                  setBluetoothPasscode('');
+                }
                 if (typeof fetchStatus === 'function') await fetchStatus();
               } catch (error) {
                 setPasswordSettingsError(error.response?.data?.detail || error.message);
