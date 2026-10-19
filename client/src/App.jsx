@@ -4747,12 +4747,19 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
   }, [status.calendar_connected, events]);
 
 
+  const [signingIn, setSigningIn] = useState(false);
+
   const handleSignIn = async () => {
+    if (signingIn) return;
+    setSigningIn(true);
+    setCalError('');
     try {
       const res = await axios.get(`${API_BASE}/auth/url`);
       window.open(res.data.url, '_blank');
     } catch (e) {
       setCalError(e.response?.data?.detail || e.message);
+    } finally {
+      setTimeout(() => setSigningIn(false), 2500);
     }
   };
 
@@ -4845,6 +4852,7 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
           <p className="text-slate-400" style={{ marginBottom: '24px' }}>Sign in with Google to see today's meetings.</p>
           <button 
             onClick={handleSignIn}
+            disabled={signingIn}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -4857,7 +4865,8 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
               fontSize: '16px',
               fontWeight: '500',
               border: 'none',
-              cursor: 'pointer',
+              cursor: signingIn ? 'not-allowed' : 'pointer',
+              opacity: signingIn ? 0.7 : 1,
               fontFamily: 'Roboto, Arial, sans-serif',
               boxShadow: '0 1px 2px 0 rgba(0,0,0,0.1)'
             }}
@@ -4868,12 +4877,12 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
               <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
               <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
             </svg>
-            Sign in with Google
+            {signingIn ? 'Connecting...' : 'Sign in with Google'}
           </button>
         </div>
       ) : events?.length === 0 ? (
-        <div className="glass-panel w-full p-12 text-center">
-          <p className="text-slate-500">No events scheduled for today.</p>
+        <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+          <p className="text-slate-400">No events scheduled today.</p>
         </div>
       ) : (
         <div className="w-full grid grid-cols-1 gap-4">

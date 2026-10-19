@@ -18,6 +18,7 @@ _SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 import io
+import html
 import json as _json
 import asyncio
 import struct
@@ -1702,10 +1703,64 @@ async def auth_url():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/auth/callback")
-async def auth_callback(code: str):
+async def auth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    if error:
+        return HTMLResponse(
+            status_code=400,
+            content=f"""<!DOCTYPE html>
+<html>
+<head><title>Authentication Failed</title></head>
+<body style="background:#050505;color:#f8fafc;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="background:rgba(20,20,25,0.9);border:1px solid rgba(255,255,255,0.1);border-radius:24px;padding:40px;text-align:center;">
+    <h2 style="margin:0 0 12px;color:#f87171;">Authentication Failed</h2>
+    <p style="margin:0;color:#94a3b8;">{html.escape(error)}</p>
+  </div>
+</body>
+</html>"""
+        )
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code from Google.")
     try:
-        calendar_service.fetch_token(code)
-        return HTMLResponse(content="<h1>Authentication successful! You can close this window now.</h1><script>window.close();</script>")
+        calendar_service.fetch_token(code=code, state=state)
+        return HTMLResponse(content="""<!DOCTYPE html>
+<html>
+<head>
+  <title>Connected to Google Calendar</title>
+  <style>
+    body {
+      background: #050505;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .card {
+      background: rgba(20, 20, 25, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 24px;
+      padding: 40px;
+      text-align: center;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    h2 { margin: 0 0 12px 0; font-size: 22px; color: #f8fafc; }
+    p { margin: 0; color: #94a3b8; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Connected to Google Calendar!</h2>
+    <p>You can close this window now.</p>
+  </div>
+  <script>
+    setTimeout(() => {
+      try { window.close(); } catch(e) {}
+    }, 1500);
+  </script>
+</body>
+</html>""")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1715,6 +1770,11 @@ async def logout():
         if os.path.exists(calendar_service.token_path):
             os.remove(calendar_service.token_path)
         calendar_service.creds = None
+        if hasattr(calendar_service, '_state_storage_path') and os.path.exists(calendar_service._state_storage_path):
+            try:
+                os.remove(calendar_service._state_storage_path)
+            except Exception:
+                pass
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

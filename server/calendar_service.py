@@ -1,3 +1,6 @@
+import json
+import secrets
+import time
 import datetime
 import os.path
 import traceback
@@ -78,6 +81,9 @@ class CalendarService:
         else:
             self.token_path = os.path.join(base_dir, token_path) if not os.path.isabs(token_path) else token_path
         self.creds = None
+        self._pending_states = {}
+        self._last_code_verifier = None
+        self._state_storage_path = os.path.join(base_dir, ".oauth_pending.json")
         if os.path.exists(self.token_path):
             try:
                 self.creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
@@ -90,10 +96,20 @@ class CalendarService:
             with open(self.token_path, 'w') as f:
                 f.write(self.creds.to_json())
 
-    def _create_flow(self):
+    def _create_flow(self, code_verifier: Optional[str] = None, state: Optional[str] = None):
         client_id = os.getenv("GOOGLE_CLIENT_ID")
         client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
         
+        flow_kwargs = {
+            "scopes": SCOPES,
+            "redirect_uri": REDIRECT_URI,
+        }
+        if state:
+            flow_kwargs["state"] = state
+        if code_verifier:
+            flow_kwargs["code_verifier"] = code_verifier
+            flow_kwargs["autogenerate_code_verifier"] = False
+
         if client_id and client_secret:
             client_config = {
                 "web": {
@@ -103,34 +119,125 @@ class CalendarService:
                     "token_uri": "https://oauth2.googleapis.com/token",
                 }
             }
-            return Flow.from_client_config(
-                client_config, scopes=SCOPES, redirect_uri=REDIRECT_URI
-            )
+            try:
+                flow = Flow.from_client_config(client_config, **flow_kwargs)
+            except TypeError:
+                flow_kwargs.pop("code_verifier", None)
+                flow_kwargs.pop("autogenerate_code_verifier", None)
+                flow = Flow.from_client_config(client_config, **flow_kwargs)
         else:
             if not os.path.exists(self.credentials_path):
                 raise FileNotFoundError(
                     "Google OAuth credentials not found. Either set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET "
                     "environment variables, or provide a credentials.json file in the server/ folder."
                 )
-            return Flow.from_client_secrets_file(
-                self.credentials_path, scopes=SCOPES, redirect_uri=REDIRECT_URI
-            )
+            try:
+                flow = Flow.from_client_secrets_file(self.credentials_path, **flow_kwargs)
+            except TypeError:
+                flow_kwargs.pop("code_verifier", None)
+                flow_kwargs.pop("autogenerate_code_verifier", None)
+                flow = Flow.from_client_secrets_file(self.credentials_path, **flow_kwargs)
+
+        if code_verifier:
+            flow.code_verifier = code_verifier
+            if hasattr(flow, "oauth2session") and flow.oauth2session:
+                flow.oauth2session.code_verifier = code_verifier
+
+        return flow
+
+    def _save_oauth_state(self, state: str, code_verifier: str):
+        self._pending_states[state] = {
+            "code_verifier": code_verifier,
+            "created_at": time.time()
+        }
+        self._last_code_verifier = code_verifier
+        try:
+            with open(self._state_storage_path, 'w') as f:
+                json.dump({
+                    "states": self._pending_states,
+                    "latest": code_verifier
+                }, f)
+        except Exception as e:
+            print(f"[calendar] Warning: could not persist oauth state to disk: {e}")
+
+    def _get_code_verifier(self, state: Optional[str] = None) -> Optional[str]:
+        # 1. In-memory dictionary by state
+        if state and state in self._pending_states:
+            val = self._pending_states[state]
+            return val.get("code_verifier") if isinstance(val, dict) else val
+
+        # 2. Disk storage
+        try:
+            if os.path.exists(self._state_storage_path):
+                with open(self._state_storage_path, 'r') as f:
+                    data = json.load(f)
+                    states_dict = data.get("states", {})
+                    if state and state in states_dict:
+                        val = states_dict[state]
+                        return val.get("code_verifier") if isinstance(val, dict) else val
+                    if data.get("latest"):
+                        return data["latest"]
+        except Exception:
+            pass
+
+        # 3. In-memory latest
+        if getattr(self, "_last_code_verifier", None):
+            return self._last_code_verifier
+
+        # 4. Global active flow
+        global _active_flow
+        if _active_flow is not None:
+            v = getattr(_active_flow, 'code_verifier', None)
+            if v:
+                return v
+            if hasattr(_active_flow, 'oauth2session') and hasattr(_active_flow.oauth2session, 'code_verifier'):
+                return _active_flow.oauth2session.code_verifier
+
+        return None
 
     def get_auth_url(self):
         global _active_flow
-        _active_flow = self._create_flow()
-        auth_url, _ = _active_flow.authorization_url(
+        code_verifier = secrets.token_urlsafe(64)
+        flow = self._create_flow(code_verifier=code_verifier)
+        auth_url, state = flow.authorization_url(
             prompt='consent', access_type='offline', include_granted_scopes='true'
         )
+        actual_verifier = getattr(flow, 'code_verifier', None)
+        if not actual_verifier and hasattr(flow, 'oauth2session') and hasattr(flow.oauth2session, 'code_verifier'):
+            actual_verifier = flow.oauth2session.code_verifier
+        if not actual_verifier:
+            actual_verifier = code_verifier
+
+        flow.code_verifier = actual_verifier
+        if hasattr(flow, 'oauth2session') and flow.oauth2session:
+            flow.oauth2session.code_verifier = actual_verifier
+
+        self._save_oauth_state(state=state, code_verifier=actual_verifier)
+        _active_flow = flow
         return auth_url
 
-    def fetch_token(self, code: str):
+    def fetch_token(self, code: str, state: Optional[str] = None):
         global _active_flow
+        code_verifier = self._get_code_verifier(state)
+        
+        flow = _active_flow
+        if flow is None or (state and getattr(flow, 'state', None) != state):
+            flow = self._create_flow(code_verifier=code_verifier, state=state)
+        elif code_verifier:
+            flow.code_verifier = code_verifier
+            if hasattr(flow, "oauth2session") and flow.oauth2session:
+                flow.oauth2session.code_verifier = code_verifier
+
         try:
-            if _active_flow is None:
-                _active_flow = self._create_flow()
-            _active_flow.fetch_token(code=code)
-            self.creds = _active_flow.credentials
+            fetch_kwargs = {"code": code}
+            if code_verifier:
+                fetch_kwargs["code_verifier"] = code_verifier
+            try:
+                flow.fetch_token(**fetch_kwargs)
+            except TypeError:
+                flow.fetch_token(code=code)
+
+            self.creds = flow.credentials
             
             token_dir = os.path.dirname(self.token_path)
             if token_dir and not os.path.exists(token_dir):
@@ -138,6 +245,14 @@ class CalendarService:
                 
             with open(self.token_path, 'w') as f:
                 f.write(self.creds.to_json())
+
+            if state and state in self._pending_states:
+                self._pending_states.pop(state, None)
+            try:
+                if os.path.exists(self._state_storage_path):
+                    os.remove(self._state_storage_path)
+            except Exception:
+                pass
         except Exception as e:
             traceback.print_exc()
             raise RuntimeError(f"Token exchange failed: {e}")
