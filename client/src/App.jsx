@@ -1953,11 +1953,9 @@ export default function App() {
   const wasConnectingRef = useRef(false);
 
   useEffect(() => {
-    if (isSignConnecting || isSignUpdating || pushing) {
+    if (isSignConnecting) {
       setPresetView('local');
-      if (isSignConnecting) {
-        wasConnectingRef.current = true;
-      }
+      wasConnectingRef.current = true;
     } else if (wasConnectingRef.current) {
       if (status.connected && !isSignUpdating && !pushing) {
         wasConnectingRef.current = false;
@@ -3217,7 +3215,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         if (e.repeat) return;
 
         if (presetView === 'saved') {
-          setPresetView('local');
+          if (!isSignUpdating) {
+            setPresetView('local');
+          }
         } else if (presetView === 'local') {
           if (status?.connected && !isSignUpdating) {
             setPresetView('saved');
@@ -4288,13 +4288,13 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             </div>
             <div role="tablist" aria-label="Preset source" onPointerDown={(e) => e.stopPropagation()} style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 12, background: 'rgba(255,255,255,0.05)' }}>
               <div
-                title={isConnecting ? "Sign is connecting..." : (!status.connected ? 'Connect to a sign to view saved presets' : (isSignUpdating ? 'Sign is updating...' : 'View saved sign presets'))}
-                style={{ display: 'inline-flex', cursor: (status.connected && !isSignUpdating && !isConnecting) ? 'default' : 'not-allowed' }}
+                title={isConnecting ? "Sign is connecting..." : (!status.connected ? 'Connect to a sign to view saved presets' : (isSignUpdating && presetView !== 'saved' ? 'Sign is updating...' : 'View saved sign presets'))}
+                style={{ display: 'inline-flex', cursor: (status.connected && !isConnecting && (presetView === 'saved' || !isSignUpdating)) ? 'default' : 'not-allowed' }}
               >
                 <button
                   role="tab"
                   aria-selected={presetView === 'saved'}
-                  disabled={!status.connected || isSignUpdating || isConnecting}
+                  disabled={!status.connected || isConnecting || (isSignUpdating && presetView !== 'saved')}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => status.connected && !isSignUpdating && !isConnecting && setPresetView('saved')}
                   className={`btn-styled ${presetView === 'saved' && status.connected ? '' : 'inactive'}`}
@@ -4302,12 +4302,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     height: 34, 
                     padding: '0 14px', 
                     fontSize: 14, 
-                    opacity: (status.connected && !isSignUpdating && !isConnecting) ? 1 : 0.4, 
-                    cursor: (status.connected && !isSignUpdating && !isConnecting) ? 'pointer' : 'not-allowed', 
+                    opacity: (status.connected && !isConnecting && (presetView === 'saved' || !isSignUpdating)) ? 1 : 0.4, 
+                    cursor: (status.connected && !isConnecting && (presetView === 'saved' || !isSignUpdating)) ? 'pointer' : 'not-allowed', 
                     display: 'inline-flex', 
                     alignItems: 'center', 
                     gap: 6,
-                    pointerEvents: (!status.connected || isSignUpdating || isConnecting) ? 'none' : 'auto'
+                    pointerEvents: (!status.connected || isConnecting || (isSignUpdating && presetView !== 'saved')) ? 'none' : 'auto'
                   }}
                 >
                   <Save size={14} />
@@ -4317,21 +4317,21 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               <button
                 role="tab"
                 aria-selected={presetView === 'local'}
-                disabled={false}
+                disabled={isSignUpdating}
                 onPointerDown={(e) => e.stopPropagation()}
-                onClick={() => setPresetView('local')}
+                onClick={() => !isSignUpdating && setPresetView('local')}
                 className={`btn-styled ${presetView === 'local' ? '' : 'inactive'}`}
                 style={{
                   height: 34,
                   padding: '0 14px',
                   fontSize: 14,
-                  opacity: 1,
-                  cursor: 'pointer',
+                  opacity: (isSignUpdating && presetView !== 'local') ? 0.4 : 1,
+                  cursor: isSignUpdating ? 'not-allowed' : 'pointer',
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: 6
                 }}
-                title="View local presets"
+                title={isSignUpdating ? "Sign is updating..." : "View local presets"}
               >
                 <Laptop size={14} />
                 <span>Local</span>
