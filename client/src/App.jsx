@@ -4376,11 +4376,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                               {isReservedCalendar ? '📅' : <Star size={22} fill="#facc15" color="#facc15" />}
                             </div>
                             <p style={{ fontSize: '10px', fontWeight: 900, color: reservedColor, textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                              {isReservedCalendar ? '📅 Calendar' : (
-                                <>
-                                  <Star size={10} fill="#facc15" color="#facc15" /> Default
-                                </>
-                              )}
+                              {isReservedCalendar ? 'Calendar' : 'Default'}
                             </p>
                             <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.25)', marginTop: 4, textAlign: 'center' }}>
                               {isReservedCalendar ? 'Auto-updated by calendar' : 'Set via "Use as Default"'}
