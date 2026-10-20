@@ -2443,8 +2443,8 @@ export default function App() {
       if (events) {
         const nextEvent = selectCalendarEvent(events, now);
         const nextEventId = nextEvent ? `${nextEvent.id}-${nextEvent.start_iso}` : null;
-        if (nextEventId && lastActiveEventIdRef.current && nextEventId !== lastActiveEventIdRef.current) {
-          console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current} -> ${nextEventId}. Clearing manual override.`);
+        if (lastActiveEventIdRef.current && nextEventId !== lastActiveEventIdRef.current) {
+          console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current} -> ${nextEventId || 'none'}. Clearing manual override.`);
           setIsManualOverride(false);
         }
         lastActiveEventIdRef.current = nextEventId;
@@ -2539,16 +2539,24 @@ export default function App() {
           if (returnPreset) {
             console.log(`[auto-push] Event window ended, restoring saved slot ${returnPreset.slotId}`);
             setLastPushedId(`hw-slot-${returnPreset.slotId}`);
-            axios.post(`${API_BASE}/preset?id=${returnPreset.slotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => {
-              console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
-            });
+            axios.post(`${API_BASE}/preset?id=${returnPreset.slotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
+              .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+              .catch(e => {
+                console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
+              });
           } else {
             // Play hardware slot 1 — the reserved default
             console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
+            const defPreset = (presets || []).find(p => p.isDefault);
             setLastPushedId('hw-slot-1');
-            axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`).catch(e => {
-              console.warn("[auto-push] No default saved to slot 1 yet:", e);
-            });
+            axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
+              .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+              .catch(e => {
+                console.warn("[auto-push] No default saved to slot 1 yet or play failed:", e);
+                if (defPreset) {
+                  handlePush(defPreset, false, false, 'hw-slot-1').catch(() => {});
+                }
+              });
           }
           return;
         }
@@ -2644,6 +2652,9 @@ export default function App() {
               await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
             } catch (e) {
               console.warn("[connect] No default saved to slot 1 yet:", e);
+              if (def) {
+                handlePush(def, false, false, 'hw-slot-1').catch(() => {});
+              }
             }
           }
         }
