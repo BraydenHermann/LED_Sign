@@ -155,6 +155,20 @@ class SessionPasscodeTests(unittest.IsolatedAsyncioTestCase):
             await main.set_sign_password(SignPasswordRequest(enabled=False))
             self.assertNotIn(mac, main._session_passcodes)
 
+    async def test_disconnect_clears_session_cache_and_disconnects_client(self):
+        mac = "FF:24:10:29:11:22"
+        main._session_passcodes[mac] = "123456"
+        mock_client = make_mock_client(mac)
+        main.connected_client = mock_client
+        main.connection_ready = True
+
+        res = await main.disconnect()
+        self.assertEqual(res, {"status": "success"})
+        self.assertEqual(len(main._session_passcodes), 0)
+        self.assertFalse(main.connection_ready)
+        self.assertIsNone(main.connected_client)
+        mock_client.disconnect.assert_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

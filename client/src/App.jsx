@@ -1610,6 +1610,19 @@ export default function App() {
   const manuallyDisconnectedRef = useRef(false);
 
   const sessionPasscodesRef = useRef({});
+  const clearAllSessionPasscodes = () => {
+    sessionPasscodesRef.current = {};
+    try {
+      Object.keys(sessionStorage).forEach(key => {
+        if (key.startsWith('loy_session_passcode_')) {
+          sessionStorage.removeItem(key);
+        }
+      });
+    } catch (e) {}
+    setBluetoothPasscode('');
+    setPasscodeTarget(null);
+    setPasscodeError('');
+  };
   const getSessionPasscode = (addr) => {
     if (!addr) return '';
     const norm = addr.replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
@@ -1731,6 +1744,17 @@ export default function App() {
       } else if (hadLiveConnectionRef.current) {
         disconnectedStatusPollsRef.current += 1;
         if (disconnectedStatusPollsRef.current < 3) return res.data;
+      }
+      if (res.data?.session_id) {
+        const currentServerSession = res.data.session_id;
+        const storedServerSession = sessionStorage.getItem('loy_server_session_id');
+        if (storedServerSession && storedServerSession !== currentServerSession) {
+          console.log('[session] Server restart detected, clearing cached passcodes.');
+          clearAllSessionPasscodes();
+        }
+        try {
+          sessionStorage.setItem('loy_server_session_id', currentServerSession);
+        } catch (e) {}
       }
       setStatus(res.data);
       if (res.data && res.data.connected && res.data.address) {
@@ -1904,6 +1928,7 @@ export default function App() {
     setLocalPushMessage('');
     setIsManualOverride(false);
     setLastPushedId(null);
+    clearAllSessionPasscodes();
     try { await axios.post(`${API_BASE}/disconnect`, {}, { timeout: 3000 }); } catch (e) {}
   };
 
@@ -2909,6 +2934,7 @@ export default function App() {
               onBeginChooseSign={() => {
                 autoConnectTried.current = true;
                 choosingSignRef.current = true;
+                clearAllSessionPasscodes();
                 return axios.post(`${API_BASE}/pause-reconnect`).catch(() => {});
               }}
               isConnecting={isSignConnecting}

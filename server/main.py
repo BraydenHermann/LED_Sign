@@ -31,6 +31,7 @@ import time
 import unicodedata
 import hashlib
 import re
+import uuid
 import urllib.parse
 import urllib.request
 from typing import List, Optional, Any, Union, Dict
@@ -306,6 +307,7 @@ _reconnect_task: Optional[asyncio.Task] = None
 _suppress_auto_reconnect: bool = False
 _connection_intent: int = 0
 _session_passcodes: Dict[str, str] = {}
+SERVER_SESSION_ID: str = str(uuid.uuid4())
 
 
 class PasscodeRequiredError(Exception):
@@ -950,6 +952,7 @@ async def get_status():
     
     return {
         "connected": connected,
+        "session_id": SERVER_SESSION_ID,
         "password_enabled": password_enabled if connected else None,
         "api_version": 6,
         "address": address,
@@ -1318,33 +1321,60 @@ async def pause_reconnect():
     _connection_intent += 1
     return {"status": "paused"}
 
+async def disconnect_ble_client():
+    global connected_client, connection_ready
+    if connected_client:
+        c = connected_client
+        connected_client = None
+        connection_ready = False
+        addr = getattr(c, "address", "")
+        print(f"[disconnect] Disconnecting BleakClient from {addr}...", flush=True)
+        try:
+            await asyncio.wait_for(c.stop_notify(protocol.NOTIFY_UUID), timeout=2.0)
+        except Exception as e:
+            print(f"[disconnect] stop_notify notice: {e}", flush=True)
+        try:
+            await asyncio.wait_for(c.disconnect(), timeout=4.0)
+            print("[disconnect] BleakClient disconnected successfully.", flush=True)
+        except Exception as e:
+            print(f"[disconnect] client.disconnect notice: {e}", flush=True)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("[shutdown] Server shutting down, disconnecting Bluetooth sign...", flush=True)
+    await disconnect_ble_client()
+
+
 @app.post("/disconnect")
 async def disconnect():
-    global connected_client, connection_ready, current_display_mode, password_enabled, connected_device_id, _suppress_auto_reconnect, _connection_intent, _reconnect_task
+    global connected_client, connection_ready, current_display_mode, password_enabled, connected_device_id, _suppress_auto_reconnect, _connection_intent, _reconnect_task, _session_passcodes
     _suppress_auto_reconnect = True
     _connection_intent += 1
     if _reconnect_task and not _reconnect_task.done():
         _reconnect_task.cancel()
         _reconnect_task = None
-    async with preset_switch_lock:
-        async with connect_lock:
-            await cancel_active_worker()
-            connection_ready = False
-            password_enabled = None
-            connected_device_id = ""
-            if connected_client:
-                try:
-                    await connected_client.stop_notify(protocol.NOTIFY_UUID)
-                except Exception:
-                    pass
-                try:
-                    await connected_client.disconnect()
-                except Exception:
-                    pass
-                connected_client = None
-                await asyncio.sleep(0.5)
-            current_display_mode = "none"
-        
+    _session_passcodes.clear()
+
+    await cancel_active_worker()
+
+    async def _do_disconnect():
+        async with preset_switch_lock:
+            async with connect_lock:
+                await disconnect_ble_client()
+                password_enabled = None
+                connected_device_id = ""
+                current_display_mode = "none"
+
+    try:
+        await asyncio.wait_for(_do_disconnect(), timeout=4.0)
+    except (asyncio.TimeoutError, Exception) as err:
+        print(f"[disconnect] Lock acquisition timed out or failed: {err}; forcing direct BLE disconnect.", flush=True)
+        await disconnect_ble_client()
+        password_enabled = None
+        connected_device_id = ""
+        current_display_mode = "none"
+
     return {"status": "success"}
 
 @app.get("/sign-password")

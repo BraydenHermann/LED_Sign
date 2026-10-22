@@ -257,9 +257,12 @@ def stop_servers():
     _quit_flag = True
     launcher_log("Stopping LED Sign servers...")
     try:
-        urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/disconnect", method="POST"), timeout=1.5)
-    except Exception:
-        pass
+        launcher_log("Disconnecting Bluetooth sign before stopping backend...")
+        req = urllib.request.Request("http://127.0.0.1:8000/disconnect", method="POST")
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            launcher_log(f"Backend disconnect returned status {resp.status}.")
+    except Exception as err:
+        launcher_log(f"Disconnect request before stop: {err}")
     with _lock:
         force_kill_port(8000)
         force_kill_port(5173)
