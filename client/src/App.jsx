@@ -1707,9 +1707,35 @@ export default function App() {
     return () => window.removeEventListener('pointerdown', clearStatusOnNextInteraction);
   }, []);
 
+  const isConnectionStaleMessage = (msg) => {
+    if (!msg || typeof msg !== 'string') return false;
+    const lower = msg.toLowerCase();
+    return (
+      lower.includes('sign is not connected') ||
+      lower.includes('sign not connected') ||
+      lower.includes('sign is currently connecting')
+    );
+  };
+
   useEffect(() => {
     if (pushMessage || localPushMessage) armStatusClear(true);
   }, [pushMessage, localPushMessage]);
+
+  useEffect(() => {
+    if (status?.connected) {
+      if (isConnectionStaleMessage(pushMessage)) {
+        setPushMessage('');
+        clearStatusOnNextInteractionRef.current = false;
+      }
+      if (isConnectionStaleMessage(localPushMessage)) {
+        setLocalPushMessage('');
+        clearStatusOnNextInteractionRef.current = false;
+      }
+      if (connectionError && (connectionError.toLowerCase().includes('not connected') || connectionError.toLowerCase().includes('failed to connect'))) {
+        setConnectionError('');
+      }
+    }
+  }, [status?.connected, pushMessage, localPushMessage, connectionError]);
 
   useEffect(() => {
     if (window.location.hash === '#calendar') {
@@ -1741,6 +1767,8 @@ export default function App() {
         hadLiveConnectionRef.current = true;
         disconnectedStatusPollsRef.current = 0;
         autoConnectTried.current = false;
+        setPushMessage(prev => isConnectionStaleMessage(prev) ? '' : prev);
+        setLocalPushMessage(prev => isConnectionStaleMessage(prev) ? '' : prev);
       } else if (hadLiveConnectionRef.current) {
         disconnectedStatusPollsRef.current += 1;
         if (disconnectedStatusPollsRef.current < 3) return res.data;
@@ -1849,6 +1877,8 @@ export default function App() {
       if (activeConnectRef.current?.id !== requestId) return;
       if (res.data.connected && res.data.address?.toUpperCase() === addr.toUpperCase()) {
         setStatus(res.data);
+        setPushMessage(prev => isConnectionStaleMessage(prev) ? '' : prev);
+        setLocalPushMessage(prev => isConnectionStaleMessage(prev) ? '' : prev);
         if (!choosingSignRef.current) setScanOpen(false);
         setConnectionFailed(false);
         if (!isAuto) setConnectionTarget(null);
