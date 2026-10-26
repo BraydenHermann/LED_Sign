@@ -1664,16 +1664,12 @@ async def _play_preset(id: int, mac: str = ""):
                         active_scroller_task.cancel()
                         active_scroller_task = None
                     try:
-                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=False)
-                        await asyncio.sleep(0.03)
-                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=False)
-                        await asyncio.sleep(0.03)
-                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=False)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
                         await asyncio.sleep(0.05)
                     except Exception:
                         pass
                     if c_style == 'default':
-                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_on_command(), response=False)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_on_command(), response=True)
                     else:
                         await set_clock(on=True, color=c_color, bg_color=c_bg, format=fmt, show_seconds=show_sec, clock_style=c_style)
                 current_display_mode = "clock"
@@ -1703,30 +1699,25 @@ async def _play_preset(id: int, mac: str = ""):
         frames_sent += 1
 
         if connected_client and connected_client.is_connected and connection_ready:
-            # Halt any active playlist engine and clock before selecting new slot
             try:
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=False)
-                await asyncio.sleep(0.03)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=False)
-                await asyncio.sleep(0.03)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
                 await asyncio.sleep(0.04)
             except Exception as e:
-                print(f"[_play_preset warning stopping playback] {e}")
+                print(f"[_play_preset warning stopping clock] {e}")
 
             # Tell sign to display this specific saved slot in continuous loop mode
             select_pkt = protocol.build_slot_select_command(id)
-            await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=False)
-            await asyncio.sleep(0.06)
+            await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+            await asyncio.sleep(0.05)
             play_pkt = protocol.build_user_slot_play_command(id, loop_mode=1)
-            await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=False)
-            await asyncio.sleep(0.06)
+            await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+            await asyncio.sleep(0.05)
 
             # Re-enable physical screen display to ensure matrix is refreshing the selected slot
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=False)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
             await asyncio.sleep(0.05)
             if brightness != 15:
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=False)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
                 await asyncio.sleep(0.05)
 
         return {"status": "success"}

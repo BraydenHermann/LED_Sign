@@ -2555,132 +2555,95 @@ export default function App() {
     if (!status?.connected || !dbLoaded || isSignUpdating || pushingRef.current || initializingConnectionRef.current ||
         !initializedConnectionMacsRef.current.has(status.address?.toUpperCase())) return;
 
-    // Check for calendar event transitions to clear manual override (5 min early)
-    try {
-      if (events) {
-        const nextEvent = selectCalendarEvent(events, now);
-        const nextEventId = nextEvent ? `${nextEvent.id}-${nextEvent.start_iso}` : null;
-        if (lastActiveEventIdRef.current && nextEventId !== lastActiveEventIdRef.current) {
-          console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current} -> ${nextEventId || 'none'}. Clearing manual override.`);
-          setIsManualOverride(false);
-        }
-        lastActiveEventIdRef.current = nextEventId;
-      }
-    } catch (err) {
-      console.error("[auto-push] Error during transition check:", err);
+    // Find event in current 5-min window [start - 5min, end]
+    const currentEvent = events ? selectCalendarEvent(events, now) : null;
+    const currentEventId = currentEvent ? `${currentEvent.id}-${currentEvent.start_iso}` : null;
+
+    // Rule 3: Once a calendar event finished, revert to default
+    if (lastActiveEventIdRef.current && !currentEventId) {
+      console.log(`[auto-push] Rule 3: Calendar event ended (${lastActiveEventIdRef.current}), reverting to default`);
+      lastActiveEventIdRef.current = null;
+      lastNotifiedEventIdRef.current = null;
+      setIsManualOverride(false);
+      setLastPushedId('hw-slot-1');
+      axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
+        .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+        .catch(e => {
+          console.warn('[auto-push] Reverting to default slot 1 failed:', e);
+          const defPreset = (presets || []).find(p => p.isDefault);
+          if (defPreset) {
+            handlePush(defPreset, false, false, 'hw-slot-1').catch(() => {});
+          }
+        });
+      return;
     }
 
-    if (isManualOverride) return;
-
-    try {
-      // Find event in current 5-min window [start - 5min, end]
-      const currentEvent = selectCalendarEvent(events, now);
-
-      let targetContent = null;
-      let targetId = null;
-
-      if (currentEvent) {
-        targetContent = { type: 'event', data: currentEvent, summary: getEventDisplayString(currentEvent) };
-        targetId = `event-${currentEvent.id}-${targetContent.summary}`;
-      } else {
-        // No active or upcoming event — target hardware slot 1 (the reserved default slot)
-        targetContent = { type: 'hw-default' };
-        targetId = 'hw-slot-1';
-      }
+    // Rule 2: 5 minutes before a calendar event starts, save the event to slot 1 (calendar) then display it
+    if (currentEvent) {
+      const targetSummary = getEventDisplayString(currentEvent);
+      const targetId = `event-${currentEvent.id}-${targetSummary}`;
 
       if (targetId !== lastPushedId) {
-        if (targetContent.type === 'event') {
-          // Only capture once for a calendar run. Moving from one calendar
-          // event directly into another must keep the original return target.
-          if (!calendarReturnPresetRef.current && !String(lastPushedId || '').startsWith('event-')) {
-            const slotFromLastPush = String(lastPushedId || '').match(/^hw-slot-(\d+)$/);
-            const slotFromDisplay = String(status.display_mode || '').match(/^preset-(\d+)$/);
-            const savedSlotId = slotFromLastPush ? Number(slotFromLastPush[1]) : (slotFromDisplay ? Number(slotFromDisplay[1]) : null);
-            if (Number.isInteger(savedSlotId) && savedSlotId > 0) {
-              const savedSlot = (savedPresetsRef.current || []).find(slot =>
-                slot?.hwSlotId === savedSlotId || (slot?.slotNumber - 1) === savedSlotId
-              );
-              if (savedSlot?.preset && !savedSlot.preset.isDefault) {
-                calendarReturnPresetRef.current = { slotId: savedSlotId };
-              }
-            }
-          }
-          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
-          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
-          const targetCleanText = targetContent.summary.includes('|||') 
-            ? targetContent.summary.split('|||')[0].trim() 
-            : targetContent.summary.trim();
+        lastActiveEventIdRef.current = currentEventId;
+        setIsManualOverride(false);
 
-          const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
-          const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
-
-          if (isCalSynced && currentSlot1Text && currentSlot1Text === targetCleanText) {
-            console.log("[auto-push] Slot 1 already has event text, playing slot 0 directly:", targetCleanText);
-            // Notify on first detection even when taking the shortcut path
-            if (lastNotifiedEventIdRef.current !== targetId) {
-              lastNotifiedEventIdRef.current = targetId;
-              if ('Notification' in window && Notification.permission === 'granted') {
-                const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
-                const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
-                new Notification('Upcoming Meeting', {
-                  body: `${currentEvent.summary || 'Untitled Event'} starts ${timeLabel}`,
-                  icon: '/favicon.ico',
-                  tag: `meeting-${targetId}`,
-                });
-              }
-            }
-            setLastPushedId(targetId);
-            axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`).catch(() => {});
-            return;
+        // Send browser notification the first time this event enters its window
+        if (lastNotifiedEventIdRef.current !== targetId) {
+          lastNotifiedEventIdRef.current = targetId;
+          if ('Notification' in window && Notification.permission === 'granted') {
+            const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
+            const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
+            new Notification('Upcoming Meeting', {
+              body: `${cleanEventTitle(currentEvent.summary, true)} starts ${timeLabel}`,
+              icon: '/favicon.ico',
+              tag: `meeting-${targetId}`,
+            });
           }
+        }
 
-          // Send browser notification the first time this event enters its window
-          if (lastNotifiedEventIdRef.current !== targetId) {
-            lastNotifiedEventIdRef.current = targetId;
-            if ('Notification' in window && Notification.permission === 'granted') {
-              const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
-              const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
-              new Notification('Upcoming Meeting', {
-                body: `${cleanEventTitle(currentEvent.summary, true)} starts ${timeLabel}`,
-                icon: '/favicon.ico',
-                tag: `meeting-${targetId}`,
-              });
-            }
-          }
+        const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
+        const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
+        const targetCleanText = targetSummary.includes('|||') 
+          ? targetSummary.split('|||')[0].trim() 
+          : targetSummary.trim();
+        const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
+        const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
 
-          console.log(`[auto-push] Auto-applying event 5m before start: "${currentEvent.summary}"`);
-          handlePush(targetContent.summary, false, false, targetId).catch(() => {});
-        } else {
-          const returnPreset = calendarReturnPresetRef.current;
-          calendarReturnPresetRef.current = null;
-          if (returnPreset) {
-            console.log(`[auto-push] Event window ended, restoring saved slot ${returnPreset.slotId}`);
-            setLastPushedId(`hw-slot-${returnPreset.slotId}`);
-            axios.post(`${API_BASE}/preset?id=${returnPreset.slotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
-              .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
-              .catch(e => {
-                console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
-              });
-          } else {
-            // Play hardware slot 1 — the reserved default
-            console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
-            const defPreset = (presets || []).find(p => p.isDefault);
-            setLastPushedId('hw-slot-1');
-            axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
-              .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
-              .catch(e => {
-                console.warn("[auto-push] No default saved to slot 1 yet or play failed:", e);
-                if (defPreset) {
-                  handlePush(defPreset, false, false, 'hw-slot-1').catch(() => {});
-                }
-              });
-          }
+        if (isCalSynced && currentSlot1Text && currentSlot1Text === targetCleanText) {
+          console.log('[auto-push] Slot 1 already has event text, playing slot 0 directly:', targetCleanText);
+          setLastPushedId(targetId);
+          axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`)
+            .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+            .catch(() => {});
           return;
         }
+
+        console.log(`[auto-push] Rule 2: 5m before start, saving event to slot 1 (calendar) and displaying: "${currentEvent.summary}"`);
         setLastPushedId(targetId);
+        handlePush(targetSummary, false, false, targetId).catch(() => {});
       }
-    } catch (err) {
-      console.error("[auto-push] Error:", err);
+      return;
+    }
+
+    // No event is active or upcoming:
+    lastActiveEventIdRef.current = null;
+
+    // Rule 4: If we manually push another local or saved preset and the sign disconnects (or is idle), don't push the default preset
+    if (isManualOverride) return;
+
+    // Rule 1: No event scheduled and no manual override: ensure default (hw slot 1) is playing
+    if (lastPushedId !== 'hw-slot-1') {
+      console.log('[auto-push] Rule 1: No event scheduled and no manual override, playing default slot (slot 1)');
+      setLastPushedId('hw-slot-1');
+      axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
+        .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+        .catch(e => {
+          console.warn('[auto-push] Playing default slot 1 failed:', e);
+          const defPreset = (presets || []).find(p => p.isDefault);
+          if (defPreset) {
+            handlePush(defPreset, false, false, 'hw-slot-1').catch(() => {});
+          }
+        });
     }
   }, [now, events, status.connected, isManualOverride, presets, lastPushedId]);
 
@@ -2690,8 +2653,8 @@ export default function App() {
       const targetMac = status.address.toUpperCase();
       if (initializedConnectionMacsRef.current.has(targetMac)) return;
       if (pushingRef.current) return;
-      // The user already chose something to play (manual push). A late or retried
-      // connection init must not replay the default over it or wipe its status message.
+      
+      // Rule 4: If we manually push another local or saved preset and the sign disconnects, don't push the default preset
       if (isManualOverrideRef.current) {
         initializedConnectionMacsRef.current.add(targetMac);
         return;
@@ -2706,7 +2669,7 @@ export default function App() {
         const def = presets.find(p => p.isDefault);
         const isDefaultSynced = localStorage.getItem('loy_hw_default_synced_' + targetMac);
         if (def && !isDefaultSynced) {
-          console.log("[connect] Pushing local default preset to new sign default slot (slot 1)...");
+          console.log('[connect] Pushing local default preset to new sign default slot (slot 1)...');
           try {
             setPushing(true);
             const resSave = await savePresetToSign({
@@ -2728,7 +2691,7 @@ export default function App() {
             });
             localStorage.setItem('loy_hw_default_synced_' + targetMac, 'true');
           } catch (e) {
-            console.warn("[connect] Failed to push default to slot 1:", e);
+            console.warn('[connect] Failed to push default to slot 1:', e);
             if (e.response?.status === 409) throw e;
           } finally {
             setPushing(false);
@@ -2743,41 +2706,24 @@ export default function App() {
           } catch (e) {}
         }
 
-        const activeEvents = (evs || []).filter(ev => isEventInWindow(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined');
-        const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
+        const activeEvent = selectCalendarEvent(evs, new Date());
 
-        if (active) {
-          const activeStr = getEventDisplayString(active);
-          console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
-          await handlePush(activeStr, false, true, `event-${active.id}-${activeStr}`);
+        if (activeEvent) {
+          // Rule 2: 5 minutes before a calendar event starts, save the event to slot 1 (calendar, hw slot 0) then display it
+          const activeStr = getEventDisplayString(activeEvent);
+          console.log('[connect] Rule 2: Active event found on connect, saving to slot 0 and playing:', activeEvent.summary);
+          await handlePush(activeStr, false, true, `event-${activeEvent.id}-${activeStr}`);
           localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         } else {
-          // Calendar slot 0 is sign-specific. Without an active event, never
-          // seed it from another sign's cached calendar preset.
-          const savedLastPushedId = localStorage.getItem(`loy_last_pushed_id_${targetMac}`);
-          if (savedLastPushedId && savedLastPushedId !== 'hw-slot-1') {
-            console.log(`[connect] Resuming previously pushed preset: ${savedLastPushedId}`);
-            setLastPushedId(savedLastPushedId);
-            if (savedLastPushedId.startsWith('hw-slot-')) {
-              const slotNum = parseInt(savedLastPushedId.replace('hw-slot-', ''), 10);
-              if (!isNaN(slotNum)) {
-                try {
-                  await axios.post(`${API_BASE}/preset?id=${slotNum}&mac=${encodeURIComponent(targetMac)}`);
-                } catch (e) {
-                  console.warn(`[connect] Failed to resume slot ${slotNum}:`, e);
-                }
-              }
-            }
-          } else {
-            console.log("[connect] Playing hardware default slot (slot 1)");
-            setLastPushedId('hw-slot-1');
-            try {
-              await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
-            } catch (e) {
-              console.warn("[connect] No default saved to slot 1 yet:", e);
-              if (def) {
-                handlePush(def, false, false, 'hw-slot-1').catch(() => {});
-              }
+          // Rule 1: When we don't have an event scheduled and connect to the sign, display saved slot 2 (default)
+          console.log('[connect] Rule 1: No event scheduled on connect, playing hardware default slot (slot 1)');
+          setLastPushedId('hw-slot-1');
+          try {
+            await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
+          } catch (e) {
+            console.warn('[connect] No default saved to slot 1 yet:', e);
+            if (def) {
+              handlePush(def, false, false, 'hw-slot-1').catch(() => {});
             }
           }
         }
@@ -2795,10 +2741,13 @@ export default function App() {
         }
       });
     } else if (!status.connected) {
-      // Keep the chosen preset across temporary disconnects. The next
-      // connection is initialized only once per sign during this app session.
+      if (status.address) {
+        initializedConnectionMacsRef.current.delete(status.address.toUpperCase());
+      } else {
+        initializedConnectionMacsRef.current.clear();
+      }
     }
-  }, [status.connected, status.address, dbLoaded, presets, pushing]);
+  }, [status.connected, status.address, dbLoaded, presets]);
 
   // Regular poll
   useEffect(() => {
@@ -2888,6 +2837,7 @@ export default function App() {
         }
         setLastPushedId(data.id || 'clock-default');
       } else if (data.isDefault && status?.connected) {
+        setIsManualOverride(false);
         // Default preset: play saved default preset (hardware slot 1) directly from hardware
         try {
           await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || '')}`);
@@ -3700,7 +3650,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
     setPushing(true);
     setPushMessage(preset.name ? `Pushing "${preset.name}" to sign...` : `Pushing slot ${globalIdx + 1} to sign...`);
-    setIsManualOverride(true);
+    setIsManualOverride(hwSlotId !== 1);
     setLastPushedId(targetId);
 
     try {
@@ -3849,7 +3799,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               if (isConnecting || pushingRef?.current || pushing) return;
               const defPreset = (presets || []).find(p => p.isDefault);
               if (defPreset && status?.connected) {
-                setIsManualOverride(true);
+                setIsManualOverride(false);
                 pushPreset(defPreset);
               }
             }} 
@@ -6789,7 +6739,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         if (typeof setLocalPushMessage === 'function') {
           setLocalPushMessage(`Pushing "${p.name || 'Default'}" to sign...`);
         }
-        if (typeof setIsManualOverride === 'function') setIsManualOverride(true);
+        if (typeof setIsManualOverride === 'function') setIsManualOverride(false);
         if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
         await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof setLocalPushMessage === 'function') {
