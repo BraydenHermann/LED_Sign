@@ -356,12 +356,23 @@ class LOYWebProtocol(BaseProtocol):
         pkt2 = self.build_packet(p2, cmd_type=0xC1, sub_type=0x03)
         return pkt1, pkt2
 
+    @staticmethod
+    def _resolve_hw_addr(slot_id: int) -> int:
+        """User slots 0-11 map to hardware addresses 0x24-0x2F (36-47)."""
+        return slot_id if slot_id >= 0x24 else (0x24 + max(0, min(11, slot_id)))
+
+    @staticmethod
+    def _resolve_slot_idx(slot_id: int) -> int:
+        """Returns 0-11 index regardless of whether slot_id or hw_addr was passed."""
+        return (slot_id - 0x24) if slot_id >= 0x24 else max(0, min(11, slot_id))
+
     def build_slot_session_init(self, slot_id: int):
-        """CMD=0x08: Open file-transfer session targeting slot slot_id (0..11)."""
+        """CMD=0x08: Open file-transfer session targeting user flash slot (0x24..0x2F)."""
+        hw_addr = self._resolve_hw_addr(slot_id)
         payload = bytearray()
-        payload += build_tlv(0x08, bytes([0x00, slot_id]))
+        payload += build_tlv(0x08, bytes([0x00, hw_addr]))
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x0C, bytes([hw_addr]))
         payload += build_tlv(0x1C, bytes.fromhex('000001000300'))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x1D, bytes.fromhex('000000004000140000'))
@@ -369,9 +380,10 @@ class LOYWebProtocol(BaseProtocol):
 
     def build_slot_file_header(self, slot_id: int, anim_code: int = 1, speed_val: int = 13, stay_time: int = 3):
         """CMD=0x09 File Header: Initialize file 0 with animation and speed."""
+        hw_addr = self._resolve_hw_addr(slot_id)
         payload = bytearray()
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x0C, bytes([hw_addr]))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x0E, bytes([0x00]))
         payload += build_tlv(0x14, bytes([anim_code, speed_val, stay_time]))
@@ -380,9 +392,10 @@ class LOYWebProtocol(BaseProtocol):
 
     def build_slot_file_chunk(self, slot_id: int, chunk_idx: int, total_chunks: int, chunk_size: int, chunk_data: bytes):
         """CMD=0x09 File Chunk: Send chunk of file 0."""
+        hw_addr = self._resolve_hw_addr(slot_id)
         payload = bytearray()
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x0C, bytes([hw_addr]))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x0E, bytes([0x00]))
         t12 = struct.pack('<HHHB', total_chunks, chunk_idx, chunk_size, 0)
@@ -392,12 +405,19 @@ class LOYWebProtocol(BaseProtocol):
 
     def build_slot_commit(self, slot_id: int, ystp_bytes: bytes):
         """CMD=0x35: Commit slot file transfer."""
+        hw_addr = self._resolve_hw_addr(slot_id)
         import hashlib, time
         key = struct.pack('<I', len(ystp_bytes)) + hashlib.md5(ystp_bytes).digest()
         ts = struct.pack('<I', int(time.time()))
-        val = bytes([slot_id]) + key + ts
+        val = bytes([hw_addr]) + key + ts
         payload = bytes([0x35, len(val)]) + val
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
+
+    def build_slot_session_close(self, slot_id: int):
+        """CMD=0xC1 sub=0x02: Session close for slot hw_addr (Tag 0x08)."""
+        hw_addr = self._resolve_hw_addr(slot_id)
+        val = bytes([0x08, 0x02, 0x00, hw_addr])
+        return self.build_packet(val, cmd_type=0xC1, sub_type=0x02)
 
     def build_direct_slot_save_packet(self, slot_id: int, ystp_bytes: bytes, anim_code: int = 1, speed_val: int = 13, stay_time: int = 3):
         """Build the complete compound single-packet file transfer for a hardware slot.
@@ -405,14 +425,15 @@ class LOYWebProtocol(BaseProtocol):
           - Session Init (Tag-0x08, Tag-0x09, Tag-0x0C, Tag-0x1C, Tag-0x0D, Tag-0x1D)
           - File Header File 0 (Tag-0x09, Tag-0x0C, Tag-0x0D, Tag-0x0E, Tag-0x14, Tag-0x11)
           - File Chunk File 0 (Tag-0x09, Tag-0x0C, Tag-0x0D, Tag-0x0E, Tag-0x12, Tag-0x13) (YSTP payload)
-          - Commit (Tag-0x35 Len-0x19 slot_id key ts)
+          - Commit (Tag-0x35 Len-0x19 hw_addr key ts)
         """
+        hw_addr = self._resolve_hw_addr(slot_id)
         import hashlib, time
         payload = bytearray()
         # 1. Session Init
-        payload += build_tlv(0x08, bytes([0x00, slot_id]))
+        payload += build_tlv(0x08, bytes([0x00, hw_addr]))
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x0C, bytes([hw_addr]))
         payload += build_tlv(0x1C, bytes.fromhex('000001000300'))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x1D, bytes.fromhex('000000004000140000'))
@@ -420,7 +441,7 @@ class LOYWebProtocol(BaseProtocol):
         
         # 2. File Header File 0
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x0C, bytes([hw_addr]))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x0E, bytes([0x00]))
         payload += build_tlv(0x14, bytes([anim_code, speed_val, stay_time]))
@@ -428,7 +449,7 @@ class LOYWebProtocol(BaseProtocol):
         
         # 3. File Chunk File 0
         payload += build_tlv(0x09, bytes([0x01]))
-        payload += build_tlv(0x0C, bytes([slot_id]))
+        payload += build_tlv(0x0C, bytes([hw_addr]))
         payload += build_tlv(0x0D, bytes([0x00]))
         payload += build_tlv(0x0E, bytes([0x00]))
         payload += build_tlv(0x12, bytes.fromhex('01000000c00300'))
@@ -437,7 +458,7 @@ class LOYWebProtocol(BaseProtocol):
         # 4. Commit Tag 0x35
         key = struct.pack('<I', len(ystp_bytes)) + hashlib.md5(ystp_bytes).digest()
         ts = struct.pack('<I', int(time.time()))
-        commit_val = bytes([slot_id]) + key + ts
+        commit_val = bytes([hw_addr]) + key + ts
         payload += build_tlv(0x35, commit_val)
         
         return self.build_packet(bytes(payload), cmd_type=0xC1, sub_type=0x02)
@@ -456,13 +477,16 @@ class LOYWebProtocol(BaseProtocol):
 
     def build_user_slot_play_command(self, slot_id: int, loop_mode: int = 0x01):
         """CMD=0xC1 sub=0x02: Select and play a user saved slot from flash memory.
-        Official app trace packet (seq=7):
-        36 1a 01 [hw_addr] 00 01 02 09 03 04 05 06 07 08 0a 0b 24 25 26 27 28 29 2a 2b 2c 2d 2e 2f
-        Where hw_addr = 0x24 + slot_id (0x24 for slot 0, 0x25 for slot 1, etc.)
+        Official app trace packet (seq=7, 11):
+        36 1a 01 [target_idx] 00 01 02 09 03 04 05 06 07 08 0a 0b 24 25 26 27 28 29 2a 2b 2c 2d 2e 2f
+        Where target_idx is the index into the playlist:
+        - Factory slots: 0..11
+        - User slots: 12 + slot_id (0x0C for slot 0 (0x24), 0x0D for slot 1 (0x25), etc.)
         """
         slot_list = bytes([0x00, 0x01, 0x02, 0x09, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f])
-        hw_addr = 0x24 + max(0, min(11, slot_id))
-        payload = bytes([0x36, len(slot_list) + 2, loop_mode, hw_addr]) + slot_list
+        s_idx = self._resolve_slot_idx(slot_id)
+        target_idx = 12 + s_idx
+        payload = bytes([0x36, len(slot_list) + 2, loop_mode, target_idx]) + slot_list
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
 
     def build_query_slots_command(self, start_slot: int = 0, count: int = 10):
@@ -473,19 +497,18 @@ class LOYWebProtocol(BaseProtocol):
 
     def build_post_save_packets(self, slot_id: int):
         """Builds the post-save finalization sequence for user flash slots:
-        1. Flash session flush/close command for hw_addr (CMD=0xC1 sub=0x02, bytes: 0x08 0x02 0x00 hw_addr)
-        2. Direct slot select command (CMD=0xC1 sub=0x06, bytes: 0x36 0x02 0x00 slot_id)
+        1. Enable user slots table in sequencer table (CMD=0xC1 sub=0x03)
+        2. Play user slot command (CMD=0xC1 sub=0x02)
+        3. Flash session flush/close command for hw_addr (CMD=0xC1 sub=0x02)
         """
-        hw_addr = 0x24 + slot_id
+        hw_addr = self._resolve_hw_addr(slot_id)
         packets = []
-        
-        # 1. Session close / flush command for hw_addr
+        pkt1, pkt2 = self.build_playlist_update()
+        packets.append(pkt1)
+        packets.append(pkt2)
+        packets.append(self.build_user_slot_play_command(slot_id, loop_mode=1))
         val_flush = bytes([0x08, 0x02, 0x00, hw_addr])
         packets.append(self.build_packet(val_flush, cmd_type=0xC1, sub_type=0x02))
-        
-        # 2. Select and lock playback onto slot_id
-        packets.append(self.build_slot_select_command(slot_id))
-        
         return packets
 
     # Legacy aliases for backward compatibility (old signature had slot_id as first arg)

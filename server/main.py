@@ -1246,11 +1246,16 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
                     await asyncio.sleep(0.03)
                     await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
                     await asyncio.sleep(0.03)
-                    select_pkt = protocol.build_slot_select_command(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=False)
-                    await asyncio.sleep(0.05)
+                    pkt1, pkt2 = protocol.build_playlist_update()
+                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=False)
+                    await asyncio.sleep(0.03)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=False)
+                    await asyncio.sleep(0.03)
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=False)
+                    await asyncio.sleep(0.05)
+                    close_pkt = protocol.build_slot_session_close(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, close_pkt, response=False)
                     await asyncio.sleep(0.05)
                     await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=False)
                     await asyncio.sleep(0.05)
@@ -1263,9 +1268,12 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             else:
                 await stop_all_playback(blank=False)
             try:
-                # Query hardware slot inventory (first 12 slots only)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 12), response=False)
-                await asyncio.sleep(0.05)
+                # Initialize and enable user flash slots (0x24..0x2F) in sequencer table
+                pkt1, pkt2 = protocol.build_playlist_update()
+                await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=False)
+                await asyncio.sleep(0.03)
+                await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=False)
+                await asyncio.sleep(0.03)
             except Exception as se:
                 print(f"[connect] Warning initializing slots: {se}")
 
@@ -1705,12 +1713,17 @@ async def _play_preset(id: int, mac: str = ""):
             except Exception as e:
                 print(f"[_play_preset warning stopping clock] {e}")
 
-            # Tell sign to display this specific saved slot in continuous loop mode
-            select_pkt = protocol.build_slot_select_command(id)
-            await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
-            await asyncio.sleep(0.05)
+            # Ensure user slots table is active and play user slot
+            pkt1, pkt2 = protocol.build_playlist_update()
+            await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
+            await asyncio.sleep(0.03)
+            await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
+            await asyncio.sleep(0.03)
             play_pkt = protocol.build_user_slot_play_command(id, loop_mode=1)
             await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+            await asyncio.sleep(0.05)
+            close_pkt = protocol.build_slot_session_close(id)
+            await safe_write_gatt_char(protocol.WRITE_UUID, close_pkt, response=True)
             await asyncio.sleep(0.05)
 
             # Re-enable physical screen display to ensure matrix is refreshing the selected slot
@@ -3788,12 +3801,18 @@ async def _save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    select_pkt = protocol.build_slot_select_command(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
-                    await asyncio.sleep(0.1)
+                    pkt1, pkt2 = protocol.build_playlist_update()
+                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
+                    await asyncio.sleep(0.03)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
+                    await asyncio.sleep(0.03)
 
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+                    await asyncio.sleep(0.05)
+
+                    close_pkt = protocol.build_slot_session_close(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, close_pkt, response=True)
                     await asyncio.sleep(0.05)
 
                     # Re-enable physical screen display to show newly saved preset
@@ -3849,12 +3868,18 @@ async def _save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    select_pkt = protocol.build_slot_select_command(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
-                    await asyncio.sleep(0.05)
+                    pkt1, pkt2 = protocol.build_playlist_update()
+                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
+                    await asyncio.sleep(0.03)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
+                    await asyncio.sleep(0.03)
 
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+                    await asyncio.sleep(0.05)
+
+                    close_pkt = protocol.build_slot_session_close(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, close_pkt, response=True)
                     await asyncio.sleep(0.05)
 
                     # Re-enable physical screen display to show newly saved preset
