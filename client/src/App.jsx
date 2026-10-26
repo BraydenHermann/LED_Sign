@@ -1442,31 +1442,6 @@ const renderTextAnimation = (ctx, rawText, animName, offset, textColor = '#fffff
   return;
 };
 
-// Rasterizes static (non-animated) text into a 64x20 pixel array in the drawing
-// format (0 = empty, '#rrggbb' = lit). Returns null if the text can't be rendered.
-const rasterizeStaticTextToPixels = (rawText, textColor = '#ffffff', bgColor = '#000000') => {
-  if (typeof document === 'undefined') return null;
-  const canvas = document.createElement('canvas');
-  canvas.width = 64;
-  canvas.height = 20;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-  renderTextAnimation(ctx, rawText, 'static', 0, textColor, bgColor);
-  const data = ctx.getImageData(0, 0, 64, 20).data;
-  const bgR = parseInt(bgColor.slice(1, 3), 16) || 0;
-  const bgG = parseInt(bgColor.slice(3, 5), 16) || 0;
-  const bgB = parseInt(bgColor.slice(5, 7), 16) || 0;
-  const pixels = [];
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i] === bgR && data[i + 1] === bgG && data[i + 2] === bgB) {
-      pixels.push(0);
-    } else {
-      pixels.push(rgbToHex(data[i], data[i + 1], data[i + 2]));
-    }
-  }
-  return pixels;
-};
-
 const TextPresetCardPreview = ({ preset }) => {
   const fontReady = useFontReady();
   const canvasRef = useRef(null);
@@ -1890,19 +1865,13 @@ export default function App() {
     console.log(`[connect] ${isRetry ? 'Retry attempt' : 'Connecting'} to:`, addr, isAuto ? '(auto)' : '');
     try {
       const timeoutMs = 75000;
-      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr, ...(effectivePasscode ? { passcode: effectivePasscode } : {}), brightness: brightness }, { timeout: timeoutMs, signal: controller.signal });
+      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr, ...(effectivePasscode ? { passcode: effectivePasscode } : {}) }, { timeout: timeoutMs, signal: controller.signal });
       if (activeConnectRef.current?.id !== requestId) return;
       const connectedAddr = resPost.data?.address || addr;
       if (connectedAddr && connectedAddr.toUpperCase().startsWith('FF:24:10:29:') && (!isAuto || !choosingSignRef.current)) {
         setMacAddress(connectedAddr);
         localStorage.setItem('loy_last_connected_mac', connectedAddr);
         localStorage.setItem('loy_mac', connectedAddr);
-      }
-      if (effectivePasscode && resPost.data?.status === 'success') {
-        setSessionPasscode(addr, effectivePasscode);
-        setSessionPasscode(connectedAddr, effectivePasscode);
-        setPasscodeTarget(null);
-        setBluetoothPasscode(effectivePasscode);
       }
       const res = await axios.get(`${API_BASE}/status`);
       if (activeConnectRef.current?.id !== requestId) return;
@@ -1957,7 +1926,7 @@ export default function App() {
         const detail = e.response?.data?.detail;
         const message = typeof detail === 'string' ? detail : detail?.message || `Could not connect to ${addr}. Please try again.`;
         setConnectionError(message);
-        if (e.response?.status === 401) {
+        if (passcode) {
           setScanOpen(true);
           setPasscodeTarget(addr);
           setPasscodeError(message);
@@ -2018,11 +1987,6 @@ export default function App() {
   const handleClear = async () => {
     setIsManualOverride(false);
     setLastPushedId(null);
-    try {
-      const mac = (status?.address || localStorage.getItem('loy_mac') || DEFAULT_MAC).toUpperCase();
-      localStorage.removeItem(`loy_manual_override_${mac}`);
-      localStorage.removeItem(`loy_last_pushed_id_${mac}`);
-    } catch {}
     try { await axios.post(API_BASE + '/clear'); } catch (e) {}
     const atTime = new Date();
     const activeEvents = (events || []).filter(ev =>
@@ -2059,29 +2023,15 @@ export default function App() {
       wasConnectingRef.current = false;
     }
   }, [isSignConnecting, status.connected, isModalOpen, scanOpen, isSignUpdating, pushing]);
-  const [lastPushedId, setLastPushedId] = useState(() => {
-    try {
-      const mac = (localStorage.getItem('loy_mac') || DEFAULT_MAC).toUpperCase();
-      return localStorage.getItem(`loy_last_pushed_id_${mac}`) || null;
-    } catch {
-      return null;
-    }
-  });
+  const [lastPushedId, setLastPushedId] = useState(null);
 
   useEffect(() => {
     if (lastPushedId && status?.address && playbackSignRef.current === status.address.toUpperCase()) {
-      localStorage.setItem(`loy_last_pushed_id_${status.address.toUpperCase()}`, lastPushedId);
+      localStorage.setItem(`loy_last_pushed_id_${status.address}`, lastPushedId);
     }
   }, [lastPushedId, status?.address]);
-  const [isManualOverride, setIsManualOverrideState] = useState(() => {
-    try {
-      const mac = (localStorage.getItem('loy_mac') || DEFAULT_MAC).toUpperCase();
-      return localStorage.getItem(`loy_manual_override_${mac}`) === 'true';
-    } catch {
-      return false;
-    }
-  });
-  const isManualOverrideRef = useRef(isManualOverride);
+  const [isManualOverride, setIsManualOverrideState] = useState(false);
+  const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
   const lastNotifiedEventIdRef = useRef(null);
   // Retain the manually selected saved slot while a calendar event temporarily
@@ -2098,10 +2048,6 @@ export default function App() {
       lastActiveEventIdRef.current = null;
       setIsManualOverrideState(false);
       isManualOverrideRef.current = false;
-      try {
-        localStorage.removeItem(`loy_manual_override_${signMac}`);
-        localStorage.removeItem(`loy_last_pushed_id_${signMac}`);
-      } catch {}
     }
     playbackSignRef.current = signMac;
   }, [status.connected, status.address]);
@@ -2112,14 +2058,6 @@ export default function App() {
   const setIsManualOverride = (val) => {
     isManualOverrideRef.current = val;
     setIsManualOverrideState(val);
-    try {
-      const mac = (status?.address || localStorage.getItem('loy_mac') || DEFAULT_MAC).toUpperCase();
-      if (val) {
-        localStorage.setItem(`loy_manual_override_${mac}`, 'true');
-      } else {
-        localStorage.removeItem(`loy_manual_override_${mac}`);
-      }
-    } catch {}
   };
   const [deviceNames, setDeviceNames] = useState(() => {
     try { return JSON.parse(localStorage.getItem('loy_device_names_v2') || '{}'); }
@@ -2555,95 +2493,132 @@ export default function App() {
     if (!status?.connected || !dbLoaded || isSignUpdating || pushingRef.current || initializingConnectionRef.current ||
         !initializedConnectionMacsRef.current.has(status.address?.toUpperCase())) return;
 
-    // Find event in current 5-min window [start - 5min, end]
-    const currentEvent = events ? selectCalendarEvent(events, now) : null;
-    const currentEventId = currentEvent ? `${currentEvent.id}-${currentEvent.start_iso}` : null;
-
-    // Rule 3: Once a calendar event finished, revert to default
-    if (lastActiveEventIdRef.current && !currentEventId) {
-      console.log(`[auto-push] Rule 3: Calendar event ended (${lastActiveEventIdRef.current}), reverting to default`);
-      lastActiveEventIdRef.current = null;
-      lastNotifiedEventIdRef.current = null;
-      setIsManualOverride(false);
-      setLastPushedId('hw-slot-1');
-      axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
-        .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
-        .catch(e => {
-          console.warn('[auto-push] Reverting to default slot 1 failed:', e);
-          const defPreset = (presets || []).find(p => p.isDefault);
-          if (defPreset) {
-            handlePush(defPreset, false, false, 'hw-slot-1').catch(() => {});
-          }
-        });
-      return;
-    }
-
-    // Rule 2: 5 minutes before a calendar event starts, save the event to slot 1 (calendar) then display it
-    if (currentEvent) {
-      const targetSummary = getEventDisplayString(currentEvent);
-      const targetId = `event-${currentEvent.id}-${targetSummary}`;
-
-      if (targetId !== lastPushedId) {
-        lastActiveEventIdRef.current = currentEventId;
-        setIsManualOverride(false);
-
-        // Send browser notification the first time this event enters its window
-        if (lastNotifiedEventIdRef.current !== targetId) {
-          lastNotifiedEventIdRef.current = targetId;
-          if ('Notification' in window && Notification.permission === 'granted') {
-            const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
-            const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
-            new Notification('Upcoming Meeting', {
-              body: `${cleanEventTitle(currentEvent.summary, true)} starts ${timeLabel}`,
-              icon: '/favicon.ico',
-              tag: `meeting-${targetId}`,
-            });
-          }
+    // Check for calendar event transitions to clear manual override (5 min early)
+    try {
+      if (events) {
+        const nextEvent = selectCalendarEvent(events, now);
+        const nextEventId = nextEvent ? `${nextEvent.id}-${nextEvent.start_iso}` : null;
+        if (lastActiveEventIdRef.current && nextEventId !== lastActiveEventIdRef.current) {
+          console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current} -> ${nextEventId || 'none'}. Clearing manual override.`);
+          setIsManualOverride(false);
         }
-
-        const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
-        const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
-        const targetCleanText = targetSummary.includes('|||') 
-          ? targetSummary.split('|||')[0].trim() 
-          : targetSummary.trim();
-        const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
-        const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
-
-        if (isCalSynced && currentSlot1Text && currentSlot1Text === targetCleanText) {
-          console.log('[auto-push] Slot 1 already has event text, playing slot 0 directly:', targetCleanText);
-          setLastPushedId(targetId);
-          axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`)
-            .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
-            .catch(() => {});
-          return;
-        }
-
-        console.log(`[auto-push] Rule 2: 5m before start, saving event to slot 1 (calendar) and displaying: "${currentEvent.summary}"`);
-        setLastPushedId(targetId);
-        handlePush(targetSummary, false, false, targetId).catch(() => {});
+        lastActiveEventIdRef.current = nextEventId;
       }
-      return;
+    } catch (err) {
+      console.error("[auto-push] Error during transition check:", err);
     }
 
-    // No event is active or upcoming:
-    lastActiveEventIdRef.current = null;
-
-    // Rule 4: If we manually push another local or saved preset and the sign disconnects (or is idle), don't push the default preset
     if (isManualOverride) return;
 
-    // Rule 1: No event scheduled and no manual override: ensure default (hw slot 1) is playing
-    if (lastPushedId !== 'hw-slot-1') {
-      console.log('[auto-push] Rule 1: No event scheduled and no manual override, playing default slot (slot 1)');
-      setLastPushedId('hw-slot-1');
-      axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
-        .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
-        .catch(e => {
-          console.warn('[auto-push] Playing default slot 1 failed:', e);
-          const defPreset = (presets || []).find(p => p.isDefault);
-          if (defPreset) {
-            handlePush(defPreset, false, false, 'hw-slot-1').catch(() => {});
+    try {
+      // Find event in current 5-min window [start - 5min, end]
+      const currentEvent = selectCalendarEvent(events, now);
+
+      let targetContent = null;
+      let targetId = null;
+
+      if (currentEvent) {
+        targetContent = { type: 'event', data: currentEvent, summary: getEventDisplayString(currentEvent) };
+        targetId = `event-${currentEvent.id}-${targetContent.summary}`;
+      } else {
+        // No active or upcoming event — target hardware slot 1 (the reserved default slot)
+        targetContent = { type: 'hw-default' };
+        targetId = 'hw-slot-1';
+      }
+
+      if (targetId !== lastPushedId) {
+        if (targetContent.type === 'event') {
+          // Only capture once for a calendar run. Moving from one calendar
+          // event directly into another must keep the original return target.
+          if (!calendarReturnPresetRef.current && !String(lastPushedId || '').startsWith('event-')) {
+            const slotFromLastPush = String(lastPushedId || '').match(/^hw-slot-(\d+)$/);
+            const slotFromDisplay = String(status.display_mode || '').match(/^preset-(\d+)$/);
+            const savedSlotId = slotFromLastPush ? Number(slotFromLastPush[1]) : (slotFromDisplay ? Number(slotFromDisplay[1]) : null);
+            if (Number.isInteger(savedSlotId) && savedSlotId > 0) {
+              const savedSlot = (savedPresetsRef.current || []).find(slot =>
+                slot?.hwSlotId === savedSlotId || (slot?.slotNumber - 1) === savedSlotId
+              );
+              if (savedSlot?.preset && !savedSlot.preset.isDefault) {
+                calendarReturnPresetRef.current = { slotId: savedSlotId };
+              }
+            }
           }
-        });
+          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
+          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
+          const targetCleanText = targetContent.summary.includes('|||') 
+            ? targetContent.summary.split('|||')[0].trim() 
+            : targetContent.summary.trim();
+
+          const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
+          const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
+
+          if (isCalSynced && currentSlot1Text && currentSlot1Text === targetCleanText) {
+            console.log("[auto-push] Slot 1 already has event text, playing slot 0 directly:", targetCleanText);
+            // Notify on first detection even when taking the shortcut path
+            if (lastNotifiedEventIdRef.current !== targetId) {
+              lastNotifiedEventIdRef.current = targetId;
+              if ('Notification' in window && Notification.permission === 'granted') {
+                const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
+                const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
+                new Notification('Upcoming Meeting', {
+                  body: `${currentEvent.summary || 'Untitled Event'} starts ${timeLabel}`,
+                  icon: '/favicon.ico',
+                  tag: `meeting-${targetId}`,
+                });
+              }
+            }
+            setLastPushedId(targetId);
+            axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`).catch(() => {});
+            return;
+          }
+
+          // Send browser notification the first time this event enters its window
+          if (lastNotifiedEventIdRef.current !== targetId) {
+            lastNotifiedEventIdRef.current = targetId;
+            if ('Notification' in window && Notification.permission === 'granted') {
+              const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
+              const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
+              new Notification('Upcoming Meeting', {
+                body: `${cleanEventTitle(currentEvent.summary, true)} starts ${timeLabel}`,
+                icon: '/favicon.ico',
+                tag: `meeting-${targetId}`,
+              });
+            }
+          }
+
+          console.log(`[auto-push] Auto-applying event 5m before start: "${currentEvent.summary}"`);
+          handlePush(targetContent.summary, false, false, targetId).catch(() => {});
+        } else {
+          const returnPreset = calendarReturnPresetRef.current;
+          calendarReturnPresetRef.current = null;
+          if (returnPreset) {
+            console.log(`[auto-push] Event window ended, restoring saved slot ${returnPreset.slotId}`);
+            setLastPushedId(`hw-slot-${returnPreset.slotId}`);
+            axios.post(`${API_BASE}/preset?id=${returnPreset.slotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
+              .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+              .catch(e => {
+                console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
+              });
+          } else {
+            // Play hardware slot 1 — the reserved default
+            console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
+            const defPreset = (presets || []).find(p => p.isDefault);
+            setLastPushedId('hw-slot-1');
+            axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
+              .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+              .catch(e => {
+                console.warn("[auto-push] No default saved to slot 1 yet or play failed:", e);
+                if (defPreset) {
+                  handlePush(defPreset, false, false, 'hw-slot-1').catch(() => {});
+                }
+              });
+          }
+          return;
+        }
+        setLastPushedId(targetId);
+      }
+    } catch (err) {
+      console.error("[auto-push] Error:", err);
     }
   }, [now, events, status.connected, isManualOverride, presets, lastPushedId]);
 
@@ -2653,12 +2628,6 @@ export default function App() {
       const targetMac = status.address.toUpperCase();
       if (initializedConnectionMacsRef.current.has(targetMac)) return;
       if (pushingRef.current) return;
-      
-      // Rule 4: If we manually push another local or saved preset and the sign disconnects, don't push the default preset
-      if (isManualOverrideRef.current) {
-        initializedConnectionMacsRef.current.add(targetMac);
-        return;
-      }
       initializedConnectionMacsRef.current.add(targetMac);
       initializingConnectionRef.current = true;
       setIsManualOverride(false);
@@ -2669,7 +2638,7 @@ export default function App() {
         const def = presets.find(p => p.isDefault);
         const isDefaultSynced = localStorage.getItem('loy_hw_default_synced_' + targetMac);
         if (def && !isDefaultSynced) {
-          console.log('[connect] Pushing local default preset to new sign default slot (slot 1)...');
+          console.log("[connect] Pushing local default preset to new sign default slot (slot 1)...");
           try {
             setPushing(true);
             const resSave = await savePresetToSign({
@@ -2691,7 +2660,7 @@ export default function App() {
             });
             localStorage.setItem('loy_hw_default_synced_' + targetMac, 'true');
           } catch (e) {
-            console.warn('[connect] Failed to push default to slot 1:', e);
+            console.warn("[connect] Failed to push default to slot 1:", e);
             if (e.response?.status === 409) throw e;
           } finally {
             setPushing(false);
@@ -2706,24 +2675,41 @@ export default function App() {
           } catch (e) {}
         }
 
-        const activeEvent = selectCalendarEvent(evs, new Date());
+        const activeEvents = (evs || []).filter(ev => isEventInWindow(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined');
+        const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
 
-        if (activeEvent) {
-          // Rule 2: 5 minutes before a calendar event starts, save the event to slot 1 (calendar, hw slot 0) then display it
-          const activeStr = getEventDisplayString(activeEvent);
-          console.log('[connect] Rule 2: Active event found on connect, saving to slot 0 and playing:', activeEvent.summary);
-          await handlePush(activeStr, false, true, `event-${activeEvent.id}-${activeStr}`);
+        if (active) {
+          const activeStr = getEventDisplayString(active);
+          console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
+          await handlePush(activeStr, false, true, `event-${active.id}-${activeStr}`);
           localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         } else {
-          // Rule 1: When we don't have an event scheduled and connect to the sign, display saved slot 2 (default)
-          console.log('[connect] Rule 1: No event scheduled on connect, playing hardware default slot (slot 1)');
-          setLastPushedId('hw-slot-1');
-          try {
-            await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
-          } catch (e) {
-            console.warn('[connect] No default saved to slot 1 yet:', e);
-            if (def) {
-              handlePush(def, false, false, 'hw-slot-1').catch(() => {});
+          // Calendar slot 0 is sign-specific. Without an active event, never
+          // seed it from another sign's cached calendar preset.
+          const savedLastPushedId = localStorage.getItem(`loy_last_pushed_id_${targetMac}`);
+          if (savedLastPushedId && savedLastPushedId !== 'hw-slot-1') {
+            console.log(`[connect] Resuming previously pushed preset: ${savedLastPushedId}`);
+            setLastPushedId(savedLastPushedId);
+            if (savedLastPushedId.startsWith('hw-slot-')) {
+              const slotNum = parseInt(savedLastPushedId.replace('hw-slot-', ''), 10);
+              if (!isNaN(slotNum)) {
+                try {
+                  await axios.post(`${API_BASE}/preset?id=${slotNum}&mac=${encodeURIComponent(targetMac)}`);
+                } catch (e) {
+                  console.warn(`[connect] Failed to resume slot ${slotNum}:`, e);
+                }
+              }
+            }
+          } else {
+            console.log("[connect] Playing hardware default slot (slot 1)");
+            setLastPushedId('hw-slot-1');
+            try {
+              await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
+            } catch (e) {
+              console.warn("[connect] No default saved to slot 1 yet:", e);
+              if (def) {
+                handlePush(def, false, false, 'hw-slot-1').catch(() => {});
+              }
             }
           }
         }
@@ -2741,13 +2727,10 @@ export default function App() {
         }
       });
     } else if (!status.connected) {
-      if (status.address) {
-        initializedConnectionMacsRef.current.delete(status.address.toUpperCase());
-      } else {
-        initializedConnectionMacsRef.current.clear();
-      }
+      // Keep the chosen preset across temporary disconnects. The next
+      // connection is initialized only once per sign during this app session.
     }
-  }, [status.connected, status.address, dbLoaded, presets]);
+  }, [status.connected, status.address, dbLoaded, presets, pushing]);
 
   // Regular poll
   useEffect(() => {
@@ -2837,7 +2820,6 @@ export default function App() {
         }
         setLastPushedId(data.id || 'clock-default');
       } else if (data.isDefault && status?.connected) {
-        setIsManualOverride(false);
         // Default preset: play saved default preset (hardware slot 1) directly from hardware
         try {
           await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || '')}`);
@@ -3059,7 +3041,6 @@ export default function App() {
             setLastPushedId={setLastPushedId}
             presetView={presetView}
             setPresetView={setPresetView}
-            setIsManualOverride={setIsManualOverride}
             isConnecting={isSignConnecting}
           />
         </div>
@@ -3602,22 +3583,21 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     if (pushingRef) pushingRef.current = true;
 
     if (preset.mode === 'clock' || preset.id === 'clock-default') {
-      const targetId = preset.id || `saved-clock-${globalIdx}`;
       if (typeof setPushingPresetTarget === 'function') {
         setPushingPresetTarget({
           type: 'saved',
           globalIdx,
-          id: targetId,
+          id: preset.id || `saved-clock-${globalIdx}`,
           isDefault: false
         });
       }
       setPushing(true);
       setPushMessage(`Pushing Clock to sign...`);
       setIsManualOverride(true);
-      setLastPushedId(targetId);
       try {
         await onPush(preset, true, true);
         setPushMessage(`Pushed Clock to sign!`);
+        setLastPushedId(preset.id || `saved-clock-${globalIdx}`);
       } catch (err) {
         console.error('Failed to trigger clock play:', err);
         setPushMessage(`Error: ${err.message}`);
@@ -3638,20 +3618,18 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           ? parseInt(preset.id.split('-')[2], 10) 
           : globalIdx));
 
-    const targetId = `hw-slot-${hwSlotId}`;
     if (typeof setPushingPresetTarget === 'function') {
       setPushingPresetTarget({
         type: 'saved',
         globalIdx,
         hwSlotId,
-        id: preset.id || targetId,
+        id: preset.id || `hw-slot-${hwSlotId}`,
         isDefault: Boolean(globalIdx === 1 || hwSlotId === 1 || preset.isDefault)
       });
     }
     setPushing(true);
     setPushMessage(preset.name ? `Pushing "${preset.name}" to sign...` : `Pushing slot ${globalIdx + 1} to sign...`);
-    setIsManualOverride(hwSlotId !== 1);
-    setLastPushedId(targetId);
+    setIsManualOverride(true);
 
     try {
       if (hwSlotId < 12) {
@@ -3659,9 +3637,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof fetchStatus === 'function') await fetchStatus();
         setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
+        setLastPushedId(`hw-slot-${hwSlotId}`);
       } else {
         await onPush(preset, true, true);
         setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
+        setLastPushedId(preset.id || `hw-slot-${hwSlotId}`);
       }
     } catch (err) {
       console.error('Failed to trigger hardware preset play:', err);
@@ -3799,7 +3779,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               if (isConnecting || pushingRef?.current || pushing) return;
               const defPreset = (presets || []).find(p => p.isDefault);
               if (defPreset && status?.connected) {
-                setIsManualOverride(false);
+                setIsManualOverride(true);
                 pushPreset(defPreset);
               }
             }} 
@@ -5185,11 +5165,8 @@ function hexToHsl(hex) {
 function HslColorSlider({ label, value, onChange, disabled = false }) {
   const [localHex, setLocalHex] = useState(value);
   const colorInputRef = useRef(null);
-  const hexFocusedRef = useRef(false);
 
   useEffect(() => {
-    // Don't clobber what the user is typing (e.g. a 3-digit prefix of a 6-digit hex).
-    if (hexFocusedRef.current) return;
     setLocalHex(value);
   }, [value]);
 
@@ -5224,7 +5201,6 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
   };
 
   const handleHexBlur = () => {
-    hexFocusedRef.current = false;
     if (disabled) return;
     if (!isValidHex(localHex)) {
       setLocalHex(value);
@@ -5276,7 +5252,6 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
             value={localHex}
             disabled={disabled}
             onChange={handleHexChange}
-            onFocus={() => { hexFocusedRef.current = true; }}
             onBlur={handleHexBlur}
             className="input-field"
             placeholder="#ffffff"
@@ -5340,22 +5315,10 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
               border: '2px solid rgba(255,255,255,0.2)',
               transition: 'background-color 0.2s, box-shadow 0.2s',
               flexShrink: 0,
-              position: 'relative',
               cursor: disabled ? 'not-allowed' : 'pointer'
             }}
             title={disabled ? undefined : "Click to open color selector"}
-          >
-            {/* Invisible native input sits exactly over the swatch so the browser anchors its picker popup here */}
-            <input
-              ref={colorInputRef}
-              type="color"
-              value={safeColorValue}
-              onChange={(e) => !disabled && onChange(e.target.value)}
-              disabled={disabled}
-              tabIndex={-1}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0, pointerEvents: 'none', border: 0, padding: 0 }}
-            />
-          </div>
+          />
         </div>
       </div>
 
@@ -5412,12 +5375,20 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
         />
       </div>
 
+      <input 
+        ref={colorInputRef}
+        type="color"
+        value={safeColorValue}
+        onChange={(e) => !disabled && onChange(e.target.value)}
+        disabled={disabled}
+        style={{ display: 'none' }}
+      />
     </div>
   );
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, setIsManualOverride, isConnecting }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting }) {
   const fontReady = useFontReady();
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
@@ -6739,7 +6710,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         if (typeof setLocalPushMessage === 'function') {
           setLocalPushMessage(`Pushing "${p.name || 'Default'}" to sign...`);
         }
-        if (typeof setIsManualOverride === 'function') setIsManualOverride(false);
         if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
         await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof setLocalPushMessage === 'function') {
@@ -7364,7 +7334,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 if (isEraserActive) {
                                   next[i] = 0;
                                 } else {
-                                  next[i] = currentColor;
+                                  next[i] = next[i] === currentColor ? 0 : currentColor;
                                 }
                                 setForm(prev => ({ ...prev, pixels: next, drawPixels: next }));
                               }}
@@ -7480,25 +7450,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 nextPixels = Array(64 * 20).fill(0);
                               }
                               
-                              // If the draw canvas is empty, carry over what the text/media tab
-                              // was showing (static text and still images only).
-                              const drawIsEmpty = !nextPixels.some(p => p && p !== 0);
-                              if (drawIsEmpty) {
-                                const anim = prev.animation;
-                                const isStaticText = prev.mode === 'text' &&
-                                  (!anim || anim === 'show now' || anim === 'static') &&
-                                  Boolean((prev.text || '').trim());
-                                const isStillImage = prev.mode === 'image' &&
-                                  prev.fileType !== 'gif' && prev.fileType !== 'video' &&
-                                  Array.isArray(prev.pixels) && prev.pixels.length === 1280;
-                                if (isStaticText) {
-                                  const textPixels = rasterizeStaticTextToPixels(prev.text, prev.textColor || '#ffffff', prev.bgColor || '#000000');
-                                  if (textPixels) nextPixels = textPixels;
-                                } else if (isStillImage) {
-                                  nextPixels = prev.pixels;
-                                }
-                              }
-
                               const normalized = nextPixels.map(p => {
                                 if (p && p !== 0) {
                                   return (typeof p === 'string' && p.startsWith('#')) ? p : (prev.textColor || '#ffffff');

@@ -155,24 +155,24 @@ async def safe_write_gatt_char(char_uuid: str, data: Union[bytes, bytearray], re
 async def stop_all_playback(blank: bool = False):
     """Halts the onboard hardware playlist engine, active slot playback, and clock."""
     global connected_client, connection_ready
-    if connected_client and connected_client.is_connected:
+    if connected_client and connected_client.is_connected and connection_ready:
         try:
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=False)
-            await asyncio.sleep(0.04)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=False)
-            await asyncio.sleep(0.04)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
-            await asyncio.sleep(0.04)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
+            await asyncio.sleep(0.02)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
+            await asyncio.sleep(0.02)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+            await asyncio.sleep(0.02)
             if blank:
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
-                await asyncio.sleep(0.04)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=False)
-                await asyncio.sleep(0.04)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
+                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
+                await asyncio.sleep(0.02)
                 black_frame = protocol.bitmap_command([1] * (PANEL_W * PANEL_H), PANEL_W, PANEL_H, color="#000000")
-                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, black_frame, response=False)
-                await asyncio.sleep(0.04)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=False)
-                await asyncio.sleep(0.04)
+                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, black_frame, response=True)
+                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+                await asyncio.sleep(0.02)
         except Exception as e:
             print(f"[stop_all_playback error] {e}")
 
@@ -257,23 +257,9 @@ async def calendar_background_loop():
         except Exception as e:
             print(f"[calendar] Background loop error: {e}")
 
-async def ble_keepalive_loop():
-    """Periodically sends a lightweight packet to prevent BLE supervision/idle timeout."""
-    global connected_client, connection_ready, power
-    while True:
-        await asyncio.sleep(20)
-        if connected_client and connected_client.is_connected and connection_ready:
-            if not preset_switch_lock.locked() and not ble_lock.locked():
-                try:
-                    # Write screen power state (13 bytes) to keep BLE connection active
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(power), response=False)
-                except Exception:
-                    pass
-
 @app.on_event("startup")
 async def startup_event():
     print("LED Sign Server running!")
-    asyncio.create_task(ble_keepalive_loop())
 
 protocol = LOYWebProtocol()
 calendar_service = CalendarService()
@@ -363,7 +349,7 @@ async def _auto_reconnect(mac: str, delay: float = 4.0, intent: Optional[int] = 
     try:
         norm_mac = (mac or "").strip().upper()
         saved_passcode = _session_passcodes.get(norm_mac)
-        req = ConnectRequest(address=mac, passcode=saved_passcode, brightness=brightness)
+        req = ConnectRequest(address=mac, passcode=saved_passcode)
         async with preset_switch_lock:
             result = await _connect_internal(req, background=True, intent=intent)
         print(f"[auto_reconnect] Reconnect result: {result}")
@@ -538,7 +524,6 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 class ConnectRequest(BaseModel):
     address: str
     passcode: Optional[str] = None
-    brightness: Optional[int] = None
 
 class SignPasswordRequest(BaseModel):
     enabled: bool
@@ -993,21 +978,17 @@ connect_lock = asyncio.Lock()
 
 async def _connect_internal(req: ConnectRequest, background: bool = False, intent: Optional[int] = None):
     async with connect_lock:
-        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode, _session_passcodes, brightness
+        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode, _session_passcodes
         if intent is not None and intent != _connection_intent:
             raise HTTPException(status_code=409, detail="Connection replaced by a newer request")
         if background and (_suppress_auto_reconnect or (connected_client and connected_client.is_connected)):
             return {"status": "skipped", "reason": "manual connection takes priority"}
-        if req.brightness is not None and 1 <= req.brightness <= 15:
-            brightness = req.brightness
         target_mac = (req.address or "").strip().upper()
         passcode = (req.passcode or "").strip()
         if not passcode:
             passcode = _session_passcodes.get(target_mac) or (
                 _session_passcodes.get(last_connected_mac) if last_connected_mac else ""
             ) or ""
-        if passcode and target_mac:
-            _session_passcodes[target_mac] = passcode
         if passcode and (len(passcode) != 6 or not passcode.isascii() or not passcode.isdigit()):
             raise HTTPException(status_code=422, detail="Bluetooth passcode must be exactly six digits")
         if not passcode and connected_client and connected_client.is_connected and connection_ready:
@@ -1038,8 +1019,6 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
         client = None
 
         try:
-            if req.brightness is not None and 1 <= req.brightness <= 15:
-                brightness = req.brightness
             target_mac = (req.address or "").strip().upper()
             print(f"[connect] Target LED sign: {target_mac or 'auto-discover'}...")
 
@@ -1223,8 +1202,8 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             if auth_result is not None and not auth_result["ok"]:
                 raise RuntimeError(f"Sign rejected the device-info request (error {auth_result['error_code']})")
 
-            # Pause briefly to allow any trailing notify frames to settle
-            await asyncio.sleep(0.1)
+            _suppress_auto_reconnect = False
+            connection_ready = True
 
             # Ensure sign display is powered on
             try:
@@ -1246,16 +1225,11 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
                     await asyncio.sleep(0.03)
                     await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
                     await asyncio.sleep(0.03)
-                    pkt1, pkt2 = protocol.build_playlist_update()
-                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=False)
-                    await asyncio.sleep(0.03)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=False)
-                    await asyncio.sleep(0.03)
+                    select_pkt = protocol.build_slot_select_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=False)
+                    await asyncio.sleep(0.05)
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=False)
-                    await asyncio.sleep(0.05)
-                    close_pkt = protocol.build_slot_session_close(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, close_pkt, response=False)
                     await asyncio.sleep(0.05)
                     await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=False)
                     await asyncio.sleep(0.05)
@@ -1268,23 +1242,11 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             else:
                 await stop_all_playback(blank=False)
             try:
-                # Initialize and enable user flash slots (0x24..0x2F) in sequencer table
-                pkt1, pkt2 = protocol.build_playlist_update()
-                await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=False)
-                await asyncio.sleep(0.03)
-                await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=False)
-                await asyncio.sleep(0.03)
+                # Query hardware slot inventory (first 12 slots only)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 12), response=False)
+                await asyncio.sleep(0.05)
             except Exception as se:
                 print(f"[connect] Warning initializing slots: {se}")
-
-            if not client.is_connected:
-                connected_client = None
-                connection_ready = False
-                _suppress_auto_reconnect = True
-                raise RuntimeError("Sign disconnected during post-connection setup.")
-
-            _suppress_auto_reconnect = False
-            connection_ready = True
 
             if intent is not None and intent != _connection_intent:
                 raise ConnectSupersededError()
@@ -1580,7 +1542,7 @@ async def set_power(on: bool):
     if connected_client and connected_client.is_connected and connection_ready:
         try:
             packet = protocol.power_command(on)
-            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=False)
+            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=True)
             power = on
             return {"status": "success"}
         except Exception as e:
@@ -1596,7 +1558,7 @@ async def set_brightness(level: int):
     if connected_client and connected_client.is_connected and connection_ready:
         try:
             packet = protocol.brightness_command(level)
-            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=False)
+            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=True)
             brightness = level
             return {"status": "success"}
         except Exception as e:
@@ -1672,6 +1634,10 @@ async def _play_preset(id: int, mac: str = ""):
                         active_scroller_task.cancel()
                         active_scroller_task = None
                     try:
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
+                        await asyncio.sleep(0.03)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
+                        await asyncio.sleep(0.03)
                         await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
                         await asyncio.sleep(0.05)
                     except Exception:
@@ -1707,23 +1673,23 @@ async def _play_preset(id: int, mac: str = ""):
         frames_sent += 1
 
         if connected_client and connected_client.is_connected and connection_ready:
+            # Halt any active playlist engine and clock before selecting new slot
             try:
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
+                await asyncio.sleep(0.03)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
+                await asyncio.sleep(0.03)
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-                await asyncio.sleep(0.04)
+                await asyncio.sleep(0.03)
             except Exception as e:
-                print(f"[_play_preset warning stopping clock] {e}")
+                print(f"[_play_preset warning stopping playback] {e}")
 
-            # Ensure user slots table is active and play user slot
-            pkt1, pkt2 = protocol.build_playlist_update()
-            await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
-            await asyncio.sleep(0.03)
-            await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
-            await asyncio.sleep(0.03)
+            # Tell sign to display this specific saved slot in continuous loop mode
+            select_pkt = protocol.build_slot_select_command(id)
+            await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+            await asyncio.sleep(0.05)
             play_pkt = protocol.build_user_slot_play_command(id, loop_mode=1)
             await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
-            await asyncio.sleep(0.05)
-            close_pkt = protocol.build_slot_session_close(id)
-            await safe_write_gatt_char(protocol.WRITE_UUID, close_pkt, response=True)
             await asyncio.sleep(0.05)
 
             # Re-enable physical screen display to ensure matrix is refreshing the selected slot
@@ -3351,10 +3317,6 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
     global connected_client, frames_sent, active_scroller_task, current_display_mode, current_width
     global current_clock_color, current_clock_bg_color, current_clock_format, current_clock_show_seconds, current_clock_style
     
-    if not (connected_client and connected_client.is_connected and connection_ready):
-        # Don't report a successful push (or start a fake preview) when nothing was sent.
-        raise HTTPException(status_code=409, detail="Sign is not connected")
-
     if on and clock_style == "default":
         color = "#ffffff"
         
@@ -3801,18 +3763,12 @@ async def _save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    pkt1, pkt2 = protocol.build_playlist_update()
-                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
-                    await asyncio.sleep(0.03)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
-                    await asyncio.sleep(0.03)
+                    select_pkt = protocol.build_slot_select_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                    await asyncio.sleep(0.1)
 
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
-                    await asyncio.sleep(0.05)
-
-                    close_pkt = protocol.build_slot_session_close(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, close_pkt, response=True)
                     await asyncio.sleep(0.05)
 
                     # Re-enable physical screen display to show newly saved preset
@@ -3868,18 +3824,12 @@ async def _save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    pkt1, pkt2 = protocol.build_playlist_update()
-                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt1, response=True)
-                    await asyncio.sleep(0.03)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, pkt2, response=True)
-                    await asyncio.sleep(0.03)
+                    select_pkt = protocol.build_slot_select_command(slot_id)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                    await asyncio.sleep(0.05)
 
                     play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
                     await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
-                    await asyncio.sleep(0.05)
-
-                    close_pkt = protocol.build_slot_session_close(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, close_pkt, response=True)
                     await asyncio.sleep(0.05)
 
                     # Re-enable physical screen display to show newly saved preset
