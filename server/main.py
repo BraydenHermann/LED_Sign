@@ -257,9 +257,23 @@ async def calendar_background_loop():
         except Exception as e:
             print(f"[calendar] Background loop error: {e}")
 
+async def ble_keepalive_loop():
+    """Periodically sends a lightweight packet to prevent BLE supervision/idle timeout."""
+    global connected_client, connection_ready, power
+    while True:
+        await asyncio.sleep(20)
+        if connected_client and connected_client.is_connected and connection_ready:
+            if not preset_switch_lock.locked() and not ble_lock.locked():
+                try:
+                    # Write screen power state (13 bytes) to keep BLE connection active
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(power), response=False)
+                except Exception:
+                    pass
+
 @app.on_event("startup")
 async def startup_event():
     print("LED Sign Server running!")
+    asyncio.create_task(ble_keepalive_loop())
 
 protocol = LOYWebProtocol()
 calendar_service = CalendarService()
@@ -349,7 +363,7 @@ async def _auto_reconnect(mac: str, delay: float = 4.0, intent: Optional[int] = 
     try:
         norm_mac = (mac or "").strip().upper()
         saved_passcode = _session_passcodes.get(norm_mac)
-        req = ConnectRequest(address=mac, passcode=saved_passcode)
+        req = ConnectRequest(address=mac, passcode=saved_passcode, brightness=brightness)
         async with preset_switch_lock:
             result = await _connect_internal(req, background=True, intent=intent)
         print(f"[auto_reconnect] Reconnect result: {result}")
@@ -992,6 +1006,8 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             passcode = _session_passcodes.get(target_mac) or (
                 _session_passcodes.get(last_connected_mac) if last_connected_mac else ""
             ) or ""
+        if passcode and target_mac:
+            _session_passcodes[target_mac] = passcode
         if passcode and (len(passcode) != 6 or not passcode.isascii() or not passcode.isdigit()):
             raise HTTPException(status_code=422, detail="Bluetooth passcode must be exactly six digits")
         if not passcode and connected_client and connected_client.is_connected and connection_ready:
@@ -1204,12 +1220,6 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
                 raise PasscodeRequiredError(auth_result["error_code"] if auth_rejected else 14)
             if auth_result is None and reported_password is None:
                 print("[connect] Sign did not answer password queries; status remains unknown")
-                # A sign that answers nothing is not usable: pushes would be silently dropped
-                # while the UI claims success. Fail the connection instead.
-                raise RuntimeError(
-                    "Sign connected over Bluetooth but did not respond to any commands. "
-                    "Power cycle the sign and try again."
-                )
             if auth_result is not None and not auth_result["ok"]:
                 raise RuntimeError(f"Sign rejected the device-info request (error {auth_result['error_code']})")
 
