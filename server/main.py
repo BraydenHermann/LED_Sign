@@ -155,24 +155,24 @@ async def safe_write_gatt_char(char_uuid: str, data: Union[bytes, bytearray], re
 async def stop_all_playback(blank: bool = False):
     """Halts the onboard hardware playlist engine, active slot playback, and clock."""
     global connected_client, connection_ready
-    if connected_client and connected_client.is_connected and connection_ready:
+    if connected_client and connected_client.is_connected:
         try:
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
-            await asyncio.sleep(0.02)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
-            await asyncio.sleep(0.02)
-            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-            await asyncio.sleep(0.02)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=False)
+            await asyncio.sleep(0.04)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=False)
+            await asyncio.sleep(0.04)
+            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
+            await asyncio.sleep(0.04)
             if blank:
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=True)
-                await asyncio.sleep(0.02)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=True)
-                await asyncio.sleep(0.02)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
+                await asyncio.sleep(0.04)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clear_all_command(), response=False)
+                await asyncio.sleep(0.04)
                 black_frame = protocol.bitmap_command([1] * (PANEL_W * PANEL_H), PANEL_W, PANEL_H, color="#000000")
-                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, black_frame, response=True)
-                await asyncio.sleep(0.02)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
-                await asyncio.sleep(0.02)
+                await write_large_gatt_char(connected_client, protocol.WRITE_UUID, black_frame, response=False)
+                await asyncio.sleep(0.04)
+                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=False)
+                await asyncio.sleep(0.04)
         except Exception as e:
             print(f"[stop_all_playback error] {e}")
 
@@ -524,6 +524,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 class ConnectRequest(BaseModel):
     address: str
     passcode: Optional[str] = None
+    brightness: Optional[int] = None
 
 class SignPasswordRequest(BaseModel):
     enabled: bool
@@ -978,11 +979,13 @@ connect_lock = asyncio.Lock()
 
 async def _connect_internal(req: ConnectRequest, background: bool = False, intent: Optional[int] = None):
     async with connect_lock:
-        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode, _session_passcodes
+        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode, _session_passcodes, brightness
         if intent is not None and intent != _connection_intent:
             raise HTTPException(status_code=409, detail="Connection replaced by a newer request")
         if background and (_suppress_auto_reconnect or (connected_client and connected_client.is_connected)):
             return {"status": "skipped", "reason": "manual connection takes priority"}
+        if req.brightness is not None and 1 <= req.brightness <= 15:
+            brightness = req.brightness
         target_mac = (req.address or "").strip().upper()
         passcode = (req.passcode or "").strip()
         if not passcode:
@@ -1019,6 +1022,8 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
         client = None
 
         try:
+            if req.brightness is not None and 1 <= req.brightness <= 15:
+                brightness = req.brightness
             target_mac = (req.address or "").strip().upper()
             print(f"[connect] Target LED sign: {target_mac or 'auto-discover'}...")
 
@@ -1208,8 +1213,8 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             if auth_result is not None and not auth_result["ok"]:
                 raise RuntimeError(f"Sign rejected the device-info request (error {auth_result['error_code']})")
 
-            _suppress_auto_reconnect = False
-            connection_ready = True
+            # Pause briefly to allow any trailing notify frames to settle
+            await asyncio.sleep(0.1)
 
             # Ensure sign display is powered on
             try:
@@ -1253,6 +1258,15 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
                 await asyncio.sleep(0.05)
             except Exception as se:
                 print(f"[connect] Warning initializing slots: {se}")
+
+            if not client.is_connected:
+                connected_client = None
+                connection_ready = False
+                _suppress_auto_reconnect = True
+                raise RuntimeError("Sign disconnected during post-connection setup.")
+
+            _suppress_auto_reconnect = False
+            connection_ready = True
 
             if intent is not None and intent != _connection_intent:
                 raise ConnectSupersededError()
@@ -1548,7 +1562,7 @@ async def set_power(on: bool):
     if connected_client and connected_client.is_connected and connection_ready:
         try:
             packet = protocol.power_command(on)
-            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=True)
+            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=False)
             power = on
             return {"status": "success"}
         except Exception as e:
@@ -1564,7 +1578,7 @@ async def set_brightness(level: int):
     if connected_client and connected_client.is_connected and connection_ready:
         try:
             packet = protocol.brightness_command(level)
-            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=True)
+            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=False)
             brightness = level
             return {"status": "success"}
         except Exception as e:

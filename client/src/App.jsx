@@ -1890,13 +1890,19 @@ export default function App() {
     console.log(`[connect] ${isRetry ? 'Retry attempt' : 'Connecting'} to:`, addr, isAuto ? '(auto)' : '');
     try {
       const timeoutMs = 75000;
-      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr, ...(effectivePasscode ? { passcode: effectivePasscode } : {}) }, { timeout: timeoutMs, signal: controller.signal });
+      const resPost = await axios.post(`${API_BASE}/connect`, { address: addr, ...(effectivePasscode ? { passcode: effectivePasscode } : {}), brightness: brightness }, { timeout: timeoutMs, signal: controller.signal });
       if (activeConnectRef.current?.id !== requestId) return;
       const connectedAddr = resPost.data?.address || addr;
       if (connectedAddr && connectedAddr.toUpperCase().startsWith('FF:24:10:29:') && (!isAuto || !choosingSignRef.current)) {
         setMacAddress(connectedAddr);
         localStorage.setItem('loy_last_connected_mac', connectedAddr);
         localStorage.setItem('loy_mac', connectedAddr);
+      }
+      if (effectivePasscode && resPost.data?.status === 'success') {
+        setSessionPasscode(addr, effectivePasscode);
+        setSessionPasscode(connectedAddr, effectivePasscode);
+        setPasscodeTarget(null);
+        setBluetoothPasscode(effectivePasscode);
       }
       const res = await axios.get(`${API_BASE}/status`);
       if (activeConnectRef.current?.id !== requestId) return;
@@ -1951,7 +1957,7 @@ export default function App() {
         const detail = e.response?.data?.detail;
         const message = typeof detail === 'string' ? detail : detail?.message || `Could not connect to ${addr}. Please try again.`;
         setConnectionError(message);
-        if (passcode) {
+        if (e.response?.status === 401) {
           setScanOpen(true);
           setPasscodeTarget(addr);
           setPasscodeError(message);
