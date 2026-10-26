@@ -1442,6 +1442,31 @@ const renderTextAnimation = (ctx, rawText, animName, offset, textColor = '#fffff
   return;
 };
 
+// Rasterizes static (non-animated) text into a 64x20 pixel array in the drawing
+// format (0 = empty, '#rrggbb' = lit). Returns null if the text can't be rendered.
+const rasterizeStaticTextToPixels = (rawText, textColor = '#ffffff', bgColor = '#000000') => {
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 20;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  renderTextAnimation(ctx, rawText, 'static', 0, textColor, bgColor);
+  const data = ctx.getImageData(0, 0, 64, 20).data;
+  const bgR = parseInt(bgColor.slice(1, 3), 16) || 0;
+  const bgG = parseInt(bgColor.slice(3, 5), 16) || 0;
+  const bgB = parseInt(bgColor.slice(5, 7), 16) || 0;
+  const pixels = [];
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] === bgR && data[i + 1] === bgG && data[i + 2] === bgB) {
+      pixels.push(0);
+    } else {
+      pixels.push(rgbToHex(data[i], data[i + 1], data[i + 2]));
+    }
+  }
+  return pixels;
+};
+
 const TextPresetCardPreview = ({ preset }) => {
   const fontReady = useFontReady();
   const canvasRef = useRef(null);
@@ -2628,6 +2653,12 @@ export default function App() {
       const targetMac = status.address.toUpperCase();
       if (initializedConnectionMacsRef.current.has(targetMac)) return;
       if (pushingRef.current) return;
+      // The user already chose something to play (manual push). A late or retried
+      // connection init must not replay the default over it or wipe its status message.
+      if (isManualOverrideRef.current) {
+        initializedConnectionMacsRef.current.add(targetMac);
+        return;
+      }
       initializedConnectionMacsRef.current.add(targetMac);
       initializingConnectionRef.current = true;
       setIsManualOverride(false);
@@ -5165,8 +5196,11 @@ function hexToHsl(hex) {
 function HslColorSlider({ label, value, onChange, disabled = false }) {
   const [localHex, setLocalHex] = useState(value);
   const colorInputRef = useRef(null);
+  const hexFocusedRef = useRef(false);
 
   useEffect(() => {
+    // Don't clobber what the user is typing (e.g. a 3-digit prefix of a 6-digit hex).
+    if (hexFocusedRef.current) return;
     setLocalHex(value);
   }, [value]);
 
@@ -5201,6 +5235,7 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
   };
 
   const handleHexBlur = () => {
+    hexFocusedRef.current = false;
     if (disabled) return;
     if (!isValidHex(localHex)) {
       setLocalHex(value);
@@ -5252,6 +5287,7 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
             value={localHex}
             disabled={disabled}
             onChange={handleHexChange}
+            onFocus={() => { hexFocusedRef.current = true; }}
             onBlur={handleHexBlur}
             className="input-field"
             placeholder="#ffffff"
@@ -5315,10 +5351,22 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
               border: '2px solid rgba(255,255,255,0.2)',
               transition: 'background-color 0.2s, box-shadow 0.2s',
               flexShrink: 0,
+              position: 'relative',
               cursor: disabled ? 'not-allowed' : 'pointer'
             }}
             title={disabled ? undefined : "Click to open color selector"}
-          />
+          >
+            {/* Invisible native input sits exactly over the swatch so the browser anchors its picker popup here */}
+            <input
+              ref={colorInputRef}
+              type="color"
+              value={safeColorValue}
+              onChange={(e) => !disabled && onChange(e.target.value)}
+              disabled={disabled}
+              tabIndex={-1}
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0, pointerEvents: 'none', border: 0, padding: 0 }}
+            />
+          </div>
         </div>
       </div>
 
@@ -5375,14 +5423,6 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
         />
       </div>
 
-      <input 
-        ref={colorInputRef}
-        type="color"
-        value={safeColorValue}
-        onChange={(e) => !disabled && onChange(e.target.value)}
-        disabled={disabled}
-        style={{ display: 'none' }}
-      />
     </div>
   );
 }
@@ -7334,7 +7374,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 if (isEraserActive) {
                                   next[i] = 0;
                                 } else {
-                                  next[i] = next[i] === currentColor ? 0 : currentColor;
+                                  next[i] = currentColor;
                                 }
                                 setForm(prev => ({ ...prev, pixels: next, drawPixels: next }));
                               }}
@@ -7450,6 +7490,25 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                                 nextPixels = Array(64 * 20).fill(0);
                               }
                               
+                              // If the draw canvas is empty, carry over what the text/media tab
+                              // was showing (static text and still images only).
+                              const drawIsEmpty = !nextPixels.some(p => p && p !== 0);
+                              if (drawIsEmpty) {
+                                const anim = prev.animation;
+                                const isStaticText = prev.mode === 'text' &&
+                                  (!anim || anim === 'show now' || anim === 'static') &&
+                                  Boolean((prev.text || '').trim());
+                                const isStillImage = prev.mode === 'image' &&
+                                  prev.fileType !== 'gif' && prev.fileType !== 'video' &&
+                                  Array.isArray(prev.pixels) && prev.pixels.length === 1280;
+                                if (isStaticText) {
+                                  const textPixels = rasterizeStaticTextToPixels(prev.text, prev.textColor || '#ffffff', prev.bgColor || '#000000');
+                                  if (textPixels) nextPixels = textPixels;
+                                } else if (isStillImage) {
+                                  nextPixels = prev.pixels;
+                                }
+                              }
+
                               const normalized = nextPixels.map(p => {
                                 if (p && p !== 0) {
                                   return (typeof p === 'string' && p.startsWith('#')) ? p : (prev.textColor || '#ffffff');

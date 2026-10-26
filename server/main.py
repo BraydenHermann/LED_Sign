@@ -1199,6 +1199,12 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
                 raise PasscodeRequiredError(auth_result["error_code"] if auth_rejected else 14)
             if auth_result is None and reported_password is None:
                 print("[connect] Sign did not answer password queries; status remains unknown")
+                # A sign that answers nothing is not usable: pushes would be silently dropped
+                # while the UI claims success. Fail the connection instead.
+                raise RuntimeError(
+                    "Sign connected over Bluetooth but did not respond to any commands. "
+                    "Power cycle the sign and try again."
+                )
             if auth_result is not None and not auth_result["ok"]:
                 raise RuntimeError(f"Sign rejected the device-info request (error {auth_result['error_code']})")
 
@@ -3317,6 +3323,10 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
     global connected_client, frames_sent, active_scroller_task, current_display_mode, current_width
     global current_clock_color, current_clock_bg_color, current_clock_format, current_clock_show_seconds, current_clock_style
     
+    if not (connected_client and connected_client.is_connected and connection_ready):
+        # Don't report a successful push (or start a fake preview) when nothing was sent.
+        raise HTTPException(status_code=409, detail="Sign is not connected")
+
     if on and clock_style == "default":
         color = "#ffffff"
         
