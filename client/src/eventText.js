@@ -10,8 +10,10 @@ export function fitEventSignText(summary, endTime, maxLength = 25) {
 
   const titleBudget = maxLength - time.length - 1;
   let wholeWords = '';
-  for (const word of title.split(' ')) {
-    const candidate = wholeWords ? `${wholeWords} ${word}` : word;
+  const wordMatches = [...title.matchAll(/[^\s/]+/g)];
+  for (const match of wordMatches) {
+    const candidate = title.slice(0, match.index + match[0].length).replace(/[\s\/\-,;:]+$/, '');
+    if (!candidate) continue;
     if (candidate.length > titleBudget) break;
     wholeWords = candidate;
   }

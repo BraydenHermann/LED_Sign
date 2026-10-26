@@ -17,3 +17,10 @@ test('drops separator before dropping a complete title word', () => {
 test('never clips a long first word or the am/pm suffix', () => {
   assert.equal(fitEventSignText('ExtraordinarilyLongMeetingName', '12:45 pm'), '12:45 pm');
 });
+
+test('accounts for slashes as word boundaries in title (e.g. Board Review/Planning)', () => {
+  assert.equal(fitEventSignText('Board Review/Planning', '10:30 am'), 'Board Review 10:30 am');
+  assert.equal(fitEventSignText('Board/Review/Planning', '10:30 am'), 'Board/Review 10:30 am');
+  assert.equal(fitEventSignText('Board Review / Planning', '10:30 am'), 'Board Review 10:30 am');
+  assert.equal(fitEventSignText('Review/Planning', '10:30 am'), 'Review/Planning 10:30 am');
+});
