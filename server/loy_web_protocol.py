@@ -455,12 +455,14 @@ class LOYWebProtocol(BaseProtocol):
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x06)
 
     def build_user_slot_play_command(self, slot_id: int, loop_mode: int = 0x01):
-        """CMD=0xC1 sub=0x02: Select and play a saved slot from flash memory.
-        Uses a playlist of length 1 (just the target slot) to enforce single mode.
-        If slot_id == 0xFF, it stops the player (used by stop_slot_playback_command).
+        """CMD=0xC1 sub=0x02: Select and play a user saved slot from flash memory.
+        Official app trace packet (seq=7):
+        36 1a 01 [hw_addr] 00 01 02 09 03 04 05 06 07 08 0a 0b 24 25 26 27 28 29 2a 2b 2c 2d 2e 2f
+        Where hw_addr = 0x24 + slot_id (0x24 for slot 0, 0x25 for slot 1, etc.)
         """
-        val = bytes([loop_mode, 0x00, slot_id])
-        payload = bytes([0x36, len(val)]) + val
+        slot_list = bytes([0x00, 0x01, 0x02, 0x09, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0a, 0x0b, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f])
+        hw_addr = 0x24 + max(0, min(11, slot_id))
+        payload = bytes([0x36, len(slot_list) + 2, loop_mode, hw_addr]) + slot_list
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
 
     def build_query_slots_command(self, start_slot: int = 0, count: int = 10):
