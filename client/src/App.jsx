@@ -2018,6 +2018,11 @@ export default function App() {
   const handleClear = async () => {
     setIsManualOverride(false);
     setLastPushedId(null);
+    try {
+      const mac = (status?.address || localStorage.getItem('loy_mac') || DEFAULT_MAC).toUpperCase();
+      localStorage.removeItem(`loy_manual_override_${mac}`);
+      localStorage.removeItem(`loy_last_pushed_id_${mac}`);
+    } catch {}
     try { await axios.post(API_BASE + '/clear'); } catch (e) {}
     const atTime = new Date();
     const activeEvents = (events || []).filter(ev =>
@@ -2054,15 +2059,29 @@ export default function App() {
       wasConnectingRef.current = false;
     }
   }, [isSignConnecting, status.connected, isModalOpen, scanOpen, isSignUpdating, pushing]);
-  const [lastPushedId, setLastPushedId] = useState(null);
+  const [lastPushedId, setLastPushedId] = useState(() => {
+    try {
+      const mac = (localStorage.getItem('loy_mac') || DEFAULT_MAC).toUpperCase();
+      return localStorage.getItem(`loy_last_pushed_id_${mac}`) || null;
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
     if (lastPushedId && status?.address && playbackSignRef.current === status.address.toUpperCase()) {
-      localStorage.setItem(`loy_last_pushed_id_${status.address}`, lastPushedId);
+      localStorage.setItem(`loy_last_pushed_id_${status.address.toUpperCase()}`, lastPushedId);
     }
   }, [lastPushedId, status?.address]);
-  const [isManualOverride, setIsManualOverrideState] = useState(false);
-  const isManualOverrideRef = useRef(false);
+  const [isManualOverride, setIsManualOverrideState] = useState(() => {
+    try {
+      const mac = (localStorage.getItem('loy_mac') || DEFAULT_MAC).toUpperCase();
+      return localStorage.getItem(`loy_manual_override_${mac}`) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const isManualOverrideRef = useRef(isManualOverride);
   const lastActiveEventIdRef = useRef(null);
   const lastNotifiedEventIdRef = useRef(null);
   // Retain the manually selected saved slot while a calendar event temporarily
@@ -2079,6 +2098,10 @@ export default function App() {
       lastActiveEventIdRef.current = null;
       setIsManualOverrideState(false);
       isManualOverrideRef.current = false;
+      try {
+        localStorage.removeItem(`loy_manual_override_${signMac}`);
+        localStorage.removeItem(`loy_last_pushed_id_${signMac}`);
+      } catch {}
     }
     playbackSignRef.current = signMac;
   }, [status.connected, status.address]);
@@ -2089,6 +2112,14 @@ export default function App() {
   const setIsManualOverride = (val) => {
     isManualOverrideRef.current = val;
     setIsManualOverrideState(val);
+    try {
+      const mac = (status?.address || localStorage.getItem('loy_mac') || DEFAULT_MAC).toUpperCase();
+      if (val) {
+        localStorage.setItem(`loy_manual_override_${mac}`, 'true');
+      } else {
+        localStorage.removeItem(`loy_manual_override_${mac}`);
+      }
+    } catch {}
   };
   const [deviceNames, setDeviceNames] = useState(() => {
     try { return JSON.parse(localStorage.getItem('loy_device_names_v2') || '{}'); }
@@ -3078,6 +3109,7 @@ export default function App() {
             setLastPushedId={setLastPushedId}
             presetView={presetView}
             setPresetView={setPresetView}
+            setIsManualOverride={setIsManualOverride}
             isConnecting={isSignConnecting}
           />
         </div>
@@ -3620,21 +3652,22 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     if (pushingRef) pushingRef.current = true;
 
     if (preset.mode === 'clock' || preset.id === 'clock-default') {
+      const targetId = preset.id || `saved-clock-${globalIdx}`;
       if (typeof setPushingPresetTarget === 'function') {
         setPushingPresetTarget({
           type: 'saved',
           globalIdx,
-          id: preset.id || `saved-clock-${globalIdx}`,
+          id: targetId,
           isDefault: false
         });
       }
       setPushing(true);
       setPushMessage(`Pushing Clock to sign...`);
       setIsManualOverride(true);
+      setLastPushedId(targetId);
       try {
         await onPush(preset, true, true);
         setPushMessage(`Pushed Clock to sign!`);
-        setLastPushedId(preset.id || `saved-clock-${globalIdx}`);
       } catch (err) {
         console.error('Failed to trigger clock play:', err);
         setPushMessage(`Error: ${err.message}`);
@@ -3655,18 +3688,20 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           ? parseInt(preset.id.split('-')[2], 10) 
           : globalIdx));
 
+    const targetId = `hw-slot-${hwSlotId}`;
     if (typeof setPushingPresetTarget === 'function') {
       setPushingPresetTarget({
         type: 'saved',
         globalIdx,
         hwSlotId,
-        id: preset.id || `hw-slot-${hwSlotId}`,
+        id: preset.id || targetId,
         isDefault: Boolean(globalIdx === 1 || hwSlotId === 1 || preset.isDefault)
       });
     }
     setPushing(true);
     setPushMessage(preset.name ? `Pushing "${preset.name}" to sign...` : `Pushing slot ${globalIdx + 1} to sign...`);
     setIsManualOverride(true);
+    setLastPushedId(targetId);
 
     try {
       if (hwSlotId < 12) {
@@ -3674,11 +3709,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof fetchStatus === 'function') await fetchStatus();
         setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
-        setLastPushedId(`hw-slot-${hwSlotId}`);
       } else {
         await onPush(preset, true, true);
         setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
-        setLastPushedId(preset.id || `hw-slot-${hwSlotId}`);
       }
     } catch (err) {
       console.error('Failed to trigger hardware preset play:', err);
@@ -5434,7 +5467,7 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, setIsManualOverride, isConnecting }) {
   const fontReady = useFontReady();
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
@@ -6756,6 +6789,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         if (typeof setLocalPushMessage === 'function') {
           setLocalPushMessage(`Pushing "${p.name || 'Default'}" to sign...`);
         }
+        if (typeof setIsManualOverride === 'function') setIsManualOverride(true);
         if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
         await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof setLocalPushMessage === 'function') {
