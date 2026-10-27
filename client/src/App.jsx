@@ -2374,9 +2374,10 @@ export default function App() {
   };
 
   const syncHardwareSlots = async () => {
-    if (!status?.connected) return;
+    const targetMac = status?.address || (activeMac && activeMac !== 'DEFAULT' ? activeMac : '');
+    if (!status?.connected && !targetMac) return;
     try {
-      const macParam = encodeURIComponent(status.address || DEFAULT_MAC);
+      const macParam = encodeURIComponent(targetMac || DEFAULT_MAC);
       const res = await axios.get(`${API_BASE}/hardware-slots?mac=${macParam}`);
       const hwSlots = res.data?.slots;
       if (Array.isArray(hwSlots) && hwSlots.length > 0) {
@@ -2412,10 +2413,14 @@ export default function App() {
               }
 
               if (idx === 0) {
-                // Slot 1 is reserved for the Calendar. Preserve existing preset if server cache is empty.
                 const pData = s.preset_data;
                 const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
-                if (!pData && !previewUrl && currentList[0]?.preset) {
+                if (!pData && !previewUrl) {
+                  localStorage.removeItem('loy_hw_cal_synced_' + activeMac);
+                  if (currentList[0]?.preset) {
+                    updated = true;
+                    currentList[0] = { slotNumber: 1, hwSlotId: 0, preset: null };
+                  }
                   return;
                 }
                 if (pData || previewUrl) {
@@ -2504,7 +2509,7 @@ export default function App() {
 
   // Window focus listener to refresh hardware slots when returning to tab
   useEffect(() => {
-    if (status.connected && dbLoaded) syncHardwareSlots();
+    if (dbLoaded && (status.connected || (activeMac && activeMac !== 'DEFAULT'))) syncHardwareSlots();
   }, [status.connected, activeMac, dbLoaded]);
 
   useEffect(() => {
@@ -2891,13 +2896,18 @@ export default function App() {
 
           // Skip re-saving if hardware slot 1 already has this event text (auto OR manual)
           if (isCalSynced && currentSlot1Text && currentSlot1Text === targetEventText) {
-            console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
-            handleSetPushMessage('Playing from Slot 1...');
-            await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
-            setLastPushedId(autoTargetId || 'hw-slot-0');
-            await fetchStatus();
-            handleSetPushMessage('Pushed Slot 1 to sign!');
-            return;
+            try {
+              console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
+              handleSetPushMessage('Playing from Slot 1...');
+              await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
+              setLastPushedId(autoTargetId || 'hw-slot-0');
+              await fetchStatus();
+              handleSetPushMessage('Pushed Slot 1 to sign!');
+              return;
+            } catch (playErr) {
+              if (playErr.response?.status !== 404) throw playErr;
+              localStorage.removeItem('loy_hw_cal_synced_' + targetMac);
+            }
           }
 
           handleSetPushMessage('Saving event to Slot 1...');
