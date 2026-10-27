@@ -121,3 +121,43 @@ export const generateAiMedia = async (payload) => {
   }
 };
 
+export const getLoyCategories = async () => {
+  try {
+    const { data } = await axios.get('/loy-categories');
+    return data;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      const { data } = await axios.get('/api/loy/categories');
+      return data;
+    }
+    throw err;
+  }
+};
+
+export const getLoyMaterials = async ({ tagId = 48, tagType = 0, pageIndex = 0, pageCount = 24, search = '' } = {}) => {
+  const params = {
+    tag_id: tagId,
+    tag_type: tagType,
+    page_index: pageIndex,
+    page_count: pageCount
+  };
+  if (search && search.trim()) {
+    params.search = search.trim();
+  }
+  try {
+    const { data } = await axios.get('/loy-materials', { params });
+    return data;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      const { data } = await axios.get('/api/loy/materials', { params });
+      return data;
+    }
+    throw err;
+  }
+};
+
+export const getLoyProxyMediaUrl = (url) => {
+  return `/api/loy/proxy-media?url=${encodeURIComponent(url)}`;
+};
+
+

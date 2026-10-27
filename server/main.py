@@ -35,7 +35,7 @@ import uuid
 import urllib.parse
 import urllib.request
 from typing import List, Optional, Any, Union, Dict
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -46,6 +46,7 @@ from loy_web_protocol import LOYWebProtocol
 from calendar_service import CalendarService
 import gemini_service
 import openai_service
+from loy_space_service import loy_space_service
 
 
 def hex_to_rgb_global(hex_str: Optional[str], default=(0,0,0)):
@@ -920,6 +921,52 @@ async def ai_generate(req: AIGenerateRequest):
             model=req.model
         )
         return await gemini_generate(sub_req)
+
+
+# -------------------------------------------------------------------------
+# LOY SPACE Material Downloads Gallery Endpoints
+# -------------------------------------------------------------------------
+
+@app.get("/api/loy/categories")
+@app.get("/loy-categories")
+async def get_loy_categories():
+    return loy_space_service.get_categories()
+
+@app.get("/api/loy/materials")
+@app.get("/loy-materials")
+async def get_loy_materials(
+    tag_id: int = 48,
+    tag_type: int = 0,
+    page_index: int = 0,
+    page_count: int = 24,
+    search: Optional[str] = None
+):
+    def _fetch():
+        return loy_space_service.get_materials(
+            tag_id=tag_id,
+            tag_type=tag_type,
+            page_index=page_index,
+            page_count=page_count,
+            search_query=search,
+            w=64,
+            h=20
+        )
+    return await asyncio.to_thread(_fetch)
+
+@app.get("/api/loy/proxy-media")
+@app.get("/loy-proxy-media")
+async def get_loy_proxy_media(url: str):
+    def _fetch():
+        return loy_space_service.proxy_download(url)
+    res = await asyncio.to_thread(_fetch)
+    if not res:
+        raise HTTPException(status_code=404, detail="Media could not be loaded from LOY SPACE")
+    content, content_type = res
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=86400"}
+    )
 
 
 @app.get("/status")

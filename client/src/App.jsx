@@ -4,6 +4,8 @@ import axios from 'axios';
 import { savePresetToSign, cancelSavePreset, processVideoMedia } from './serverApi';
 import { fitEventSignText } from './eventText';
 import GeminiMediaGenerator, { GeminiLogo, OpenAILogo } from './GeminiMediaGenerator';
+import LoySpaceGallery, { LoySpaceLogo } from './LoySpaceGallery';
+import { getLoyProxyMediaUrl } from './serverApi';
 
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -5732,14 +5734,52 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   });
 
   const [isAiExpanded, setIsAiExpanded] = useState(false);
+  const [isLoyExpanded, setIsLoyExpanded] = useState(false);
   const [aiProvider, setAiProvider] = useState(() => localStorage.getItem('led_ai_provider') || 'gemini');
   const aiGeneratorRef = useRef(null);
 
   useEffect(() => {
     if (!isModalOpen || form.mode !== 'image') {
       setIsAiExpanded(false);
+      setIsLoyExpanded(false);
     }
   }, [isModalOpen, form.mode]);
+
+  const handleSelectLoyMedia = async (item) => {
+    if (!item) return;
+    try {
+      setIsLoadingMedia(true);
+      setSaveError('');
+      let blob;
+      try {
+        const resp = await fetch(item.url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        blob = await resp.blob();
+      } catch (err) {
+        const proxyUrl = getLoyProxyMediaUrl(item.url);
+        const resp = await fetch(proxyUrl);
+        if (!resp.ok) throw new Error(`Proxy HTTP ${resp.status}`);
+        blob = await resp.blob();
+      }
+      const ext = item.url.toLowerCase().endsWith('.png') ? 'png' : (item.url.toLowerCase().endsWith('.jpg') ? 'jpg' : 'gif');
+      const mime = ext === 'png' ? 'image/png' : (ext === 'jpg' ? 'image/jpeg' : 'image/gif');
+      const filename = `${item.name || item.id || 'loy_media'}.${ext}`;
+      const file = new File([blob], filename, { type: blob.type || mime });
+
+      setForm(prev => ({
+        ...prev,
+        name: item.name || prev.name || 'LOY Space Media'
+      }));
+      handleMediaFile(file);
+      if (setUnifiedPushMessage) {
+        setUnifiedPushMessage(`Loaded "${item.name || 'LOY SPACE item'}"`);
+      }
+    } catch (err) {
+      console.error('[handleSelectLoyMedia] Error loading media:', err);
+      setSaveError(`Failed to load media from LOY SPACE: ${err.message}`);
+      setIsLoadingMedia(false);
+    }
+  };
 
   const containerRef = useRef(null);
   const [containerWidth, setContainerWidth] = useState(600);
@@ -6631,7 +6671,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       }
       if (event.key === 'Enter') {
         if (event.isComposing || event.repeat) return;
-        if (event.target?.closest('[data-ai-side-panel]')) return;
+        if (event.target?.closest('[data-ai-side-panel]') || event.target?.closest('[data-loy-side-panel]')) return;
         if (event.target?.tagName === 'BUTTON' && event.target?.innerText?.toLowerCase().includes('delete')) return;
         if (canSavePreset) {
           event.preventDefault();
@@ -6966,7 +7006,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 alignItems: 'flex-start',
                 justifyContent: 'flex-start',
                 gap: '16px', 
-                width: isAiExpanded && form.mode === 'image' ? '1244px' : '768px',
+                width: (isAiExpanded || isLoyExpanded) && form.mode === 'image' ? '1244px' : '768px',
                 maxWidth: 'none',
                 maxHeight: '92vh',
                 transition: 'max-width 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
@@ -7972,7 +8012,14 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         <button
                           type="button"
                           disabled={isSaving}
-                          onClick={() => !isSaving && setIsAiExpanded(prev => !prev)}
+                          onClick={() => {
+                            if (isSaving) return;
+                            setIsAiExpanded(prev => {
+                              const next = !prev;
+                              if (next) setIsLoyExpanded(false);
+                              return next;
+                            });
+                          }}
                           className={`btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5 transition-all ${!isAiExpanded ? 'inactive' : ''}`}
                           aria-label={`Create with ${aiProvider === 'gemini' ? 'Gemini' : 'OpenAI'}`}
                           style={{
@@ -7996,6 +8043,37 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           title={isAiExpanded ? "Close AI Studio side-panel" : "Create media with AI"}
                         >
                           {aiProvider === 'gemini' ? <GeminiLogo size={13} /> : <OpenAILogo size={13} />}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSaving}
+                          onClick={() => {
+                            if (isSaving) return;
+                            setIsLoyExpanded(prev => {
+                              const next = !prev;
+                              if (next) setIsAiExpanded(false);
+                              return next;
+                            });
+                          }}
+                          className={`btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5 transition-all ${!isLoyExpanded ? 'inactive' : ''}`}
+                          aria-label="LOY SPACE"
+                          style={{
+                            borderRadius: '12px',
+                            opacity: isSaving ? 0.35 : 1,
+                            cursor: isSaving ? 'not-allowed' : 'pointer',
+                            pointerEvents: isSaving ? 'none' : 'auto',
+                            background: isSaving
+                              ? 'rgba(255, 255, 255, 0.05)'
+                              : 'linear-gradient(#ffffff, #ffffff) padding-box, linear-gradient(135deg, #D80204 0%, #FB8D00 20%, #FADC02 40%, #1CAB1E 60%, #017FD6 80%, #843FB3 100%) border-box',
+                            border: isSaving ? '1px solid rgba(255, 255, 255, 0.08)' : '2px solid transparent',
+                            color: isSaving ? '#64748b' : '#0f172a',
+                            boxShadow: isSaving
+                              ? 'none'
+                              : '0 2px 10px rgba(0, 0, 0, 0.25), 0 0 8px rgba(251, 141, 0, 0.3)'
+                          }}
+                          title={isLoyExpanded ? "Close LOY SPACE" : "LOY SPACE"}
+                        >
+                          <LoySpaceLogo size={13} gradient={true} />
                         </button>
                       </div>
 
@@ -8599,6 +8677,47 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     form={form} 
                     setForm={setForm} 
                     imageObjRef={imageObjRef} 
+                    onNotify={setUnifiedPushMessage}
+                    style={{
+                      height: '100%',
+                      borderRadius: '24px',
+                      padding: '24px'
+                    }}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* LOY SPACE Gallery Side Panel */}
+            <AnimatePresence>
+              {isLoyExpanded && form.mode === 'image' && (
+                <motion.div
+                  data-loy-side-panel="true"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.22, ease: 'easeOut' }}
+                  style={{
+                    position: 'absolute',
+                    left: '784px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    width: '460px',
+                    maxWidth: '460px',
+                    height: '92vh',
+                    maxHeight: '92vh',
+                    overflow: 'hidden',
+                    borderRadius: '24px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    opacity: isSaving ? 0.45 : 1,
+                    pointerEvents: isSaving ? 'none' : 'auto',
+                    cursor: isSaving ? 'not-allowed' : 'default'
+                  }}
+                >
+                  <LoySpaceGallery 
+                    onClose={() => !isSaving && setIsLoyExpanded(false)}
+                    onSelectMedia={handleSelectLoyMedia}
                     onNotify={setUnifiedPushMessage}
                     style={{
                       height: '100%',

@@ -66,7 +66,10 @@ export default defineConfig({
         proxyTimeout: 300000,
         timeout: 300000
       },
-      '/ai-providers': 'http://127.0.0.1:8000'
+      '/ai-providers': 'http://127.0.0.1:8000',
+      '/loy-categories': 'http://127.0.0.1:8000',
+      '/loy-materials': 'http://127.0.0.1:8000',
+      '/loy-proxy-media': 'http://127.0.0.1:8000'
     }
   }
 })
