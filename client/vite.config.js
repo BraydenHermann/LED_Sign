@@ -69,7 +69,13 @@ export default defineConfig({
       '/ai-providers': 'http://127.0.0.1:8000',
       '/loy-categories': 'http://127.0.0.1:8000',
       '/loy-materials': 'http://127.0.0.1:8000',
-      '/loy-proxy-media': 'http://127.0.0.1:8000'
+      '/loy-my-materials': 'http://127.0.0.1:8000',
+      '/loy-proxy-media': 'http://127.0.0.1:8000',
+      '/loy-auth-status': 'http://127.0.0.1:8000',
+      '/loy-login': 'http://127.0.0.1:8000',
+      '/loy-logout': 'http://127.0.0.1:8000',
+      '/loy-upload': 'http://127.0.0.1:8000',
+      '/api/loy': 'http://127.0.0.1:8000'
     }
   }
 })

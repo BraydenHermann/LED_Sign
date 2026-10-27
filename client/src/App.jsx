@@ -2710,7 +2710,7 @@ export default function App() {
         if (active) {
           const activeStr = getEventDisplayString(active);
           console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
-          await handlePush(activeStr, false, true, `event-${active.id}-${activeStr}`);
+          await handlePush(activeStr, false, false, `event-${active.id}-${activeStr}`);
           localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         } else {
           // Calendar slot 0 is sign-specific. Without an active event, never
@@ -2750,6 +2750,8 @@ export default function App() {
         handleSetPushMessage(`Error: ${e.message}`);
       }).finally(() => {
         initializingConnectionRef.current = false;
+        pushingRef.current = false;
+        setPushing(false);
         fetchStatus();
         if (!isModalOpenRef.current && !scanOpenRef.current) {
           setPresetView('saved');
@@ -2950,9 +2952,9 @@ export default function App() {
       }
       throw e;
     } finally {
+      pushingRef.current = false;
+      setPushing(false);
       if (!skipMessages) {
-        pushingRef.current = false;
-        setPushing(false);
         setPushingPresetTarget(null);
       }
     }
@@ -4320,8 +4322,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     e.stopPropagation();
                   }}
                 >
-                  {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && <RefreshCw size={12} className="animate-spin" aria-label="Saving" />}
-                  {!pushing && /^(Saved|Pushed|Assigned|Deleted)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400" />}
+                  {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && !/^(Saved|Pushed|Assigned|Deleted|Cleared)\b/.test(pushMessage) && <RefreshCw size={12} className="animate-spin" aria-label="Saving" />}
+                  {(!pushing || /^(Saved|Pushed|Assigned|Deleted|Cleared)\b/.test(pushMessage)) && /^(Saved|Pushed|Assigned|Deleted|Cleared)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400" />}
                   {!pushing && pushMessage.toLowerCase().includes('cancel') && <X size={12} className="text-red-400" />}
                   <span>{pushMessage}</span>
                   {pushing && slotSaveProgress !== null && (
@@ -5768,12 +5770,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
       setForm(prev => ({
         ...prev,
-        name: item.name || prev.name || 'LOY Space Media'
+        mode: 'image'
       }));
       handleMediaFile(file);
-      if (setUnifiedPushMessage) {
-        setUnifiedPushMessage(`Loaded "${item.name || 'LOY SPACE item'}"`);
-      }
     } catch (err) {
       console.error('[handleSelectLoyMedia] Error loading media:', err);
       setSaveError(`Failed to load media from LOY SPACE: ${err.message}`);
@@ -8704,7 +8703,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     transform: 'translateY(-50%)',
                     width: '460px',
                     maxWidth: '460px',
-                    height: '92vh',
                     maxHeight: '92vh',
                     overflow: 'hidden',
                     borderRadius: '24px',
@@ -8718,9 +8716,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                   <LoySpaceGallery 
                     onClose={() => !isSaving && setIsLoyExpanded(false)}
                     onSelectMedia={handleSelectLoyMedia}
-                    onNotify={setUnifiedPushMessage}
+                    form={form}
+                    imageObjRef={imageObjRef}
                     style={{
-                      height: '100%',
                       borderRadius: '24px',
                       padding: '24px'
                     }}

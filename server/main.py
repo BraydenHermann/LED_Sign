@@ -35,7 +35,7 @@ import uuid
 import urllib.parse
 import urllib.request
 from typing import List, Optional, Any, Union, Dict
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -929,8 +929,8 @@ async def ai_generate(req: AIGenerateRequest):
 
 @app.get("/api/loy/categories")
 @app.get("/loy-categories")
-async def get_loy_categories():
-    return loy_space_service.get_categories()
+async def get_loy_categories(refresh: bool = False):
+    return await asyncio.to_thread(loy_space_service.get_categories, 64, 20, refresh)
 
 @app.get("/api/loy/materials")
 @app.get("/loy-materials")
@@ -967,6 +967,69 @@ async def get_loy_proxy_media(url: str):
         media_type=content_type,
         headers={"Cache-Control": "public, max-age=86400"}
     )
+
+
+# -------------------------------------------------------------------------
+# LOY SPACE Auth & Upload Endpoints
+# -------------------------------------------------------------------------
+
+@app.get("/api/loy/auth-status")
+@app.get("/loy-auth-status")
+async def get_loy_auth_status():
+    return loy_space_service.get_auth_status()
+
+
+@app.get("/api/loy/my-materials")
+@app.get("/loy-my-materials")
+async def get_loy_my_materials(page_index: int = 0, page_count: int = 24):
+    def _fetch():
+        return loy_space_service.get_user_materials(page_index=page_index, page_count=page_count)
+    return await asyncio.to_thread(_fetch)
+
+
+class LoyLoginRequest(BaseModel):
+    user: str
+    pwd: str
+
+
+@app.post("/api/loy/login")
+@app.post("/loy-login")
+async def loy_login(req: LoyLoginRequest):
+    res = loy_space_service.login_user(req.user, req.pwd)
+    if res.get("status") != 0:
+        raise HTTPException(status_code=400, detail=res.get("error", "Login failed"))
+    return res
+
+
+@app.post("/api/loy/logout")
+@app.post("/loy-logout")
+async def loy_logout():
+    return loy_space_service.logout_user()
+
+
+@app.post("/api/loy/upload")
+@app.post("/loy-upload")
+async def loy_upload(
+    file: UploadFile = File(...),
+    name: str = Form("LEDSign Custom"),
+    mark: str = Form("custom,64x20"),
+    tags: int = Form(1)
+):
+    contents = await file.read()
+    def _do_upload():
+        return loy_space_service.upload_and_share_material(
+            image_bytes=contents,
+            filename=file.filename or "canvas.png",
+            name=name,
+            mark=mark,
+            tags=tags,
+            width=64,
+            height=20
+        )
+    res = await asyncio.to_thread(_do_upload)
+    if res.get("status") != 0:
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to upload to LOY SPACE"))
+    return res
 
 
 @app.get("/status")

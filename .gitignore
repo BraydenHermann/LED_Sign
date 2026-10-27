@@ -24,6 +24,7 @@ server/credentials.json
 server/token.json
 server/recovery_contacts.json
 server/.oauth_pending.json
+server/.loy_*.json
 
 # Scratch scripts and temporary files
 scratch/

@@ -121,13 +121,14 @@ export const generateAiMedia = async (payload) => {
   }
 };
 
-export const getLoyCategories = async () => {
+export const getLoyCategories = async ({ refresh = false } = {}) => {
+  const params = refresh ? { refresh: true } : {};
   try {
-    const { data } = await axios.get('/loy-categories');
+    const { data } = await axios.get('/loy-categories', { params });
     return data;
   } catch (err) {
     if (err?.response?.status === 404) {
-      const { data } = await axios.get('/api/loy/categories');
+      const { data } = await axios.get('/api/loy/categories', { params });
       return data;
     }
     throw err;
@@ -160,4 +161,79 @@ export const getLoyProxyMediaUrl = (url) => {
   return `/api/loy/proxy-media?url=${encodeURIComponent(url)}`;
 };
 
+export const getLoyAuthStatus = async () => {
+  try {
+    const { data } = await axios.get('/loy-auth-status');
+    return data;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      const { data } = await axios.get('/api/loy/auth-status');
+      return data;
+    }
+    throw err;
+  }
+};
+
+export const loyLogin = async ({ user, pwd }) => {
+  try {
+    const { data } = await axios.post('/loy-login', { user, pwd });
+    return data;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      const { data } = await axios.post('/api/loy/login', { user, pwd });
+      return data;
+    }
+    throw err;
+  }
+};
+
+export const loyLogout = async () => {
+  try {
+    const { data } = await axios.post('/loy-logout');
+    return data;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      const { data } = await axios.post('/api/loy/logout');
+      return data;
+    }
+    throw err;
+  }
+};
+
+export const uploadLoyMaterial = async ({ fileBlob, name = 'LEDSign Custom', mark = 'custom,64x20', tags = 1 }) => {
+  const formData = new FormData();
+  formData.append('file', fileBlob, 'canvas.png');
+  formData.append('name', name);
+  formData.append('mark', mark);
+  formData.append('tags', String(tags || 1));
+
+  try {
+    const { data } = await axios.post('/loy-upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return data;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      const { data } = await axios.post('/api/loy/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      return data;
+    }
+    throw err;
+  }
+};
+
+export const getLoyMyMaterials = async ({ pageIndex = 0, pageCount = 24 } = {}) => {
+  const params = { page_index: pageIndex, page_count: pageCount };
+  try {
+    const { data } = await axios.get('/loy-my-materials', { params });
+    return data;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      const { data } = await axios.get('/api/loy/my-materials', { params });
+      return data;
+    }
+    throw err;
+  }
+};
 
