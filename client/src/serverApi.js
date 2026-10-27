@@ -41,6 +41,15 @@ export async function savePresetToSign(payload, options = {}) {
   return response;
 }
 
+export async function cancelSavePreset(progressId) {
+  try {
+    const url = progressId ? `/cancel-save-preset/${encodeURIComponent(progressId)}` : '/cancel-save-preset';
+    return await axios.post(url);
+  } catch (err) {
+    console.warn('[cancelSavePreset] Failed to notify server:', err);
+  }
+}
+
 export const processVideoMedia = (payload) => postToCurrentServer('/process-video', payload, { timeout: 0 });
 
 export const getGeminiStatus = async () => {

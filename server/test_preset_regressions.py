@@ -131,6 +131,51 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.status_code, 409)
         self.assertEqual(main.connected_client.writes, [])
 
+    async def test_save_can_be_cancelled(self):
+        fake_sign = FakeSign()
+        main.connected_client = fake_sign
+        req = self.request()
+        req.progress_id = "test-cancel-prog"
+
+        async def cancel_on_sleep(*args, **kwargs):
+            if len(fake_sign.writes) >= 2:
+                await main.cancel_save_preset_by_id("test-cancel-prog")
+
+        with patch.object(main.asyncio, "sleep", side_effect=cancel_on_sleep):
+            with self.assertRaises(HTTPException) as error:
+                await main.save_preset(req)
+        self.assertEqual(error.exception.status_code, 499)
+        self.assertEqual(error.exception.detail, "Save cancelled by user")
+        self.assertTrue(any(b"\xc1\x02'\x00" in w for w in fake_sign.writes))
+        self.assertTrue(any(b"\xc1\x02\x04\x02\x00\x01" in w for w in fake_sign.writes))
+        self.assertFalse((Path(self.directory.name) / "current.gif").exists())
+
+    async def test_clock_save_and_cancellation(self):
+        fake_sign = FakeSign()
+        main.connected_client = fake_sign
+        clock_preset = main.PushTextRequest(mode="clock", clockStyle="default", timeFormat="12h")
+        req = main.SavePresetRequest(slot_id=10, address=FakeSign.address, preset=clock_preset, progress_id="test-clock-save")
+
+        # 1. Normal save of Clock to slot 10 (slot 11)
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            result = await main.save_preset(req)
+        self.assertTrue(result["written_to_sign"])
+        self.assertEqual(result["preview_url"], "/static/preset_aabbccddeeff_10.gif")
+        self.assertTrue((Path(self.directory.name) / "preset_aabbccddeeff_10.json").exists())
+        self.assertTrue((Path(self.directory.name) / "preset_aabbccddeeff_10.gif").exists())
+        self.assertEqual(main.hardware_slots_state.get(10, {}).get("key"), "clock")
+
+        # 2. Cancelled save of Clock
+        cancel_req = main.SavePresetRequest(slot_id=10, address=FakeSign.address, preset=clock_preset, progress_id="test-clock-cancel")
+        async def cancel_on_sleep(*args, **kwargs):
+            await main.cancel_save_preset_by_id("test-clock-cancel")
+
+        with patch.object(main.asyncio, "sleep", side_effect=cancel_on_sleep):
+            with self.assertRaises(HTTPException) as error:
+                await main.save_preset(cancel_req)
+        self.assertEqual(error.exception.status_code, 499)
+        self.assertEqual(error.exception.detail, "Save cancelled by user")
+
 
 if __name__ == "__main__":
     unittest.main()

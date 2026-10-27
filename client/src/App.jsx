@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { savePresetToSign, processVideoMedia } from './serverApi';
+import { savePresetToSign, cancelSavePreset, processVideoMedia } from './serverApi';
 import { fitEventSignText } from './eventText';
 import GeminiMediaGenerator, { GeminiLogo, OpenAILogo } from './GeminiMediaGenerator';
 
@@ -1604,6 +1604,33 @@ export default function App() {
   const [slotSaveProgress, setSlotSaveProgress] = useState(null);
   const [slotSavePhase, setSlotSavePhase] = useState('');
   const isSignUpdating = Boolean(pushing || slotSavePhase || slotSaveProgress !== null);
+  const slotSaveAbortControllerRef = useRef(null);
+  const slotSaveProgressIdRef = useRef(null);
+
+  const cancelSlotSave = async () => {
+    const pId = slotSaveProgressIdRef.current;
+    if (slotSaveAbortControllerRef.current) {
+      try {
+        slotSaveAbortControllerRef.current.abort();
+      } catch (e) {
+        console.warn('[cancelSlotSave] Error aborting request:', e);
+      }
+      slotSaveAbortControllerRef.current = null;
+    }
+    if (pId) {
+      try {
+        await cancelSavePreset(pId);
+      } catch (e) {
+        console.warn('[cancelSlotSave] Error notifying server:', e);
+      }
+    }
+    handleSetPushMessage('Save cancelled');
+    setSlotSaveProgress(null);
+    setSlotSavePhase('');
+    if (pushingRef) pushingRef.current = false;
+    setPushing(false);
+    if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
+  };
   const isSignUpdatingRef = useRef(false);
   isSignUpdatingRef.current = isSignUpdating;
   const autoConnectTried = useRef(false);
@@ -2775,11 +2802,13 @@ export default function App() {
     } else {
       pushName = payload.name;
       data = { ...payload };
-      setPushingPresetTarget({
-        type: 'local',
-        id: data.id,
-        isDefault: Boolean(data.isDefault)
-      });
+      if (!skipMessages) {
+        setPushingPresetTarget({
+          type: 'local',
+          id: data.id,
+          isDefault: Boolean(data.isDefault)
+        });
+      }
       if (data.id) {
         setLastPushedId(data.id);
       } else {
@@ -2919,9 +2948,11 @@ export default function App() {
       }
       throw e;
     } finally {
-      pushingRef.current = false;
-      setPushing(false);
-      setPushingPresetTarget(null);
+      if (!skipMessages) {
+        pushingRef.current = false;
+        setPushing(false);
+        setPushingPresetTarget(null);
+      }
     }
   };
 
@@ -3013,6 +3044,9 @@ export default function App() {
               setSlotSaveProgress={setSlotSaveProgress}
               slotSavePhase={slotSavePhase}
               setSlotSavePhase={setSlotSavePhase}
+              slotSaveAbortControllerRef={slotSaveAbortControllerRef}
+              slotSaveProgressIdRef={slotSaveProgressIdRef}
+              onCancelSlotSave={cancelSlotSave}
               isSignUpdating={isSignUpdating}
             />
           </div>
@@ -3031,6 +3065,11 @@ export default function App() {
             setUnifiedPushMessage={setUnifiedPushMessage}
             pushing={pushing}
             setPushing={setPushing}
+            slotSaveAbortControllerRef={slotSaveAbortControllerRef}
+            slotSaveProgressIdRef={slotSaveProgressIdRef}
+            onCancelSlotSave={cancelSlotSave}
+            setSlotSaveProgress={setSlotSaveProgress}
+            setSlotSavePhase={setSlotSavePhase}
             pushingRef={pushingRef}
             pushingPresetTarget={pushingPresetTarget}
             setPushingPresetTarget={setPushingPresetTarget}
@@ -3073,7 +3112,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, isSignUpdating }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, isSignUpdating }) {
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
@@ -3377,54 +3416,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       return;
     }
 
-    if (preset.mode === 'clock' || preset.id === 'clock-default') {
-      const slotObj = savedPresets[globalIdx];
-      const hwSlotId = slotObj?.hwSlotId !== undefined 
-        ? slotObj.hwSlotId 
-        : (slotObj?.slotNumber ? slotObj.slotNumber - 1 : globalIdx);
-
-      const nextSaved = [...savedPresets];
-      nextSaved[globalIdx] = {
-        ...nextSaved[globalIdx],
-        hwSlotId: hwSlotId,
-        preset: {
-          ...preset,
-          id: preset.id || `saved-clock-${globalIdx}`,
-          mode: 'clock',
-          hwSlotId: hwSlotId
-        }
-      };
-      if (typeof setPushingPresetTarget === 'function') {
-        setPushingPresetTarget({
-          type: 'saved',
-          globalIdx,
-          hwSlotId,
-          id: preset.id || `saved-clock-${globalIdx}`,
-          isDefault: false
-        });
-      }
-      setPushing(true);
-      try {
-        if (typeof onPush === 'function') {
-          await onPush(preset, true, true);
-        }
-        // IndexedDB persists the slot; do not duplicate video frames in localStorage.
-        setPushMessage(`Assigned Clock to Slot ${globalIdx + 1}!`);
-        setSavedPresets(nextSaved);
-        setIsManualOverride(true);
-        setLastPushedId(preset.id || `saved-clock-${globalIdx}`);
-      } catch (err) {
-        console.warn('Failed to push clock on assign:', err);
-        const detail = err.response?.data?.detail || err.message || '';
-        setPushMessage(`Error: Failed to assign Clock to Slot ${globalIdx + 1}${detail ? ` — ${detail}` : ''}`);
-      } finally {
-        if (pushingRef) pushingRef.current = false;
-        setPushing(false);
-        if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
-      }
-      return;
-    }
-
     const presetCopy = { ...preset };
     if (presetCopy.mode === 'text') {
       delete presetCopy.pixels;
@@ -3490,6 +3481,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     setSlotSaveProgress(0);
     setSlotSavePhase('Uploading preset');
     const progressId = `slot-save-${Date.now()}-${globalIdx}`;
+    const abortController = new AbortController();
+    if (slotSaveAbortControllerRef) slotSaveAbortControllerRef.current = abortController;
+    if (slotSaveProgressIdRef) slotSaveProgressIdRef.current = progressId;
     let pollActive = true;
     let highestProgress = 0;
     const updateProgress = (progress, phase) => {
@@ -3533,6 +3527,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         progress_id: progressId,
         is_currently_playing: isCurrentlyPlaying
       }, {
+        signal: abortController.signal,
         timeout: 300000,
         onUploadProgress: (event) => {
           if (event.total) {
@@ -3563,12 +3558,24 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       if (typeof syncHardwareSlots === 'function') await syncHardwareSlots();
       if (typeof fetchStatus === 'function') await fetchStatus();
     } catch (err) {
-      const detail = err.response?.data?.detail || err.message || '';
-      const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
-      setPushMessage(`Error: ${detail || 'Failed to save preset'}`);
+      const isCancelled = axios.isCancel(err) ||
+        err.name === 'CanceledError' ||
+        err.name === 'AbortError' ||
+        err.message?.toLowerCase().includes('cancel') ||
+        err.response?.status === 499 ||
+        err.response?.data?.detail?.toLowerCase().includes('cancel');
+      if (isCancelled) {
+        setPushMessage('Save cancelled');
+      } else {
+        const detail = err.response?.data?.detail || err.message || '';
+        const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
+        setPushMessage(`Error: ${detail || 'Failed to save preset'}`);
+      }
     } finally {
       pollActive = false;
       window.clearInterval(progressPoll);
+      if (slotSaveAbortControllerRef) slotSaveAbortControllerRef.current = null;
+      if (slotSaveProgressIdRef) slotSaveProgressIdRef.current = null;
       setSlotSaveProgress(null);
       setSlotSavePhase('');
       if (pushingRef) pushingRef.current = false;
@@ -3577,37 +3584,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
   };
 
+  
   const playSavedPreset = async (globalIdx, preset) => {
     if (pushingRef?.current || pushing || isSignUpdating) return;
     if (!preset) return; // Do nothing when clicking empty slots!
     if (pushingRef) pushingRef.current = true;
-
-    if (preset.mode === 'clock' || preset.id === 'clock-default') {
-      if (typeof setPushingPresetTarget === 'function') {
-        setPushingPresetTarget({
-          type: 'saved',
-          globalIdx,
-          id: preset.id || `saved-clock-${globalIdx}`,
-          isDefault: false
-        });
-      }
-      setPushing(true);
-      setPushMessage(`Pushing Clock to sign...`);
-      setIsManualOverride(true);
-      try {
-        await onPush(preset, true, true);
-        setPushMessage(`Pushed Clock to sign!`);
-        setLastPushedId(preset.id || `saved-clock-${globalIdx}`);
-      } catch (err) {
-        console.error('Failed to trigger clock play:', err);
-        setPushMessage(`Error: ${err.message}`);
-      } finally {
-        if (pushingRef) pushingRef.current = false;
-        setPushing(false);
-        if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
-      }
-      return;
-    }
 
     const slotObj = savedPresets[globalIdx];
     const hwSlotId = preset.hwSlotId !== undefined 
@@ -3628,7 +3609,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       });
     }
     setPushing(true);
-    setPushMessage(preset.name ? `Pushing "${preset.name}" to sign...` : `Pushing slot ${globalIdx + 1} to sign...`);
+    const displayName = preset.name || (preset.mode === 'clock' ? 'Clock' : `slot ${globalIdx + 1}`);
+    setPushMessage(`Pushing "${displayName}" to sign...`);
     setIsManualOverride(true);
 
     try {
@@ -3636,11 +3618,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         // Notify server to switch active hardware preset slot and update live preview
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof fetchStatus === 'function') await fetchStatus();
-        setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
+        setPushMessage(`Pushed "${displayName}" to sign!`);
         setLastPushedId(`hw-slot-${hwSlotId}`);
       } else {
         await onPush(preset, true, true);
-        setPushMessage(preset.name ? `Pushed "${preset.name}" to sign!` : `Pushed slot ${globalIdx + 1} to sign!`);
+        setPushMessage(`Pushed "${displayName}" to sign!`);
         setLastPushedId(preset.id || `hw-slot-${hwSlotId}`);
       }
     } catch (err) {
@@ -4328,7 +4310,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   role="status"
                   className="text-xs font-bold"
                   style={{
-                    color: isAssignmentReminder || pushMessage.startsWith('Error') ? '#f87171' : (/^(Saved|Pushed|Assigned|Deleted)\b/.test(pushMessage) ? '#34d399' : '#38bdf8'),
+                    color: isAssignmentReminder || pushMessage.startsWith('Error') || pushMessage.toLowerCase().includes('cancel') ? '#f87171' : (/^(Saved|Pushed|Assigned|Deleted)\b/.test(pushMessage) ? '#34d399' : '#38bdf8'),
                     display: 'inline-flex', alignItems: 'center', gap: 6,
                     marginLeft: 16, flex: '0 0 auto', whiteSpace: 'nowrap'
                   }}
@@ -4338,6 +4320,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 >
                   {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && <RefreshCw size={12} className="animate-spin" aria-label="Saving" />}
                   {!pushing && /^(Saved|Pushed|Assigned|Deleted)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400" />}
+                  {!pushing && pushMessage.toLowerCase().includes('cancel') && <X size={12} className="text-red-400" />}
                   <span>{pushMessage}</span>
                   {pushing && slotSaveProgress !== null && (
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flex: '0 0 auto' }}>
@@ -4349,6 +4332,44 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                       </div>
                       <span>{slotSaveProgress}% {slotSavePhase}</span>
                     </div>
+                  )}
+                  {pushing && (slotSaveProgress !== null || slotSavePhase || /saving.*slot/i.test(pushMessage) || pushingPresetTarget?.type === 'saved') && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (typeof onCancelSlotSave === 'function') onCancelSlotSave();
+                      }}
+                      title="Cancel save to slot"
+                      aria-label="Cancel save to slot"
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: 20,
+                        height: 20,
+                        minWidth: 20,
+                        minHeight: 20,
+                        borderRadius: '50%',
+                        border: '1px solid rgba(239, 68, 68, 0.4)',
+                        background: 'rgba(239, 68, 68, 0.12)',
+                        color: '#f87171',
+                        cursor: 'pointer',
+                        padding: 0,
+                        marginLeft: 4,
+                        transition: 'all 0.15s ease'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.25)';
+                        e.currentTarget.style.color = '#ffffff';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.12)';
+                        e.currentTarget.style.color = '#f87171';
+                      }}
+                    >
+                      <X size={12} strokeWidth={2.5} />
+                    </button>
                   )}
                 </div>
               )}
@@ -4467,16 +4488,15 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                background: 'rgba(0, 0, 0, 0.4)',
-                                backdropFilter: 'blur(2px)',
-                                WebkitBackdropFilter: 'blur(2px)',
+                                background: 'rgba(0, 0, 0, 0.55)',
+                                backdropFilter: 'blur(3px)',
+                                WebkitBackdropFilter: 'blur(3px)',
                                 zIndex: 20,
                                 pointerEvents: 'auto',
-                                cursor: 'wait',
                                 borderRadius: 'inherit'
                               }}
                             >
-                              <RefreshCw size={24} className="animate-spin text-white" aria-label="Pushing to sign" style={{ color: '#ffffff' }} />
+                              <RefreshCw size={22} className="animate-spin text-white" aria-label="Saving to slot" style={{ color: '#ffffff' }} />
                             </div>
                           ) : (
                             <div className="preset-card-overlay flex gap-2">
@@ -4566,16 +4586,15 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            background: 'rgba(0, 0, 0, 0.4)',
-                            backdropFilter: 'blur(2px)',
-                            WebkitBackdropFilter: 'blur(2px)',
+                            background: 'rgba(0, 0, 0, 0.55)',
+                            backdropFilter: 'blur(3px)',
+                            WebkitBackdropFilter: 'blur(3px)',
                             zIndex: 20,
                             pointerEvents: 'auto',
-                            cursor: 'wait',
                             borderRadius: 'inherit'
                           }}
                         >
-                          <RefreshCw size={24} className="animate-spin text-white" aria-label="Pushing to sign" style={{ color: '#ffffff' }} />
+                          <RefreshCw size={22} className="animate-spin text-white" aria-label="Saving to slot" style={{ color: '#ffffff' }} />
                         </div>
                       ) : (
                         <div 
@@ -5388,7 +5407,7 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, setSlotSaveProgress, setSlotSavePhase }) {
   const fontReady = useFontReady();
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
@@ -5459,13 +5478,43 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     setPresetView('saved');
     setPushing(true, { type: 'local', id: defaultPreset.id, isDefault: true });
     setPushMessage('Saving default to Slot 2...');
+    const progressId = `slot-save-default-${Date.now()}`;
+    const abortController = new AbortController();
+    if (slotSaveAbortControllerRef) slotSaveAbortControllerRef.current = abortController;
+    if (slotSaveProgressIdRef) slotSaveProgressIdRef.current = progressId;
+    if (typeof setSlotSaveProgress === 'function') setSlotSaveProgress(0);
+    if (typeof setSlotSavePhase === 'function') setSlotSavePhase('Uploading preset');
+    let pollActive = true;
+    let highestProgress = 0;
+    const updateProgress = (progress, phase) => {
+      if (!pollActive || progress < highestProgress) return;
+      highestProgress = progress;
+      if (typeof setSlotSaveProgress === 'function') setSlotSaveProgress(progress);
+      if (typeof setSlotSavePhase === 'function') setSlotSavePhase(phase);
+    };
+    const progressPoll = window.setInterval(() => {
+      axios.get(`${API_BASE}/save-progress/${encodeURIComponent(progressId)}`)
+        .then(res => {
+          updateProgress(res.data?.progress ?? 0, res.data?.phase || 'Preparing preset');
+        })
+        .catch(() => {});
+    }, 300);
     try {
       const isCurrentlyPlaying = lastPushedId === 'hw-slot-1' || status.display_mode === 'preset-1';
       const response = await savePresetToSign({
         slot_id: 1,
         address: status.address || DEFAULT_MAC,
         preset: presetForSign,
+        progress_id: progressId,
         is_currently_playing: isCurrentlyPlaying
+      }, {
+        signal: abortController.signal,
+        timeout: 300000,
+        onUploadProgress: (event) => {
+          if (event.total) {
+            updateProgress(Math.min(15, Math.round((event.loaded / event.total) * 15)), 'Uploading preset');
+          }
+        }
       });
       const thumbnail = response.data?.preview_url
         ? `${API_BASE}${response.data.preview_url}?t=${Date.now()}`
@@ -5484,9 +5533,25 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       setPushMessage('Saved to Slot 2!');
       syncHardwareSlots();
     } catch (error) {
-      console.warn('[preset-save] Failed to save default to hardware slot 1:', error);
-      setPushMessage('Error saving default to Slot 2');
+      const isCancelled = axios.isCancel(error) || 
+        error.name === 'CanceledError' || 
+        error.name === 'AbortError' || 
+        error.message?.toLowerCase().includes('cancel') || 
+        error.response?.status === 499 || 
+        error.response?.data?.detail?.toLowerCase().includes('cancel');
+      if (isCancelled) {
+        setPushMessage('Save cancelled');
+      } else {
+        console.warn('[preset-save] Failed to save default to hardware slot 1:', error);
+        setPushMessage('Error saving default to Slot 2');
+      }
     } finally {
+      pollActive = false;
+      window.clearInterval(progressPoll);
+      if (slotSaveAbortControllerRef) slotSaveAbortControllerRef.current = null;
+      if (slotSaveProgressIdRef) slotSaveProgressIdRef.current = null;
+      if (typeof setSlotSaveProgress === 'function') setSlotSaveProgress(null);
+      if (typeof setSlotSavePhase === 'function') setSlotSavePhase('');
       setPushing(false);
     }
   };

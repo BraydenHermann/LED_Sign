@@ -517,6 +517,11 @@ if not os.path.exists(STATIC_DIR):
 # Small in-memory status map for browser-side progress while a preset is being
 # written to a hardware slot. Entries are keyed by a client-generated id.
 save_progress: dict[str, dict[str, Any]] = {}
+save_cancellations: set[str] = set()
+active_save_cancellation: bool = False
+
+class SaveCancelledException(Exception):
+    pass
 
 # Mount static folder so frontend can read preview images
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -3409,25 +3414,55 @@ class SavePresetRequest(BaseModel):
 async def get_save_progress(progress_id: str):
     return save_progress.get(progress_id, {"progress": 0, "phase": "Waiting to start"})
 
+@app.post("/cancel-save-preset/{progress_id}")
+async def cancel_save_preset_by_id(progress_id: str):
+    global active_save_cancellation
+    save_cancellations.add(progress_id)
+    active_save_cancellation = True
+    if progress_id in save_progress:
+        save_progress[progress_id]["cancelled"] = True
+        save_progress[progress_id]["phase"] = "Cancelled"
+    print(f"[cancel-save-preset] Cancellation requested for progress_id={progress_id}")
+    return {"status": "cancelled", "progress_id": progress_id}
+
+@app.post("/cancel-save-preset")
+async def cancel_save_preset():
+    global active_save_cancellation
+    active_save_cancellation = True
+    for p_id in list(save_progress.keys()):
+        save_cancellations.add(p_id)
+        save_progress[p_id]["cancelled"] = True
+        save_progress[p_id]["phase"] = "Cancelled"
+    print("[cancel-save-preset] Cancellation requested for active save")
+    return {"status": "cancelled"}
+
 def encode_var_len(val: int) -> bytes:
     if val < 128:
         return bytes([val])
     elif val < 256:
         return bytes([129, val])
 @app.post("/save-preset")
-async def save_preset(req: SavePresetRequest):
+async def save_preset(req: SavePresetRequest, request: Request = None):
     # A complete file transfer is one transaction. Calendar saves and manual
     # slot selections must not interleave session, chunk and play packets.
-    global hardware_saving
+    global hardware_saving, active_save_cancellation
     async with preset_switch_lock:
         hardware_saving = True
+        active_save_cancellation = False
+        if req.progress_id:
+            save_cancellations.discard(req.progress_id)
         try:
+            if request is not None:
+                return await _save_preset(req, request=request)
             return await _save_preset(req)
         finally:
             hardware_saving = False
+            active_save_cancellation = False
+            if req.progress_id:
+                save_cancellations.discard(req.progress_id)
 
 
-async def _save_preset(req: SavePresetRequest):
+async def _save_preset(req: SavePresetRequest, request: Request = None):
     global connected_client, connection_ready, current_speed, active_scroller_task, current_width, current_display_mode, frames_sent
 
     if not req.address.strip():
@@ -3438,6 +3473,16 @@ async def _save_preset(req: SavePresetRequest):
     progress_id = req.progress_id
     written_to_sign = False
 
+    async def check_save_cancelled():
+        if active_save_cancellation or (progress_id and progress_id in save_cancellations):
+            raise SaveCancelledException("Save cancelled by user")
+        if request is not None:
+            try:
+                if await request.is_disconnected():
+                    raise SaveCancelledException("Save cancelled (client disconnected)")
+            except Exception:
+                pass
+
     def report_progress(value: int, phase: str = "Preparing"):
         if progress_id:
             save_progress[progress_id] = {"progress": max(0, min(100, int(value))), "phase": phase}
@@ -3445,6 +3490,7 @@ async def _save_preset(req: SavePresetRequest):
     # The browser uses 0–15% for uploading the preset. Begin server-side work
     # at the same boundary so progress never appears to move backward.
     report_progress(15, "Preparing preset")
+    await check_save_cancelled()
 
     # Cancel any active scrolling or flipper task cleanly
     await cancel_active_worker()
@@ -3454,11 +3500,15 @@ async def _save_preset(req: SavePresetRequest):
     is_playing_target_slot = req.is_currently_playing if req.is_currently_playing is not None else (current_display_mode == f"preset-{slot_id}")
     
     if preset.mode == 'clock':
+        preset_json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.json")
+        preset_gif_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.gif")
         try:
-            preset_json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.json")
-            preset_gif_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.gif")
+            await check_save_cancelled()
             current_png = os.path.join(STATIC_DIR, "current.png")
             current_gif = os.path.join(STATIC_DIR, "current.gif")
+
+            report_progress(25, "Preparing clock preset")
+            await check_save_cancelled()
 
             with open(preset_json_path, "w") as f:
                 _json.dump(preset.model_dump(), f)
@@ -3471,12 +3521,18 @@ async def _save_preset(req: SavePresetRequest):
             show_sec = getattr(preset, 'showSeconds', True)
             if show_sec is None: show_sec = True
 
+            report_progress(50, "Rendering clock frame")
+            await check_save_cancelled()
+
             preview_img, _ = render_clock_frame(now, fmt, c_style, c_color, c_bg, show_sec)
             preview_img.save(preset_gif_path, format="GIF")
             preview_img.save(current_png, format="PNG")
             if os.path.exists(current_gif):
                 try: os.remove(current_gif)
                 except Exception: pass
+
+            report_progress(75, "Configuring sign clock")
+            await check_save_cancelled()
 
             if connected_client and connected_client.is_connected and connection_ready:
                 if active_scroller_task:
@@ -3487,15 +3543,39 @@ async def _save_preset(req: SavePresetRequest):
                     await asyncio.sleep(0.05)
                 except Exception:
                     pass
+                await check_save_cancelled()
                 if c_style == 'default':
                     await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_on_command(), response=True)
                 else:
                     await set_clock(on=True, color=c_color, bg_color=c_bg, format=fmt, show_seconds=show_sec, clock_style=c_style)
 
+            hardware_slots_state[slot_id] = {
+                "slot_id": slot_id,
+                "occupied": True,
+                "key": "clock"
+            }
+
             current_display_mode = "clock"
             frames_sent += 1
-            report_progress(100)
+            report_progress(100, "Complete")
             return {"status": "success", "preview_url": f"/static/preset_{mac_str}_{slot_id}.gif", "written_to_sign": bool(connected_client and connected_client.is_connected and connection_ready)}
+        except SaveCancelledException:
+            print(f"[save_preset] Cancelled by user. Clock slot {slot_id} aborted.")
+            report_progress(0, "Cancelled")
+            for p in (preset_json_path, preset_gif_path):
+                if p and os.path.exists(p):
+                    try: os.remove(p)
+                    except Exception: pass
+            if connected_client and connected_client.is_connected:
+                try:
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
+                    await asyncio.sleep(0.02)
+                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=499, detail="Save cancelled by user")
+        except HTTPException:
+            raise
         except Exception as clk_err:
             import traceback
             traceback.print_exc()
@@ -3732,6 +3812,7 @@ async def _save_preset(req: SavePresetRequest):
                     speed_val = speed
                     stay_time = 0
 
+                    await check_save_cancelled()
                     init_pkt = protocol.build_slot_session_init(slot_id)
                     await safe_write_gatt_char(protocol.WRITE_UUID, init_pkt, response=True)
                     await asyncio.sleep(0.05)
@@ -3743,6 +3824,7 @@ async def _save_preset(req: SavePresetRequest):
                     chunk_size = 960
                     total_chunks = math.ceil(len(slot_payload) / chunk_size)
                     for c_idx in range(total_chunks):
+                        await check_save_cancelled()
                         if not connected_client or not connected_client.is_connected:
                             raise Exception(f"BLE disconnected during chunk write (chunk {c_idx}/{total_chunks})")
                         c_data = slot_payload[c_idx * chunk_size : (c_idx + 1) * chunk_size]
@@ -3754,6 +3836,7 @@ async def _save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after chunk writes")
 
+                    await check_save_cancelled()
                     await asyncio.sleep(0.1)
                     commit_pkt = protocol.build_slot_commit(slot_id, slot_payload)
                     await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
@@ -3793,6 +3876,7 @@ async def _save_preset(req: SavePresetRequest):
                     frame_bytes = pil_frames[0].resize((frame_w, frame_h)).convert("RGB").tobytes()
                     ystp_bytes = ystp_header + frame_bytes
 
+                    await check_save_cancelled()
                     init_pkt = protocol.build_slot_session_init(slot_id)
                     await safe_write_gatt_char(protocol.WRITE_UUID, init_pkt, response=True)
                     await asyncio.sleep(0.05)
@@ -3804,6 +3888,7 @@ async def _save_preset(req: SavePresetRequest):
                     chunk_size = 960
                     total_chunks = math.ceil(len(ystp_bytes) / chunk_size)
                     for c_idx in range(total_chunks):
+                        await check_save_cancelled()
                         if not connected_client or not connected_client.is_connected:
                             raise Exception(f"BLE disconnected during chunk write (chunk {c_idx}/{total_chunks})")
                         c_data = ystp_bytes[c_idx * chunk_size : (c_idx + 1) * chunk_size]
@@ -3815,6 +3900,7 @@ async def _save_preset(req: SavePresetRequest):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after chunk writes")
 
+                    await check_save_cancelled()
                     await asyncio.sleep(0.05)
                     commit_pkt = protocol.build_slot_commit(slot_id, ystp_bytes)
                     await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
@@ -3847,6 +3933,19 @@ async def _save_preset(req: SavePresetRequest):
 
                 print(f"[save_preset] Done. Slot {slot_id} saved (is_anim={is_anim}).")
                 written_to_sign = True
+            except SaveCancelledException:
+                print(f"[save_preset] Cancelled by user. Slot {slot_id} aborted.")
+                report_progress(0, "Cancelled")
+                if connected_client and connected_client.is_connected:
+                    try:
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
+                        await asyncio.sleep(0.02)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
+                        if brightness != 15:
+                            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
+                    except Exception as cl_err:
+                        print(f"[save_preset] Cleanup error after cancel: {cl_err}")
+                raise HTTPException(status_code=499, detail="Save cancelled by user")
             except Exception as e:
                 print(f"[save_preset] Error: {e}")
                 # Only attempt recovery write if still connected; skip if BLE already dropped
