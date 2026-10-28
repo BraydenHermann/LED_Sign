@@ -1330,32 +1330,8 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             except Exception:
                 pass
 
-            # If a preset was playing prior to reconnect, resume it; otherwise stop boot playlist/clock
-            if current_display_mode and current_display_mode.startswith("preset-"):
-                try:
-                    slot_id = int(current_display_mode.split("-")[1])
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=False)
-                    await asyncio.sleep(0.03)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=False)
-                    await asyncio.sleep(0.03)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=False)
-                    await asyncio.sleep(0.03)
-                    select_pkt = protocol.build_slot_select_command(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=False)
-                    await asyncio.sleep(0.05)
-                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=False)
-                    await asyncio.sleep(0.05)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=False)
-                    await asyncio.sleep(0.05)
-                    if brightness != 15:
-                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=False)
-                        await asyncio.sleep(0.05)
-                    print(f"[connect] Resumed active preset slot {slot_id}")
-                except Exception as pe:
-                    print(f"[connect] Warning resuming preset playback: {pe}")
-            else:
-                await stop_all_playback(blank=False)
+            # Preserve the sign's current onboard playback across BLE reconnects
+            # instead of re-sending slot play commands or halting playback.
             try:
                 # Query hardware slot inventory (first 12 slots only)
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 12), response=False)
@@ -1418,7 +1394,22 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
 
 @app.post("/connect")
 async def connect(req: ConnectRequest):
-    global _suppress_auto_reconnect, _connection_intent
+    global _suppress_auto_reconnect, _connection_intent, _reconnect_task
+    target_mac = (req.address or "").strip().upper()
+    passcode = (req.passcode or "").strip()
+    if (
+        not passcode
+        and _reconnect_task is not None
+        and not _reconnect_task.done()
+        and (not target_mac or target_mac == (last_connected_mac or "").upper())
+    ):
+        try:
+            await asyncio.shield(_reconnect_task)
+        except Exception:
+            pass
+        if connected_client and connected_client.is_connected and connection_ready:
+            if not target_mac or (connected_client.address and connected_client.address.upper() == target_mac):
+                return {"status": "success", "connected": True, "address": connected_client.address}
     # A human-selected target takes priority over a pending background retry.
     _suppress_auto_reconnect = True
     _connection_intent += 1
@@ -1479,7 +1470,6 @@ async def disconnect():
                 await disconnect_ble_client()
                 password_enabled = None
                 connected_device_id = ""
-                current_display_mode = "none"
 
     try:
         await asyncio.wait_for(_do_disconnect(), timeout=4.0)
@@ -1488,7 +1478,6 @@ async def disconnect():
         await disconnect_ble_client()
         password_enabled = None
         connected_device_id = ""
-        current_display_mode = "none"
 
     return {"status": "success"}
 

@@ -1742,7 +1742,14 @@ export default function App() {
     return (
       lower.includes('sign is not connected') ||
       lower.includes('sign not connected') ||
-      lower.includes('sign is currently connecting')
+      lower.includes('sign is currently connecting') ||
+      lower.includes('status code 409') ||
+      lower.includes('connection replaced') ||
+      lower.includes('selected sign changed') ||
+      lower.includes('please connect to the sign') ||
+      lower.includes('disconnected') ||
+      lower.includes('-2147023673') ||
+      (lower.startsWith('error:') && (lower.includes('canceled') || lower.includes('cancelled')))
     );
   };
 
@@ -1751,7 +1758,7 @@ export default function App() {
   }, [pushMessage, localPushMessage]);
 
   useEffect(() => {
-    if (status?.connected) {
+    if (status?.connected && disconnectedStatusPollsRef.current === 0) {
       if (isConnectionStaleMessage(pushMessage)) {
         setPushMessage('');
         clearStatusOnNextInteractionRef.current = false;
@@ -1760,7 +1767,7 @@ export default function App() {
         setLocalPushMessage('');
         clearStatusOnNextInteractionRef.current = false;
       }
-      if (connectionError && (connectionError.toLowerCase().includes('not connected') || connectionError.toLowerCase().includes('failed to connect'))) {
+      if (connectionError && (isConnectionStaleMessage(connectionError) || connectionError.toLowerCase().includes('not connected') || connectionError.toLowerCase().includes('failed to connect'))) {
         setConnectionError('');
       }
     }
@@ -1798,6 +1805,7 @@ export default function App() {
         autoConnectTried.current = false;
         setPushMessage(prev => isConnectionStaleMessage(prev) ? '' : prev);
         setLocalPushMessage(prev => isConnectionStaleMessage(prev) ? '' : prev);
+        setConnectionError(prev => (prev && (isConnectionStaleMessage(prev) || prev.toLowerCase().includes('not connected') || prev.toLowerCase().includes('failed to connect'))) ? '' : prev);
       } else if (hadLiveConnectionRef.current) {
         disconnectedStatusPollsRef.current += 1;
         if (disconnectedStatusPollsRef.current < 3) return res.data;
@@ -1908,6 +1916,7 @@ export default function App() {
         setStatus(res.data);
         setPushMessage(prev => isConnectionStaleMessage(prev) ? '' : prev);
         setLocalPushMessage(prev => isConnectionStaleMessage(prev) ? '' : prev);
+        setConnectionError('');
         if (!choosingSignRef.current) setScanOpen(false);
         setConnectionFailed(false);
         if (!isAuto) setConnectionTarget(null);
@@ -1985,8 +1994,7 @@ export default function App() {
     autoConnectTried.current = true; // Prevent immediate auto-reconnect loop on manual disconnect
     setPushMessage('');
     setLocalPushMessage('');
-    setIsManualOverride(false);
-    setLastPushedId(null);
+    initializedConnectionMacsRef.current.clear();
     clearAllSessionPasscodes();
     try { await axios.post(`${API_BASE}/disconnect`, {}, { timeout: 3000 }); } catch (e) {}
   };
@@ -2053,12 +2061,6 @@ export default function App() {
     }
   }, [isSignConnecting, status.connected, isModalOpen, scanOpen, isSignUpdating, pushing]);
   const [lastPushedId, setLastPushedId] = useState(null);
-
-  useEffect(() => {
-    if (lastPushedId && status?.address && playbackSignRef.current === status.address.toUpperCase()) {
-      localStorage.setItem(`loy_last_pushed_id_${status.address}`, lastPushedId);
-    }
-  }, [lastPushedId, status?.address]);
   const [isManualOverride, setIsManualOverrideState] = useState(false);
   const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
@@ -2080,6 +2082,21 @@ export default function App() {
     }
     playbackSignRef.current = signMac;
   }, [status.connected, status.address]);
+
+  useEffect(() => {
+    if (lastPushedId && status?.address) {
+      const signMac = status.address.toUpperCase();
+      if (!playbackSignRef.current || playbackSignRef.current === signMac) {
+        localStorage.setItem(`loy_last_pushed_id_${signMac}`, lastPushedId);
+      }
+    }
+  }, [lastPushedId, status?.address]);
+
+  const getSavedLastPushedId = (mac) => {
+    if (!mac) return null;
+    const upper = mac.toUpperCase();
+    return localStorage.getItem(`loy_last_pushed_id_${upper}`) || localStorage.getItem(`loy_last_pushed_id_${mac}`) || null;
+  };
   // A transient BLE disconnect (for example while the PC is locked) must not
   // replay the default and overwrite the preset the user deliberately chose.
   const initializedConnectionMacsRef = useRef(new Set());
@@ -2329,17 +2346,7 @@ export default function App() {
       
       console.log("[app] Window focused, syncing events...");
       setNow(new Date());
-      fetchEvents().then(newEvents => {
-        if (!isManualOverrideRef.current) {
-          const activeEvents = (newEvents || [])?.filter(ev => isEventActive(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined') || [];
-          const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
-          if (active) {
-            console.log("[app] Force-pushing active event after focus:", active.summary);
-            setLastPushedId(null);
-            handlePush(getEventDisplayString(active), active.response_status);
-          }
-        }
-      });
+      fetchEvents();
     };
 
     // Initialize TZ
@@ -2417,6 +2424,7 @@ export default function App() {
                 const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
                 if (!pData && !previewUrl) {
                   localStorage.removeItem('loy_hw_cal_synced_' + activeMac);
+                  localStorage.removeItem('loy_hw_cal_text_' + activeMac);
                   if (currentList[0]?.preset) {
                     updated = true;
                     currentList[0] = { slotNumber: 1, hwSlotId: 0, preset: null };
@@ -2424,6 +2432,11 @@ export default function App() {
                   return;
                 }
                 if (pData || previewUrl) {
+                  const slot0Text = normalizeForSign((pData?.text || pData?.name || '').trim());
+                  if (slot0Text) {
+                    localStorage.setItem('loy_hw_cal_synced_' + activeMac, 'true');
+                    localStorage.setItem('loy_hw_cal_text_' + activeMac, slot0Text);
+                  }
                   const hwPreset = {
                     ...(pData || {}),
                     id: 'hw-slot-0',
@@ -2522,6 +2535,41 @@ export default function App() {
     return () => window.removeEventListener('focus', onFocus);
   }, [status?.connected, activeMac]);
 
+  const getSlot1EventText = (targetMac) => {
+    const mac = (targetMac || status?.address || DEFAULT_MAC).toUpperCase();
+    const slot1Preset = savedPresetsRef.current?.[0]?.preset || allSavedPresets?.[mac]?.[0]?.preset || savedPresets?.[0]?.preset;
+    const fromPreset = normalizeForSign((slot1Preset?.text || slot1Preset?.name || '').trim());
+    if (fromPreset) return fromPreset;
+    return normalizeForSign((localStorage.getItem('loy_hw_cal_text_' + mac) || '').trim());
+  };
+
+  const isEventAlreadyLastPushed = (evOrText, targetMac, effectiveLastId = null, targetEventId = null) => {
+    const mac = (targetMac || status?.address || DEFAULT_MAC).toUpperCase();
+    const lastId = effectiveLastId || lastPushedId || getSavedLastPushedId(mac);
+    if (!lastId) return false;
+    const isCalSynced = Boolean(localStorage.getItem('loy_hw_cal_synced_' + mac));
+    if (!isCalSynced) return false;
+    const rawStr = typeof evOrText === 'string' ? evOrText : getEventDisplayString(evOrText);
+    const targetCleanText = normalizeForSign(rawStr.includes('|||') ? rawStr.split('|||')[0].trim() : rawStr.trim());
+    const slot1Text = getSlot1EventText(mac);
+    if (targetEventId && lastId === targetEventId && (!slot1Text || slot1Text === targetCleanText)) {
+      return true;
+    }
+    if ((lastId === 'hw-slot-0' || String(lastId).startsWith('event-')) && slot1Text && targetCleanText && slot1Text === targetCleanText) {
+      return true;
+    }
+    return false;
+  };
+
+  const isDefaultAlreadyLastPushed = (defPreset, targetMac, effectiveLastId = null) => {
+    const mac = (targetMac || status?.address || DEFAULT_MAC).toUpperCase();
+    const lastId = effectiveLastId || lastPushedId || getSavedLastPushedId(mac);
+    if (!lastId) return false;
+    const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + mac));
+    if (!isDefaultSynced) return false;
+    return lastId === 'hw-slot-1' || Boolean(defPreset?.id && lastId === defPreset.id);
+  };
+
   // Auto-push / Blanking / Default logic based on the local clock
   useEffect(() => {
     if (!status?.connected || !dbLoaded || isSignUpdating || pushingRef.current || initializingConnectionRef.current ||
@@ -2561,7 +2609,14 @@ export default function App() {
       }
 
       if (targetId !== lastPushedId) {
+        const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
         if (targetContent.type === 'event') {
+          if (isEventAlreadyLastPushed(targetContent.summary, targetMac, lastPushedId, targetId)) {
+            console.log("[auto-push] Active event was already the last preset pushed; skipping re-send:", currentEvent.summary);
+            lastNotifiedEventIdRef.current = targetId;
+            setLastPushedId(targetId);
+            return;
+          }
           // Only capture once for a calendar run. Moving from one calendar
           // event directly into another must keep the original return target.
           if (!calendarReturnPresetRef.current && !String(lastPushedId || '').startsWith('event-')) {
@@ -2577,13 +2632,13 @@ export default function App() {
               }
             }
           }
-          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
-          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
-          const targetCleanText = targetContent.summary.includes('|||') 
-            ? targetContent.summary.split('|||')[0].trim() 
-            : targetContent.summary.trim();
+          const currentSlot1Text = getSlot1EventText(targetMac);
+          const targetCleanText = normalizeForSign(
+            targetContent.summary.includes('|||') 
+              ? targetContent.summary.split('|||')[0].trim() 
+              : targetContent.summary.trim()
+          );
 
-          const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
           const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
 
           if (isCalSynced && currentSlot1Text && currentSlot1Text === targetCleanText) {
@@ -2634,9 +2689,14 @@ export default function App() {
                 console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
               });
           } else {
+            const defPreset = (presets || []).find(p => p.isDefault);
+            if (isDefaultAlreadyLastPushed(defPreset, targetMac, lastPushedId)) {
+              console.log("[auto-push] Default preset was already the last preset pushed; skipping re-send.");
+              setLastPushedId('hw-slot-1');
+              return;
+            }
             // Play hardware slot 1 — the reserved default
             console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
-            const defPreset = (presets || []).find(p => p.isDefault);
             setLastPushedId('hw-slot-1');
             axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
               .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
@@ -2664,13 +2724,14 @@ export default function App() {
       if (pushingRef.current) return;
       initializedConnectionMacsRef.current.add(targetMac);
       initializingConnectionRef.current = true;
-      setIsManualOverride(false);
-      isManualOverrideRef.current = false;
+      const priorLastPushedId = lastPushedId || getSavedLastPushedId(targetMac);
+      const priorManualOverride = isManualOverrideRef.current;
 
       const pushDefaultOrActive = async () => {
         // 1. Check if hardware slot 1 (Default Preset, slot 2 in UI) is synced to this sign's hardware
         const def = presets.find(p => p.isDefault);
         const isDefaultSynced = localStorage.getItem('loy_hw_default_synced_' + targetMac);
+        let defaultJustSavedToSign = false;
         if (def && !isDefaultSynced) {
           console.log("[connect] Pushing local default preset to new sign default slot (slot 1)...");
           try {
@@ -2693,12 +2754,17 @@ export default function App() {
               return { ...prev, [targetMac]: curList };
             });
             localStorage.setItem('loy_hw_default_synced_' + targetMac, 'true');
+            defaultJustSavedToSign = true;
           } catch (e) {
             console.warn("[connect] Failed to push default to slot 1:", e);
             if (e.response?.status === 409) throw e;
           } finally {
             setPushing(false);
           }
+        }
+
+        if (typeof syncHardwareSlots === 'function') {
+          await syncHardwareSlots();
         }
 
         // 2. Calendar Slot (hardware slot 0, slot 1 in UI)
@@ -2709,50 +2775,66 @@ export default function App() {
           } catch (e) {}
         }
 
-        const activeEvents = (evs || []).filter(ev => isEventInWindow(ev, new Date()) && ev.response_status?.toLowerCase() !== 'declined');
-        const active = activeEvents.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0];
-
+        const active = selectCalendarEvent(evs || [], new Date());
         if (active) {
+          lastActiveEventIdRef.current = `${active.id}-${active.start_iso}`;
+        }
+
+        if (active && !priorManualOverride) {
+          setIsManualOverride(false);
           const activeStr = getEventDisplayString(active);
-          console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
-          await handlePush(activeStr, false, false, `event-${active.id}-${activeStr}`);
-          localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
+          const targetEventId = `event-${active.id}-${activeStr}`;
+          if (!defaultJustSavedToSign && isEventAlreadyLastPushed(activeStr, targetMac, priorLastPushedId, targetEventId)) {
+            console.log("[connect] Active event was already the last preset pushed; skipping re-send:", active.summary);
+            lastNotifiedEventIdRef.current = targetEventId;
+            setLastPushedId(targetEventId);
+          } else {
+            console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
+            await handlePush(activeStr, false, false, targetEventId);
+            localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
+          }
         } else {
           // Calendar slot 0 is sign-specific. Without an active event, never
           // seed it from another sign's cached calendar preset.
-          const savedLastPushedId = localStorage.getItem(`loy_last_pushed_id_${targetMac}`);
-          if (savedLastPushedId && savedLastPushedId !== 'hw-slot-1') {
-            console.log(`[connect] Resuming previously pushed preset: ${savedLastPushedId}`);
+          const savedLastPushedId = priorLastPushedId;
+          const isSavedNonDefault = savedLastPushedId &&
+            savedLastPushedId !== 'hw-slot-1' &&
+            (!def?.id || savedLastPushedId !== def.id) &&
+            !String(savedLastPushedId).startsWith('event-') &&
+            (savedLastPushedId !== 'hw-slot-0' || priorManualOverride);
+
+          if (isSavedNonDefault) {
+            console.log(`[connect] Preserving last pushed preset without re-sending: ${savedLastPushedId}`);
+            setIsManualOverride(true);
             setLastPushedId(savedLastPushedId);
-            if (savedLastPushedId.startsWith('hw-slot-')) {
-              const slotNum = parseInt(savedLastPushedId.replace('hw-slot-', ''), 10);
-              if (!isNaN(slotNum)) {
-                try {
-                  await axios.post(`${API_BASE}/preset?id=${slotNum}&mac=${encodeURIComponent(targetMac)}`);
-                } catch (e) {
-                  console.warn(`[connect] Failed to resume slot ${slotNum}:`, e);
-                }
-              }
-            }
+          } else if (!defaultJustSavedToSign && isDefaultAlreadyLastPushed(def, targetMac, savedLastPushedId)) {
+            console.log("[connect] Default preset was already the last preset pushed; skipping re-send.");
+            setIsManualOverride(false);
+            setLastPushedId('hw-slot-1');
           } else {
+            setIsManualOverride(false);
             console.log("[connect] Playing hardware default slot (slot 1)");
             setLastPushedId('hw-slot-1');
             try {
               await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
             } catch (e) {
               console.warn("[connect] No default saved to slot 1 yet:", e);
+              if (e.response?.status === 409) throw e;
               if (def) {
-                handlePush(def, false, false, 'hw-slot-1').catch(() => {});
+                await handlePush(def, false, false, 'hw-slot-1');
               }
             }
           }
         }
-
-        if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
       };
       pushDefaultOrActive().catch(e => {
-        if (e.response?.status === 409) initializedConnectionMacsRef.current.delete(targetMac);
-        handleSetPushMessage(`Error: ${e.message}`);
+        const detail = e.response?.data?.detail;
+        const errorMsg = typeof detail === 'string' ? detail : (Array.isArray(detail) ? detail[0]?.msg : (detail?.message || e.message || ''));
+        if (e.response?.status === 409 || isConnectionStaleMessage(errorMsg) || isConnectionStaleMessage(e.message)) {
+          initializedConnectionMacsRef.current.delete(targetMac);
+          return;
+        }
+        handleSetPushMessage(`Error: ${errorMsg || e.message}`);
       }).finally(() => {
         initializingConnectionRef.current = false;
         pushingRef.current = false;
@@ -2889,31 +2971,41 @@ export default function App() {
           delete eventPresetCopy.pixels;
 
           const targetMac = (status.address || '').toUpperCase();
-          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
-          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
-          const targetEventText = (eventPresetCopy.text || eventPresetCopy.name || '').trim();
+          const currentSlot1Text = getSlot1EventText(targetMac);
+          const targetEventText = normalizeForSign((eventPresetCopy.text || eventPresetCopy.name || '').trim());
           const isCalSynced = localStorage.getItem('loy_hw_cal_synced_' + targetMac);
+
+          if (!manual && isEventAlreadyLastPushed(targetEventText, targetMac, lastPushedId, autoTargetId)) {
+            console.log('[push-event] Event was already the last preset pushed; skipping re-send:', targetEventText);
+            setLastPushedId(autoTargetId || 'hw-slot-0');
+            return;
+          }
 
           // Skip re-saving if hardware slot 1 already has this event text (auto OR manual)
           if (isCalSynced && currentSlot1Text && currentSlot1Text === targetEventText) {
             try {
               console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
-              handleSetPushMessage('Playing from Slot 1...');
+              if (manual && !skipMessages) {
+                handleSetPushMessage('Playing from Slot 1...');
+              }
               await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
               setLastPushedId(autoTargetId || 'hw-slot-0');
               await fetchStatus();
-              handleSetPushMessage('Pushed Slot 1 to sign!');
+              if (manual && !skipMessages) {
+                handleSetPushMessage('Pushed Slot 1 to sign!');
+              }
               return;
             } catch (playErr) {
               if (playErr.response?.status !== 404) throw playErr;
               localStorage.removeItem('loy_hw_cal_synced_' + targetMac);
+              localStorage.removeItem('loy_hw_cal_text_' + targetMac);
             }
           }
 
           handleSetPushMessage('Saving event to Slot 1...');
 
           try {
-            const isCurrentlyPlaying = (lastPushedId === 'hw-slot-0') || (status?.display_mode === 'preset-0');
+            const isCurrentlyPlaying = (lastPushedId === 'hw-slot-0') || String(lastPushedId || '').startsWith('event-') || (status?.display_mode === 'preset-0');
             const saveRes = await savePresetToSign({
               slot_id: 0,
               address: targetMac,
@@ -2935,9 +3027,15 @@ export default function App() {
             });
             setLastPushedId(autoTargetId || 'hw-slot-0');
             localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
+            if (targetEventText) {
+              localStorage.setItem('loy_hw_cal_text_' + targetMac, targetEventText);
+            }
           } catch (saveErr) {
             console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
-            handleSetPushMessage(`Error saving to Slot 1: ${saveErr.response?.data?.detail || saveErr.message}`);
+            const saveDetail = saveErr.response?.data?.detail || saveErr.message || '';
+            if (manual || (saveErr.response?.status !== 409 && !isConnectionStaleMessage(String(saveDetail)))) {
+              handleSetPushMessage(`Error saving to Slot 1: ${saveDetail}`);
+            }
             throw saveErr;
           }
         } else {
@@ -2954,10 +3052,10 @@ export default function App() {
     } catch (e) {
       console.error('[push] Failed:', e);
       const detail = e.response?.data?.detail;
-      const errorMsg = typeof detail === 'string' ? detail : (Array.isArray(detail) ? detail[0]?.msg : JSON.stringify(detail));
-      const isDisconnectError = !status.connected || 
-        (errorMsg && (errorMsg.includes('-2147023673') || errorMsg.toLowerCase().includes('canceled') || errorMsg.toLowerCase().includes('cancelled') || errorMsg.toLowerCase().includes('disconnected') || errorMsg.toLowerCase().includes('not connected')));
-      if (!skipMessages) {
+      const errorMsg = typeof detail === 'string' ? detail : (Array.isArray(detail) ? detail[0]?.msg : (detail?.message || JSON.stringify(detail)));
+      const isDisconnectError = !status.connected || e.response?.status === 409 ||
+        (errorMsg && (errorMsg.includes('-2147023673') || errorMsg.toLowerCase().includes('canceled') || errorMsg.toLowerCase().includes('cancelled') || errorMsg.toLowerCase().includes('disconnected') || errorMsg.toLowerCase().includes('not connected') || isConnectionStaleMessage(errorMsg)));
+      if (!skipMessages && (manual || !isDisconnectError)) {
         (isEvent ? handleSetPushMessage : handleSetLocalPushMessage)('Error: ' + (errorMsg || e.message));
       }
       throw e;
@@ -3375,8 +3473,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   };
 
   const pickDevice = (addr, name) => {
-    setIsManualOverride(false);
-    setLastPushedId(null);
+    const currentMac = (status.address || macAddress || '').toUpperCase();
+    if (!addr || addr.toUpperCase() !== currentMac) {
+      setIsManualOverride(false);
+      setLastPushedId(null);
+    }
     onMacInput(addr);
     pendingConnectRef.current = { addr, name }; // remember name; only commit to recents on success
     onConnect(addr);
@@ -3739,9 +3840,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       const p = presets.find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId) || 
                 savedPresets.map(s => s.preset).filter(Boolean).find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId);
       if (p) return p;
-      if (typeof lastPushedId === 'string' && lastPushedId.startsWith('hw-slot-')) {
-        const slotHwId = parseInt(lastPushedId.split('-')[2], 10);
-        return savedPresets.find(s => s?.preset?.hwSlotId === slotHwId || s?.hwSlotId === slotHwId || s?.preset?.id === lastPushedId)?.preset;
+      if (typeof lastPushedId === 'string' && (lastPushedId.startsWith('hw-slot-') || lastPushedId.startsWith('event-'))) {
+        const slotHwId = lastPushedId.startsWith('event-') ? 0 : parseInt(lastPushedId.split('-')[2], 10);
+        return savedPresets.find(s => s?.preset?.hwSlotId === slotHwId || s?.hwSlotId === slotHwId || s?.preset?.id === `hw-slot-${slotHwId}`)?.preset;
       }
     }
     // 2. Fallback to reading the hardware display_mode status
