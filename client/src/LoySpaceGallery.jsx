@@ -699,12 +699,10 @@ export default function LoySpaceGallery({
               fontSize: '12px',
               color: '#f8fafc',
               background: 'rgba(0, 0, 0, 0.25)',
-              border: activeSearch 
-                ? '1px solid rgba(251, 141, 0, 0.65)' 
-                : '1px solid rgba(255, 255, 255, 0.08)',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
               borderRadius: '12px',
               outline: 'none',
-              boxShadow: activeSearch ? '0 0 10px rgba(251, 141, 0, 0.25)' : 'none'
+              boxShadow: 'none'
             }}
           />
           {searchQuery && (
@@ -740,10 +738,10 @@ export default function LoySpaceGallery({
             padding: '6px 12px',
             marginBottom: '12px',
             borderRadius: '10px',
-            background: 'rgba(251, 141, 0, 0.12)',
-            border: '1px solid rgba(251, 141, 0, 0.3)',
+            background: 'rgba(255, 255, 255, 0.04)',
+            border: '1px solid rgba(255, 255, 255, 0.08)',
             fontSize: '11px',
-            color: '#fdba74',
+            color: '#94a3b8',
             flexShrink: 0
           }}
         >
@@ -758,7 +756,7 @@ export default function LoySpaceGallery({
             style={{
               background: 'none',
               border: 'none',
-              color: '#fb923c',
+              color: '#e2e8f0',
               cursor: 'pointer',
               fontWeight: 600,
               fontSize: '11px',
@@ -931,7 +929,7 @@ export default function LoySpaceGallery({
 
         {isLoading && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '36px 0', gap: '12px' }}>
-            <RefreshCw size={24} className="animate-spin text-amber-500" />
+            <RefreshCw size={24} className="animate-spin" style={{ color: '#94a3b8' }} />
             <span style={{ fontSize: '12px', color: '#94a3b8' }}>Loading media...</span>
           </div>
         )}
@@ -1097,7 +1095,7 @@ export default function LoySpaceGallery({
             >
               {isLoadingMore ? (
                 <>
-                  <RefreshCw size={13} className="animate-spin text-amber-500" />
+                  <RefreshCw size={13} className="animate-spin" />
                   <span>Loading more items...</span>
                 </>
               ) : (
