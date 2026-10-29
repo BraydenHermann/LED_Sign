@@ -285,8 +285,8 @@ export default function GoogleMediaGallery({
 
       let newItems = Array.isArray(data?.items) ? data.items : [];
 
-      // If user is on GIFs tab, ensure we only keep genuine animated GIFs
-      if (typeFilter === 'animated' || activeTab.id === 'gif') {
+      // If user requested animated GIFs, ensure we only keep genuine animated GIFs
+      if (typeFilter === 'animated') {
         newItems = newItems.filter(item => {
           const isGifUrl = item.originalUrl.toLowerCase().includes('.gif') || item.originalUrl.toLowerCase().includes('giphy.com');
           return Boolean(item.isAnimated || isGifUrl);
@@ -317,7 +317,7 @@ export default function GoogleMediaGallery({
       setIsLoading(false);
       setIsLoadingMore(false);
     }
-  }, [query, typeFilter, aspectFilter, colorFilter, sizeFilter, pageIndex, activeTab.id]);
+  }, [query, typeFilter, aspectFilter, colorFilter, sizeFilter, pageIndex]);
 
   // Real-time debounced auto-search matching LOY SPACE behavior
   useEffect(() => {
@@ -581,7 +581,12 @@ export default function GoogleMediaGallery({
         className="no-scrollbar"
       >
         {QUICK_TABS.map(tab => {
-          const isActive = activeTab.id === tab.id;
+          const isActive = (
+            (tab.type || '') === (typeFilter || '') &&
+            (tab.aspect || 'wide') === (aspectFilter || 'wide') &&
+            (tab.color || '') === (colorFilter || '') &&
+            !sizeFilter
+          );
           return (
             <button
               key={tab.id}
@@ -632,19 +637,28 @@ export default function GoogleMediaGallery({
               label="Aspect" 
               value={aspectFilter} 
               options={ASPECT_OPTIONS} 
-              onChange={setAspectFilter} 
+              onChange={(val) => {
+                setAspectFilter(val);
+                setPageIndex(1);
+              }} 
             />
             <DropdownSelect 
               label="Type" 
               value={typeFilter} 
               options={TYPE_OPTIONS} 
-              onChange={setTypeFilter} 
+              onChange={(val) => {
+                setTypeFilter(val);
+                setPageIndex(1);
+              }} 
             />
             <DropdownSelect 
               label="Size" 
               value={sizeFilter} 
               options={SIZE_OPTIONS} 
-              onChange={setSizeFilter} 
+              onChange={(val) => {
+                setSizeFilter(val);
+                setPageIndex(1);
+              }} 
             />
           </div>
 
@@ -660,7 +674,10 @@ export default function GoogleMediaGallery({
                   <button
                     key={sw.id}
                     type="button"
-                    onClick={() => setColorFilter(sw.id)}
+                    onClick={() => {
+                      setColorFilter(isSelected ? '' : sw.id);
+                      setPageIndex(1);
+                    }}
                     title={sw.label}
                     style={{
                       width: '20px',
