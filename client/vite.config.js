@@ -75,7 +75,10 @@ export default defineConfig({
       '/loy-login': 'http://127.0.0.1:8000',
       '/loy-logout': 'http://127.0.0.1:8000',
       '/loy-upload': 'http://127.0.0.1:8000',
-      '/api/loy': 'http://127.0.0.1:8000'
+      '/api/loy': 'http://127.0.0.1:8000',
+      '/google-images': 'http://127.0.0.1:8000',
+      '/google-proxy-media': 'http://127.0.0.1:8000',
+      '/api/google': 'http://127.0.0.1:8000'
     }
   }
 })

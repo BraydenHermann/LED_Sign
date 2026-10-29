@@ -125,11 +125,17 @@ export const getLoyCategories = async ({ refresh = false } = {}) => {
   const params = refresh ? { refresh: true } : {};
   try {
     const { data } = await axios.get('/loy-categories', { params });
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
     return data;
   } catch (err) {
     if (err?.response?.status === 404) {
       const { data } = await axios.get('/api/loy/categories', { params });
-      return data;
+      if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
     }
     throw err;
   }
@@ -147,11 +153,17 @@ export const getLoyMaterials = async ({ tagId = 48, tagType = 0, pageIndex = 0, 
   }
   try {
     const { data } = await axios.get('/loy-materials', { params });
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
     return data;
   } catch (err) {
     if (err?.response?.status === 404) {
       const { data } = await axios.get('/api/loy/materials', { params });
-      return data;
+      if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
     }
     throw err;
   }
@@ -164,11 +176,17 @@ export const getLoyProxyMediaUrl = (url) => {
 export const getLoyAuthStatus = async () => {
   try {
     const { data } = await axios.get('/loy-auth-status');
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
     return data;
   } catch (err) {
     if (err?.response?.status === 404) {
       const { data } = await axios.get('/api/loy/auth-status');
-      return data;
+      if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
     }
     throw err;
   }
@@ -177,11 +195,17 @@ export const getLoyAuthStatus = async () => {
 export const loyLogin = async ({ user, pwd }) => {
   try {
     const { data } = await axios.post('/loy-login', { user, pwd });
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
     return data;
   } catch (err) {
     if (err?.response?.status === 404) {
       const { data } = await axios.post('/api/loy/login', { user, pwd });
-      return data;
+      if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
     }
     throw err;
   }
@@ -190,11 +214,17 @@ export const loyLogin = async ({ user, pwd }) => {
 export const loyLogout = async () => {
   try {
     const { data } = await axios.post('/loy-logout');
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
     return data;
   } catch (err) {
     if (err?.response?.status === 404) {
       const { data } = await axios.post('/api/loy/logout');
-      return data;
+      if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
     }
     throw err;
   }
@@ -211,13 +241,19 @@ export const uploadLoyMaterial = async ({ fileBlob, name = 'LEDSign Custom', mar
     const { data } = await axios.post('/loy-upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     });
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
     return data;
   } catch (err) {
     if (err?.response?.status === 404) {
       const { data } = await axios.post('/api/loy/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-      return data;
+      if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
     }
     throw err;
   }
@@ -227,13 +263,42 @@ export const getLoyMyMaterials = async ({ pageIndex = 0, pageCount = 24 } = {}) 
   const params = { page_index: pageIndex, page_count: pageCount };
   try {
     const { data } = await axios.get('/loy-my-materials', { params });
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
     return data;
   } catch (err) {
     if (err?.response?.status === 404) {
       const { data } = await axios.get('/api/loy/my-materials', { params });
-      return data;
+      if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
     }
     throw err;
   }
 };
 
+export const searchGoogleImages = async (params) => {
+  try {
+    const { data } = await axios.get('/api/google/images', { params });
+    if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
+  } catch (err) {
+    if (err?.response?.status === 404) {
+      const { data } = await axios.get('/google-images', { params });
+      if (typeof data === 'string') {
+      try { return JSON.parse(data); } catch { return { items: [] }; }
+    }
+    return data;
+    }
+    throw err;
+  }
+};
+
+export const getGoogleProxyMediaUrl = (url) => {
+  if (!url) return '';
+  return `/api/google/proxy-media?url=${encodeURIComponent(url)}`;
+};

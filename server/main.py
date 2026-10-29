@@ -604,10 +604,12 @@ class GeminiGenerateRequest(BaseModel):
     style: Optional[str] = None
     history: Optional[List[str]] = None
     model: Optional[str] = None
+    previousScript: Optional[str] = None
 
 class GeminiConfigRequest(BaseModel):
     apiKey: Optional[str] = None
     model: Optional[str] = None
+    previousScript: Optional[str] = None
     imageModel: Optional[str] = None
     defaultMode: Optional[str] = None
 
@@ -617,6 +619,7 @@ class OpenAIGenerateRequest(BaseModel):
     attachments: Optional[List[GeminiAttachment]] = None
     apiKey: Optional[str] = None
     model: Optional[str] = None
+    previousScript: Optional[str] = None
     history: Optional[List[str]] = None
 
 class AIGenerateRequest(BaseModel):
@@ -626,6 +629,7 @@ class AIGenerateRequest(BaseModel):
     attachments: Optional[List[GeminiAttachment]] = None
     apiKey: Optional[str] = None
     model: Optional[str] = None
+    previousScript: Optional[str] = None
     history: Optional[List[str]] = None
 
 def process_gif_pixels(img_src: str, x: float, y: float, w: float, h: float, bg_color: str) -> tuple:
@@ -840,11 +844,11 @@ async def gemini_generate(req: GeminiGenerateRequest):
         
         def _run_gen():
             if media_type == "image":
-                return gemini_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
+                return gemini_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model, previous_script=req.previousScript)
             elif media_type == "video":
-                return gemini_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
+                return gemini_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model, previous_script=req.previousScript)
             else:
-                return gemini_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
+                return gemini_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model, previous_script=req.previousScript)
 
         return await asyncio.to_thread(_run_gen)
     except Exception as e:
@@ -886,11 +890,11 @@ async def openai_generate(req: OpenAIGenerateRequest):
         
         def _run_gen():
             if media_type == "image":
-                return openai_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
+                return openai_service.generate_still_image(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model, previous_script=req.previousScript)
             elif media_type == "video":
-                return openai_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
+                return openai_service.generate_video(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model, previous_script=req.previousScript)
             else:
-                return openai_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model)
+                return openai_service.generate_animated_gif(prompt, attachments=attachments, api_key=req.apiKey, history=req.history, model=req.model, previous_script=req.previousScript)
 
         return await asyncio.to_thread(_run_gen)
     except Exception as e:
@@ -908,7 +912,8 @@ async def ai_generate(req: AIGenerateRequest):
             attachments=req.attachments,
             apiKey=req.apiKey,
             model=req.model,
-            history=req.history
+            history=req.history,
+            previousScript=req.previousScript
         )
         return await openai_generate(sub_req)
     else:
@@ -918,7 +923,8 @@ async def ai_generate(req: AIGenerateRequest):
             attachments=req.attachments,
             apiKey=req.apiKey,
             history=req.history,
-            model=req.model
+            model=req.model,
+            previousScript=req.previousScript
         )
         return await gemini_generate(sub_req)
 
@@ -967,6 +973,58 @@ async def get_loy_proxy_media(url: str):
         media_type=content_type,
         headers={"Cache-Control": "public, max-age=86400"}
     )
+
+
+# -------------------------------------------------------------------------
+# Google Images & Media Search Endpoints
+# -------------------------------------------------------------------------
+import google_images_service
+
+@app.get("/api/google/images")
+@app.get("/google-images")
+async def get_google_images(
+    q: str,
+    type: Optional[str] = None,
+    aspect: Optional[str] = None,
+    color: Optional[str] = None,
+    size: Optional[str] = None,
+    time: Optional[str] = None,
+    page: int = 1,
+    limit: int = 50
+):
+    if not q or not q.strip():
+        return {"items": [], "query": ""}
+    def _search():
+        return google_images_service.search_google_images(
+            query=q,
+            type_filter=type,
+            aspect_filter=aspect,
+            color_filter=color,
+            size_filter=size,
+            time_filter=time,
+            page_num=page,
+            max_results=limit
+        )
+    items = await asyncio.to_thread(_search)
+    return {"items": items, "query": q, "page": page, "count": len(items)}
+
+
+@app.get("/api/google/proxy-media")
+@app.get("/google-proxy-media")
+async def get_google_proxy_media(url: str):
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing url parameter")
+    def _download():
+        return google_images_service.proxy_media_content(url)
+    try:
+        content, content_type = await asyncio.to_thread(_download)
+        return Response(
+            content=content,
+            media_type=content_type,
+            headers={"Cache-Control": "public, max-age=86400"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch media: {e}")
 
 
 # -------------------------------------------------------------------------
@@ -1968,10 +2026,41 @@ async def logout():
 @app.get("/calendar/today")
 async def get_today_events(clean_name: bool = True):
     try:
-        events = await asyncio.to_thread(calendar_service.get_today_events, clean_name=clean_name)
-        if events is None:
-            return {"events": []}
-        return {"events": events}
+        schedule = await asyncio.to_thread(calendar_service.get_today_schedule, clean_name=clean_name)
+        if not schedule:
+            return {"events": [], "invites": []}
+        return {
+            "events": schedule.get("events", []),
+            "invites": schedule.get("invites", [])
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/calendar/events/{event_id}/accept")
+@app.post("/calendar/events/{event_id}/respond")
+async def accept_calendar_invite(event_id: str):
+    try:
+        res = await asyncio.to_thread(calendar_service.respond_to_event, event_id, "accepted")
+        return res
+    except PermissionError:
+        raise HTTPException(
+            status_code=403,
+            detail="READ_ONLY_SCOPE"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/calendar/events/{event_id}/decline")
+@app.post("/calendar/events/{event_id}/reject")
+async def decline_calendar_invite(event_id: str):
+    try:
+        res = await asyncio.to_thread(calendar_service.respond_to_event, event_id, "declined")
+        return res
+    except PermissionError:
+        raise HTTPException(
+            status_code=403,
+            detail="READ_ONLY_SCOPE"
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

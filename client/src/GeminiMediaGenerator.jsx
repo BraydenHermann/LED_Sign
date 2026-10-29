@@ -12,28 +12,40 @@ const GEMINI_GRADIENT = 'linear-gradient(to right, #4796E3 0%, #9177C7 50%, #CA6
 const OPENAI_COLOR = '#74AA9C';
 
 // Official Google Gemini 4-pointed sparkle icon
-export const GeminiLogo = ({ size = 16, className = "" }) => (
-  <svg 
-    width={size} 
-    height={size} 
-    viewBox="0 0 24 24" 
-    fill="currentColor" 
-    className={className} 
-    style={{ display: 'inline-block', verticalAlign: 'middle', flexShrink: 0 }}
-  >
-    <path d="M12 2C12 7.523 7.523 12 2 12C7.523 12 12 16.477 12 22C12 16.477 16.477 12 22 12C16.477 12 12 7.523 12 2Z" />
-  </svg>
-);
+export const GeminiLogo = ({ size = 16, className = "", originalColor = false, style = {} }) => {
+  const gradId = "gemini-sparkle-brand-grad";
+  return (
+    <svg 
+      width={size} 
+      height={size} 
+      viewBox="0 0 24 24" 
+      fill={originalColor ? `url(#${gradId})` : "currentColor"} 
+      className={className} 
+      style={{ display: 'inline-block', verticalAlign: 'middle', flexShrink: 0, ...style }}
+    >
+      {originalColor && (
+        <defs>
+          <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#4796E3" />
+            <stop offset="50%" stopColor="#9177C7" />
+            <stop offset="100%" stopColor="#CA6673" />
+          </linearGradient>
+        </defs>
+      )}
+      <path d="M12 2C12 7.523 7.523 12 2 12C7.523 12 12 16.477 12 22C12 16.477 16.477 12 22 12C16.477 12 12 7.523 12 2Z" />
+    </svg>
+  );
+};
 
 // Official OpenAI / ChatGPT spiral flower logo
-export const OpenAILogo = ({ size = 16, className = "" }) => (
+export const OpenAILogo = ({ size = 16, className = "", originalColor = false, style = {} }) => (
   <svg 
     width={size} 
     height={size} 
     viewBox="0 0 24 24" 
-    fill="currentColor" 
+    fill={originalColor ? "#74AA9C" : "currentColor"} 
     className={className} 
-    style={{ display: 'inline-block', verticalAlign: 'middle', flexShrink: 0 }}
+    style={{ display: 'inline-block', verticalAlign: 'middle', flexShrink: 0, ...style }}
   >
     <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1683a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4947zm-9.66-4.1354a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1401-1.6564zm-1.1214-10.428a4.4566 4.4566 0 0 1 2.3657-1.9804V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1683a.0757.0757 0 0 1-.071 0l-4.8303-2.7865a4.504 4.504 0 0 1-1.6466-6.1243zm16.5902 4.5363L13.226 8.9816 15.246 7.8133a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.6435zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.3797V7.0474a.0804.0804 0 0 1 .0332-.0615l4.9814-2.8764a4.4992 4.4992 0 0 1 6.1402 1.6564 4.4708 4.4708 0 0 1 .5536 3.0137zm-8.8878-3.0658a4.4992 4.4992 0 0 1 2.8764 1.0408l-.1419.0804-4.7783 2.7582a.7948.7948 0 0 0-.3927.6813v6.7369L7.904 14.887a.071.071 0 0 1-.038-.052V9.2524a4.504 4.504 0 0 1 4.4945-4.4947zm-.0095 5.5636l2.919 1.6843v3.3685L12 17.6534l-2.919-1.6843v-3.3685L12 10.9208z" />
   </svg>
@@ -59,9 +71,10 @@ const PROMPT_SUGGESTIONS = [
 ];
 
 export const GEMINI_MODELS = [
+  { id: 'gemini-nano-banana-2.1', label: 'Nano Banana', tag: 'Image AI' },
   { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', tag: 'Smartest' },
   { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', tag: 'Fast' },
-  { id: 'gemini-3.8-pro', label: 'Gemini 3.8 Pro', tag: 'Reasoning' },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', tag: 'Reasoning' },
   { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Lite', tag: 'Light' }
 ];
 
@@ -80,6 +93,7 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
   onToggleExpand,
   onCloseSidePanel,
   onProviderChange,
+  provider: controlledProvider,
   className = '',
   style = {}
 }, ref) {
@@ -92,12 +106,20 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
     if (!next) setShowKeys(false);
   };
 
-  const [provider, setProvider] = useState(() => localStorage.getItem('led_ai_provider') || 'gemini');
+  const [internalProvider, setInternalProvider] = useState(() => {
+    return localStorage.getItem('led_last_generated_provider') === 'openai' ? 'openai' : 'gemini';
+  });
+  const provider = controlledProvider !== undefined ? controlledProvider : internalProvider;
+  const setProvider = (newProvider) => {
+    setInternalProvider(newProvider);
+    onProviderChange?.(newProvider);
+  };
   const [providersStatus, setProvidersStatus] = useState(null);
   const [geminiModel, setGeminiModel] = useState(() => localStorage.getItem('led_gemini_model') || 'gemini-3.8-flash');
   const [openaiModel, setOpenaiModel] = useState(() => localStorage.getItem('led_openai_model') || 'gpt-4o');
   const [prompt, setPrompt] = useState('');
   const [promptHistory, setPromptHistory] = useState([]);
+  const [lastScript, setLastScript] = useState(null);
   const [mediaType, setMediaType] = useState('gif'); // 'gif' | 'image'
   const [attachments, setAttachments] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -136,11 +158,6 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         .then(res => {
           if (isMounted && res?.data) {
             setProvidersStatus(res.data);
-            if (!localStorage.getItem('led_ai_provider')) {
-              const defaultProvider = res.data.default_provider || 'gemini';
-              setProvider(defaultProvider);
-              onProviderChange?.(defaultProvider);
-            }
           }
         })
         .catch(err => {
@@ -158,12 +175,10 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
       isMounted = false;
       clearInterval(interval);
     };
-  }, [providersStatus, onProviderChange]);
+  }, [providersStatus]);
 
   const handleSelectProvider = (newProvider) => {
     setProvider(newProvider);
-    localStorage.setItem('led_ai_provider', newProvider);
-    onProviderChange?.(newProvider);
     setError('');
   };
 
@@ -285,6 +300,16 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         } catch (e) {
           console.warn('[GeminiMediaGenerator] ClipboardItem write failed:', e);
         }
+      } else if (blob.type === 'image/gif') {
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({ 'image/gif': blob })
+          ]);
+          copied = true;
+        } catch (e) {
+          // Fall back to data URL text directly so animation frames are never flattened into a single-frame canvas PNG
+          console.warn('[GeminiMediaGenerator] Direct image/gif clipboard write unsupported, falling back to data URL:', e);
+        }
       } else if (blob.type.startsWith('image/')) {
         try {
           const img = new Image();
@@ -396,6 +421,7 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         apiKey: (provider === 'openai' ? openaiKey : geminiKey) || undefined,
         prompt: prompt.trim(),
         history: promptHistory,
+        previousScript: lastScript || undefined,
         model: isGemini ? geminiModel : openaiModel,
         mediaType: mediaType,
         attachments: finalAttachments.map(a => ({
@@ -408,6 +434,10 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
       const data = res.data;
       if (!data?.pixels || !data?.imgSrc) {
         throw new Error('AI generation completed but returned invalid media data.');
+      }
+
+      if (data?.script) {
+        setLastScript(data.script);
       }
 
       if (imageObjRef) {
@@ -446,6 +476,9 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         const withoutCanvasRef = prev.filter(a => !a.isCanvasRef);
         return [...withoutCanvasRef, generatedRef];
       });
+
+      // Record that the user last used this provider to generate a GIF/image
+      localStorage.setItem('led_last_generated_provider', provider);
 
       if (onGenerated) {
         onGenerated(data);
@@ -551,25 +584,13 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <div style={{ 
-            width: '28px', 
-            height: '28px', 
-            borderRadius: '8px', 
-            background: activeBrandBg,
-            backgroundRepeat: 'no-repeat',
-            backgroundClip: 'padding-box',
-            boxShadow: activeBrandShadow,
-            display: 'flex', 
-            alignItems: 'center', 
-            justifyContent: 'center',
-            color: '#ffffff',
-            transition: 'all 0.25s ease',
-            overflow: 'hidden'
-          }}>
-            {isGemini ? <GeminiLogo size={16} /> : <OpenAILogo size={16} />}
-          </div>
+          {isGemini ? (
+            <GeminiLogo size={20} originalColor={true} />
+          ) : (
+            <OpenAILogo size={20} originalColor={true} />
+          )}
           <div>
-            <h4 style={{ margin: 0, fontSize: '13px', fontWeight: 800, color: '#f8fafc' }}>
+            <h4 style={{ margin: 0, fontSize: '14px', fontWeight: 800, color: '#f8fafc', letterSpacing: '-0.01em' }}>
               {providerLabel}
             </h4>
           </div>
@@ -935,6 +956,7 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                     onClick={() => {
                       setPromptHistory([]);
                       setGenerationCount(0);
+                      setLastScript(null);
                       setAttachments(prev => prev.filter(a => !a.isCanvasRef));
                     }}
                     style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '10px', textDecoration: 'underline', cursor: 'pointer', padding: 0 }}

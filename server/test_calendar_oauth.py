@@ -66,6 +66,28 @@ class TestCalendarOAuth(unittest.TestCase):
         with open(self.token_path) as f:
             self.assertEqual(f.read(), '{"token": "abc"}')
 
+    def test_get_today_events_generates_direct_event_url(self):
+        mock_events = {
+            "items": [
+                {
+                    "id": "event123_20261029T100000Z",
+                    "summary": "Team Sync",
+                    "start": {"dateTime": "2026-10-29T10:00:00-04:00"},
+                    "end": {"dateTime": "2026-10-29T10:30:00-04:00"},
+                    "status": "confirmed",
+                    "htmlLink": "https://www.google.com/calendar/event?eid=ZXhhbXBsZWVpZDEyMw",
+                    "attendees": [{"self": True, "responseStatus": "accepted"}]
+                }
+            ]
+        }
+        mock_service = MagicMock()
+        mock_service.events().list().execute.return_value = mock_events
+        with patch.object(self.service, '_get_service', return_value=mock_service):
+            events = self.service.get_today_events()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_url"], "https://calendar.google.com/calendar/event?eid=ZXhhbXBsZWVpZDEyMw")
+
 
 if __name__ == '__main__':
     unittest.main()

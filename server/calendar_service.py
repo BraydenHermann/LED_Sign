@@ -10,7 +10,10 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
-SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
+SCOPES = [
+    'https://www.googleapis.com/auth/calendar.events',
+    'https://www.googleapis.com/auth/calendar.readonly'
+]
 REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8000/auth/callback')
 
 _active_flow: Flow = None
@@ -92,9 +95,19 @@ class CalendarService:
 
     def _ensure_valid(self):
         if self.creds and self.creds.expired and self.creds.refresh_token:
-            self.creds.refresh(Request())
-            with open(self.token_path, 'w') as f:
-                f.write(self.creds.to_json())
+            try:
+                self.creds.refresh(Request())
+                with open(self.token_path, 'w') as f:
+                    f.write(self.creds.to_json())
+            except Exception as e:
+                # If refresh failed with invalid_scope, fallback to reloading directly from token.json
+                if "invalid_scope" in str(e).lower() and os.path.exists(self.token_path):
+                    self.creds = Credentials.from_authorized_user_file(self.token_path)
+                    self.creds.refresh(Request())
+                    with open(self.token_path, 'w') as f:
+                        f.write(self.creds.to_json())
+                else:
+                    raise
 
     def _create_flow(self, code_verifier: Optional[str] = None, state: Optional[str] = None):
         client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -314,11 +327,14 @@ class CalendarService:
         ).execute()
         return result.get('items', [])
 
-    def get_today_events(self, clean_name=True):
-        """Return timed events for today only (all-day events excluded), each with is_active flag."""
+    def get_today_schedule(self, clean_name=True):
+        """
+        Return timed events and pending invites for today only (all-day events excluded).
+        Returns a dict: {"events": [accepted_events], "invites": [pending_invites]}
+        """
         service = self._get_service()
         if not service:
-            return None
+            return {"events": [], "invites": []}
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -333,6 +349,7 @@ class CalendarService:
         ).execute()
 
         events = []
+        invites = []
         for e in result.get('items', []):
             start_raw = e['start'].get('dateTime')
             end_raw = e['end'].get('dateTime')
@@ -352,7 +369,6 @@ class CalendarService:
                 time_str = f"{start_fmt} - {end_fmt}"
             except Exception as ex:
                 print(f"[calendar] Error formatting event {e.get('summary')}: {ex}")
-                # Keep is_active but fallback the time string
                 time_str = start_raw
 
             # Skip cancelled events
@@ -370,12 +386,11 @@ class CalendarService:
                 elif is_self_organizer:
                     response_status = 'accepted'
                 else:
-                    # User is not organizer and not an accepted attendee -> skip
+                    # User is not organizer and not an attendee -> skip
                     continue
             elif is_self_organizer:
                 response_status = 'accepted'
             else:
-                # External event without attendees list
                 response_status = 'needsAction'
 
             raw_summary = e.get('summary', 'Untitled')
@@ -403,20 +418,101 @@ class CalendarService:
             cleaned_summary = clean_event_summary(raw_summary, user_name) if clean_name else raw_summary
             print(f"[calendar] Event: {cleaned_summary} (raw: {raw_summary}) | Status: {response_status} | Attendees: {len(attendees)}")
 
-            # Only accepted calendar invites/events appear in the schedule to avoid spam
-            if response_status.lower() != 'accepted':
-                print(f"[calendar] Skipping unaccepted invite: {cleaned_summary} (status: {response_status})")
-                continue
+            html_link = e.get("htmlLink", "")
+            event_url = ""
+            if html_link:
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    qs = parse_qs(urlparse(html_link).query)
+                    if "eid" in qs and qs["eid"]:
+                        event_url = f"https://calendar.google.com/calendar/event?eid={qs['eid'][0]}"
+                except Exception:
+                    pass
+            if not event_url and e.get("id"):
+                import base64
+                cal_id = user_name or "primary"
+                try:
+                    raw_eid = f"{e.get('id')} {cal_id}".encode("utf-8")
+                    eid = base64.b64encode(raw_eid).decode("ascii").rstrip("=")
+                    event_url = f"https://calendar.google.com/calendar/event?eid={eid}"
+                except Exception:
+                    event_url = html_link or f"https://calendar.google.com/calendar/event?eid={e.get('id')}"
 
-            events.append({
+            organizer_name = ""
+            org_info = e.get("organizer", {})
+            if org_info:
+                organizer_name = org_info.get("displayName") or org_info.get("email", "")
+
+            item = {
                 "id": e.get("id"),
                 "summary": cleaned_summary,
+                "raw_summary": raw_summary,
                 "time": time_str,
                 "start_iso": start_raw,
                 "end_iso": end_raw,
                 "is_active": is_active,
-                "html_link": e.get("htmlLink", ""),
-                "response_status": response_status.lower()
-            })
-        return events
+                "html_link": html_link,
+                "event_url": event_url or html_link,
+                "response_status": response_status.lower(),
+                "organizer": organizer_name
+            }
+
+            if response_status.lower() == 'accepted':
+                events.append(item)
+            elif response_status.lower() in ('needsaction', 'tentative'):
+                invites.append(item)
+            else:
+                print(f"[calendar] Skipping declined event: {cleaned_summary}")
+
+        return {"events": events, "invites": invites}
+
+    def get_today_events(self, clean_name=True):
+        """Return timed events for today only (all-day events excluded), each with is_active flag."""
+        schedule = self.get_today_schedule(clean_name=clean_name)
+        return schedule.get("events", []) if schedule else []
+
+    def respond_to_event(self, event_id: str, response: str = 'accepted') -> dict:
+        """
+        Accept or respond to an event invite on Google Calendar directly.
+        Returns dict with updated status or raises RuntimeError with clear context.
+        """
+        service = self._get_service()
+        if not service:
+            raise RuntimeError("Google Calendar is not connected. Please sign in.")
+
+        # Check existing token scopes
+        scopes = getattr(self.creds, 'scopes', []) or []
+        has_write_scope = any('calendar.events' in s or 'calendar' == s or s.endswith('/calendar') for s in scopes)
+        if not has_write_scope:
+            raise PermissionError("READ_ONLY_SCOPE")
+
+        event = service.events().get(calendarId='primary', eventId=event_id).execute()
+        attendees = event.get('attendees', [])
+        self_attendee = next((a for a in attendees if a.get('self')), None)
+
+        if self_attendee:
+            self_attendee['responseStatus'] = response
+        else:
+            primary_name = self.get_primary_user_name()
+            matched = False
+            for a in attendees:
+                if a.get('displayName') == primary_name:
+                    a['responseStatus'] = response
+                    matched = True
+                    break
+            if not matched:
+                attendees.append({'email': 'primary', 'responseStatus': response, 'self': True})
+
+        try:
+            updated = service.events().patch(
+                calendarId='primary',
+                eventId=event_id,
+                body={'attendees': attendees}
+            ).execute()
+            return {"status": "success", "event_id": event_id, "response_status": response}
+        except Exception as e:
+            err_str = str(e)
+            if "insufficient" in err_str.lower() or "403" in err_str:
+                raise PermissionError("READ_ONLY_SCOPE")
+            raise
 

@@ -76,6 +76,13 @@ body {
   overflow: hidden;
 }
 .btn-styled:hover { transform: scale(1.02); box-shadow: var(--neon-shadow); }
+.btn-reject-invite {
+  box-shadow: none !important;
+}
+.btn-reject-invite:hover {
+  transform: scale(1.02);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.25) !important;
+}
 .btn-styled:disabled { 
   background: rgba(255, 255, 255, 0.08) !important;
   color: #94a3b8 !important;

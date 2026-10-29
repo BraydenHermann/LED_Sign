@@ -5,6 +5,8 @@ import { savePresetToSign, cancelSavePreset, processVideoMedia } from './serverA
 import { fitEventSignText } from './eventText';
 import GeminiMediaGenerator, { GeminiLogo, OpenAILogo } from './GeminiMediaGenerator';
 import LoySpaceGallery, { LoySpaceLogo } from './LoySpaceGallery';
+import GoogleMediaGallery, { GoogleLogo } from './GoogleMediaGallery';
+import { getGoogleProxyMediaUrl } from './serverApi';
 import { getLoyProxyMediaUrl } from './serverApi';
 
 import { motion, AnimatePresence } from 'framer-motion';
@@ -248,6 +250,21 @@ function getEventDisplayString(ev, isClean = null) {
     console.error("[calendar] Failed to format end time:", e);
     return summary;
   }
+}
+
+function getCalendarEventUrl(ev) {
+  if (!ev) return 'https://calendar.google.com';
+  if (ev.event_url) return ev.event_url;
+  if (ev.html_link) return ev.html_link;
+  if (ev.id) {
+    try {
+      const eid = btoa(`${ev.id} primary`).replace(/=+$/, '');
+      return `https://calendar.google.com/calendar/event?eid=${eid}`;
+    } catch {
+      return `https://calendar.google.com/calendar/event?eid=${ev.id}`;
+    }
+  }
+  return 'https://calendar.google.com';
 }
 
 
@@ -2110,6 +2127,7 @@ export default function App() {
     catch { return {}; }
   });
   const [events, setEvents] = useState(null);
+  const [invites, setInvites] = useState([]);
   const [cleanName, setCleanName] = useState(() => localStorage.getItem('loy_clean_name') !== 'false');
   const [calLoading, setCalLoading] = useState(false);
   const [now, setNow] = useState(new Date());
@@ -2367,11 +2385,13 @@ export default function App() {
       const isClean = localStorage.getItem('loy_clean_name') !== 'false';
       const res = await axios.get(`${API_BASE}/calendar/today?clean_name=${isClean}`);
       const rawEvs = res.data?.events || [];
+      const rawInvites = res.data?.invites || [];
       const evs = rawEvs.map(ev => ({
         ...ev,
         summary: cleanEventTitle(ev.summary, isClean)
       }));
       setEvents(evs);
+      setInvites(rawInvites);
       setCalLoading(false);
       return evs;
     } catch (e) {
@@ -3199,6 +3219,7 @@ export default function App() {
           <CalendarView 
             status={status} 
             events={events}
+            invites={invites}
             loading={calLoading}
             fetchEvents={fetchEvents}
             now={now}
@@ -3208,6 +3229,7 @@ export default function App() {
             isSignUpdating={isSignUpdating}
             cleanName={cleanName}
             setCleanName={setCleanName}
+            onNotify={setUnifiedPushMessage}
           />
         </div>
       </div>
@@ -4982,9 +5004,45 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   );
 }
 
+/* ─── Google Calendar Logo Component ──────────────────────────────────── */
+function GoogleCalendarLogo({ size = 16, style = {} }) {
+  return (
+    <svg 
+      width={size} 
+      height={size} 
+      viewBox="0 0 512 512" 
+      fill="none" 
+      xmlns="http://www.w3.org/2000/svg"
+      style={{ flexShrink: 0, ...style }}
+    >
+      <path d="M390.736 121.264H121.264V390.736H390.736V121.264Z" fill="white"/>
+      <path d="M390.736 512L512 390.736L451.368 380.392L390.736 390.736L379.67 446.196L390.736 512Z" fill="#EA4335"/>
+      <path d="M0 390.736V471.578C0 493.912 18.088 512 40.42 512H121.264L133.714 451.368L121.264 390.736L55.198 380.392L0 390.736Z" fill="#188038"/>
+      <path d="M512 121.264V40.42C512 18.088 493.912 0 471.58 0H390.736C383.36 30.072 379.671 52.2027 379.67 66.392C379.67 80.58 383.359 98.8707 390.736 121.264C417.556 128.944 437.767 132.784 451.368 132.784C464.969 132.784 485.18 128.945 512 121.264Z" fill="#1967D2"/>
+      <path d="M512 121.264H390.736V390.736H512V121.264Z" fill="#FBBC04"/>
+      <path d="M390.736 390.736H121.264V512H390.736V390.736Z" fill="#34A853"/>
+      <path d="M390.736 0H40.422C18.088 0 0 18.088 0 40.42V390.736H121.264V121.264H390.736V0Z" fill="#4285F4"/>
+      <path d="M176.54 330.308C166.468 323.504 159.494 313.568 155.688 300.428L179.066 290.796C181.186 298.88 184.891 305.145 190.182 309.592C195.436 314.038 201.836 316.228 209.314 316.228C216.959 316.228 223.527 313.903 229.018 309.254C234.51 304.606 237.272 298.678 237.272 291.504C237.272 284.16 234.375 278.164 228.582 273.516C222.788 268.868 215.512 266.544 206.822 266.544H193.314V243.404H205.44C212.917 243.404 219.216 241.382 224.336 237.338C229.456 233.298 232.016 227.772 232.016 220.732C232.016 214.468 229.726 209.482 225.146 205.744C220.566 202.004 214.77 200.118 207.73 200.118C200.85 200.118 194.888 201.95 189.846 205.614C184.804 209.278 181.186 214.568 178.992 221.484L155.832 211.532C159.256 200.132 166.082 191.026 176.312 184.214C186.542 177.374 199.168 173.954 214.192 173.954C228.184 173.954 239.736 177.016 248.848 183.14C257.96 189.264 262.516 197.644 262.516 208.28C262.516 215.828 260.106 222.138 255.286 227.21C250.466 232.282 243.834 235.918 235.39 238.118V239.38C245.246 241.524 252.68 245.926 257.692 252.586C262.704 259.246 265.21 267.458 265.21 277.222C265.21 289.47 260.706 299.712 251.698 307.948C242.69 316.184 230.732 320.302 215.824 320.302C199.984 320.302 186.728 316.738 176.54 330.308ZM313.298 316.912V177.784H342.394V316.912H313.298Z" fill="#1967D2"/>
+    </svg>
+  );
+}
+
 /* ─── Calendar ───────────────────────────────────────────────────────── */
-function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating }) {
+function CalendarView({ status, events, invites, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify }) {
   const [calError, setCalError] = useState('');
+  const [acceptingId, setAcceptingId] = useState(null);
+  const [scopeModalOpen, setScopeModalOpen] = useState(false);
+  const [pendingInviteToOpen, setPendingInviteToOpen] = useState(null);
+  const [calendarNotification, setCalendarNotification] = useState(null);
+  const notificationTimeoutRef = useRef(null);
+
+  const showCalendarNotification = (type, text) => {
+    if (notificationTimeoutRef.current) clearTimeout(notificationTimeoutRef.current);
+    setCalendarNotification({ type, text });
+    notificationTimeoutRef.current = setTimeout(() => {
+      setCalendarNotification(null);
+    }, 6000);
+  };
 
   useEffect(() => {
     // Clear error if we successfully fetched events
@@ -4992,7 +5050,6 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
       setCalError('');
     }
   }, [status.calendar_connected, events]);
-
 
   const [signingIn, setSigningIn] = useState(false);
 
@@ -5007,6 +5064,52 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
       setCalError(e.response?.data?.detail || e.message);
     } finally {
       setTimeout(() => setSigningIn(false), 2500);
+    }
+  };
+
+  const [rejectingId, setRejectingId] = useState(null);
+
+  const handleAcceptInvite = async (inv) => {
+    if (acceptingId || rejectingId) return;
+    setAcceptingId(inv.id);
+    try {
+      await axios.post(`${API_BASE}/calendar/events/${inv.id}/accept`);
+      const eventTitle = cleanEventTitle(inv.summary, cleanName !== false);
+      showCalendarNotification('accepted', `Accepted invite for "${eventTitle}"! Added to Today's Schedule.`);
+      await fetchEvents();
+    } catch (err) {
+      console.error('[CalendarView] Error accepting invite:', err);
+      const detail = err.response?.data?.detail;
+      if (detail === 'READ_ONLY_SCOPE' || err.response?.status === 403) {
+        setPendingInviteToOpen(inv);
+        setScopeModalOpen(true);
+      } else {
+        setCalError(detail || err.message || 'Failed to accept invite.');
+      }
+    } finally {
+      setAcceptingId(null);
+    }
+  };
+
+  const handleRejectInvite = async (inv) => {
+    if (rejectingId || acceptingId) return;
+    setRejectingId(inv.id);
+    try {
+      await axios.post(`${API_BASE}/calendar/events/${inv.id}/decline`);
+      const eventTitle = cleanEventTitle(inv.summary, cleanName !== false);
+      showCalendarNotification('declined', `Declined invite for "${eventTitle}"`);
+      await fetchEvents();
+    } catch (err) {
+      console.error('[CalendarView] Error declining invite:', err);
+      const detail = err.response?.data?.detail;
+      if (detail === 'READ_ONLY_SCOPE' || err.response?.status === 403) {
+        setPendingInviteToOpen(inv);
+        setScopeModalOpen(true);
+      } else {
+        setCalError(detail || err.message || 'Failed to decline invite.');
+      }
+    } finally {
+      setRejectingId(null);
     }
   };
 
@@ -5068,7 +5171,7 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
                   ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' 
                   : 'rgba(255, 255, 255, 0.08)',
                 border: cleanName 
-                  ? '1px solid rgba(255, 255, 255, 0.3)' 
+                  ? 'none' 
                   : '1px solid rgba(255, 255, 255, 0.2)',
                 boxShadow: cleanName ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none',
                 display: 'flex',
@@ -5091,6 +5194,31 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
       {calError && (
         <div className={`flex items-center gap-3 text-sm mb-6 w-full px-5 py-3 rounded-2xl bg-amber-400/10 text-amber-300`}>
           <AlertCircle size={14} />{calError}
+        </div>
+      )}
+
+      {calendarNotification && (
+        <div
+          role="status"
+          className="text-xs font-bold"
+          style={{
+            width: '100%',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            marginBottom: '20px',
+            color: calendarNotification.type === 'declined' ? '#f87171' : '#34d399',
+            cursor: 'pointer'
+          }}
+          onClick={() => setCalendarNotification(null)}
+          title="Click to dismiss"
+        >
+          {calendarNotification.type === 'declined' ? (
+            <X size={12} className="text-red-400" style={{ flexShrink: 0 }} />
+          ) : (
+            <Check size={12} className="text-emerald-400" style={{ flexShrink: 0 }} />
+          )}
+          <span>{calendarNotification.text}</span>
         </div>
       )}
 
@@ -5127,24 +5255,356 @@ function CalendarView({ status, events, loading, fetchEvents, now, onPush, pushM
             {signingIn ? 'Connecting...' : 'Sign in with Google'}
           </button>
         </div>
-      ) : events?.length === 0 ? (
-        <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
-          <p className="text-slate-400">No events scheduled today.</p>
-        </div>
       ) : (
-        <div className="w-full grid grid-cols-1 gap-4">
-          {events?.map((ev, i) => (
-            <EventCard
-              key={i}
-              ev={ev}
-              now={now}
-              onPush={onPush}
-              cleanName={cleanName}
-              isSignUpdating={isSignUpdating}
-            />
-          ))}
-        </div>
+        <>
+          {/* New Invites Section */}
+          {Array.isArray(invites) && invites.length > 0 && (
+            <div style={{ width: '100%', marginBottom: '28px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minWidth: '22px',
+                    height: '22px',
+                    padding: '0 6px',
+                    borderRadius: '12px',
+                    background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+                    color: '#ffffff',
+                    fontSize: '11px',
+                    fontWeight: 800,
+                    border: 'none',
+                    boxShadow: '0 0 10px rgba(139, 92, 246, 0.45)'
+                  }}>
+                    {invites.length}
+                  </span>
+                  <h4 style={{ margin: 0, fontSize: '15px', fontWeight: 800, color: '#f8fafc', letterSpacing: '-0.01em' }}>
+                    New Invites
+                  </h4>
+                </div>
+                <span style={{ fontSize: '12px', color: '#94a3b8' }}>
+                  Accept to add to Today's Schedule
+                </span>
+              </div>
+
+              <div className="w-full grid grid-cols-1 gap-3">
+                {invites.map((inv) => (
+                  <InviteCard
+                    key={inv.id}
+                    invite={inv}
+                    cleanName={cleanName}
+                    onAccept={handleAcceptInvite}
+                    isAccepting={acceptingId === inv.id}
+                    onReject={handleRejectInvite}
+                    isRejecting={rejectingId === inv.id}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {events?.length === 0 ? (
+            <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+              <p className="text-slate-400">No events scheduled today.</p>
+            </div>
+          ) : (
+            <div className="w-full grid grid-cols-1 gap-4">
+              {events?.map((ev, i) => (
+                <EventCard
+                  key={i}
+                  ev={ev}
+                  now={now}
+                  onPush={onPush}
+                  cleanName={cleanName}
+                  isSignUpdating={isSignUpdating}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
+
+      {/* Scope update permission dialog */}
+      {scopeModalOpen && typeof document !== 'undefined' && createPortal(
+        <div 
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.8)',
+            backdropFilter: 'blur(8px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 100000,
+            padding: '20px'
+          }}
+          onClick={() => setScopeModalOpen(false)}
+        >
+          <div 
+            className="glass-panel"
+            style={{
+              width: '420px',
+              maxWidth: '92vw',
+              borderRadius: '28px',
+              padding: '28px',
+              background: 'var(--card-bg)',
+              border: '1px solid var(--glass-border)',
+              backdropFilter: 'blur(24px)',
+              boxShadow: '0 20px 40px rgba(0, 0, 0, 0.7)'
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+              <Calendar className="text-blue-400" size={24} style={{ flexShrink: 0 }} />
+              <div>
+                <h4 style={{ margin: 0, fontSize: '17px', fontWeight: 800, color: '#f8fafc' }}>
+                  Permission Required
+                </h4>
+                <p style={{ margin: 0, fontSize: '12px', color: '#94a3b8' }}>
+                  Google Calendar Write Access
+                </p>
+              </div>
+            </div>
+
+            <p style={{ fontSize: '13px', color: '#cbd5e1', lineHeight: '1.5', marginBottom: '20px' }}>
+              Your Google Calendar was previously connected with Read-Only permissions. To accept event invites directly in the web app, please reconnect your Google account to grant calendar update permissions.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setScopeModalOpen(false);
+                  handleSignIn();
+                }}
+                disabled={signingIn}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '12px',
+                  backgroundColor: '#f2f2f2',
+                  color: '#1f1f1f',
+                  padding: '10px 24px',
+                  borderRadius: '12px',
+                  fontSize: '15px',
+                  fontWeight: '500',
+                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  cursor: signingIn ? 'not-allowed' : 'pointer',
+                  opacity: signingIn ? 0.7 : 1,
+                  fontFamily: 'Roboto, Arial, sans-serif',
+                  boxShadow: '0 1px 2px 0 rgba(0,0,0,0.1)',
+                  width: '100%'
+                }}
+              >
+                <svg viewBox="0 0 24 24" width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                </svg>
+                {signingIn ? 'Connecting...' : 'Reconnect Google Calendar'}
+              </button>
+
+              {pendingInviteToOpen && (
+                <a
+                  href={getCalendarEventUrl(pendingInviteToOpen)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setScopeModalOpen(false)}
+                  className="btn-styled text-xs py-2 flex items-center justify-center gap-2"
+                  style={{
+                    borderRadius: '12px',
+                    background: 'rgba(255, 255, 255, 0.05)',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    color: '#cbd5e1',
+                    textDecoration: 'none',
+                    fontWeight: 600
+                  }}
+                >
+                  <GoogleCalendarLogo size={15} />
+                  <span>Open in Google Calendar</span>
+                </a>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+function InviteCard({ invite, cleanName, onAccept, isAccepting, onReject, isRejecting }) {
+  const isClean = cleanName !== false;
+  const timeStr = formatEventTime(invite);
+  const rawSummary = invite?.summary || 'Untitled Event';
+  const summary = cleanEventTitle(rawSummary, isClean);
+  const eventUrl = getCalendarEventUrl(invite);
+
+  return (
+    <div 
+      className="glass-panel transition-all group"
+      onClick={() => {
+        if (eventUrl) window.open(eventUrl, '_blank', 'noopener,noreferrer');
+      }}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 16,
+        padding: '14px 20px',
+        cursor: 'pointer',
+        position: 'relative',
+        overflow: 'hidden'
+      }}
+      title="Click to open event in Google Calendar"
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p 
+          style={{ fontWeight: 800, fontSize: 18, color: '#f8fafc', margin: 0, whiteSpace: 'normal', letterSpacing: '-0.02em', width: 'fit-content' }}
+          className="group-hover:underline"
+        >
+          {summary}
+        </p>
+        <p 
+          style={{ fontSize: 14, fontWeight: 600, color: '#94a3b8', margin: '2px 0 0 0', width: 'fit-content' }}
+          className="group-hover:underline"
+        >
+          {timeStr}
+        </p>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span style={{
+            fontSize: '10px',
+            fontWeight: 800,
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            padding: '2px 7px',
+            borderRadius: '6px',
+            background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+            color: '#ffffff',
+            border: 'none',
+            boxShadow: '0 0 10px rgba(139, 92, 246, 0.45)'
+          }}>
+            Invite Pending
+          </span>
+          {invite.organizer && (
+            <span style={{ fontSize: '11px', color: '#94a3b8', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`from ${invite.organizer}`}>
+              from {invite.organizer}
+            </span>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (onAccept) onAccept(invite);
+            }}
+            disabled={isAccepting || isRejecting}
+            className="btn-styled"
+            style={{
+              height: '30px',
+              padding: '0 12px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              lineHeight: 1,
+              boxSizing: 'border-box',
+              fontSize: '11px',
+              fontWeight: 800,
+              borderRadius: '9px',
+              background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+              border: 'none',
+              color: '#ffffff',
+              cursor: (isAccepting || isRejecting) ? 'not-allowed' : 'pointer',
+              boxShadow: '0 0 10px rgba(139, 92, 246, 0.45)',
+              transition: 'all 0.2s ease'
+            }}
+            onMouseOver={e => {
+              if (isAccepting || isRejecting) return;
+              e.currentTarget.style.boxShadow = '0 0 10px rgba(139, 92, 246, 0.55)';
+            }}
+            onMouseOut={e => {
+              e.currentTarget.style.boxShadow = '0 0 10px rgba(139, 92, 246, 0.45)';
+            }}
+            title="Accept Invite"
+          >
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', lineHeight: 1 }}>
+              {isAccepting ? (
+                <>
+                  <RefreshCw size={12} className="animate-spin" style={{ display: 'block', flexShrink: 0 }} />
+                  <span style={{ lineHeight: 1, display: 'inline-block' }}>Accepting...</span>
+                </>
+              ) : (
+                <>
+                  <Check size={13} strokeWidth={3.5} style={{ display: 'block', flexShrink: 0 }} />
+                  <span style={{ lineHeight: 1, display: 'inline-block' }}>Accept</span>
+                </>
+              )}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (onReject) onReject(invite);
+            }}
+            disabled={isRejecting || isAccepting}
+            className="btn-styled btn-reject-invite"
+            style={{
+              height: '30px',
+              padding: '0 12px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              lineHeight: 1,
+              boxSizing: 'border-box',
+              fontSize: '11px',
+              fontWeight: 800,
+              borderRadius: '9px',
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.25)',
+              color: '#ef4444',
+              boxShadow: 'none',
+              cursor: (isRejecting || isAccepting) ? 'not-allowed' : 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+            onMouseOver={e => {
+              if (isRejecting || isAccepting) return;
+              e.currentTarget.style.background = 'rgba(239, 68, 68, 0.18)';
+              e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.35)';
+              e.currentTarget.style.boxShadow = '0 0 10px rgba(239, 68, 68, 0.25)';
+            }}
+            onMouseOut={e => {
+              e.currentTarget.style.background = 'rgba(239, 68, 68, 0.12)';
+              e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.25)';
+              e.currentTarget.style.boxShadow = 'none';
+            }}
+            title="Reject Invite"
+          >
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', lineHeight: 1 }}>
+              {isRejecting ? (
+                <>
+                  <RefreshCw size={12} className="animate-spin" style={{ display: 'block', flexShrink: 0 }} />
+                  <span style={{ lineHeight: 1, display: 'inline-block' }}>Rejecting...</span>
+                </>
+              ) : (
+                <>
+                  <Trash2 size={12} style={{ display: 'block', flexShrink: 0 }} />
+                  <span style={{ lineHeight: 1, display: 'inline-block' }}>Reject</span>
+                </>
+              )}
+            </span>
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -5171,20 +5631,20 @@ function EventCard({ ev, now, onPush, cleanName, isSignUpdating }) {
   const summary = cleanEventTitle(rawSummary, isClean);
   const isDeclined = ev?.response_status?.toLowerCase() === 'declined' || summary.toLowerCase().includes('[declined]');
   const isActive = isEventActive(ev, now);
+  const eventUrl = getCalendarEventUrl(ev);
 
   const handleCardClick = (e) => {
     if (isSignUpdating) return;
-    // If the click was on the link (title/time), don't push
-    if (e.target.closest('a')) return;
-    const displayStr = getEventDisplayString(ev, isClean);
-    onPush(displayStr, true);
+    if (eventUrl) {
+      window.open(eventUrl, '_blank', 'noopener,noreferrer');
+    }
   };
 
   return (
     <div
       className="glass-panel transition-all group"
       onClick={handleCardClick}
-      title={isSignUpdating ? 'Sign is updating...' : undefined}
+      title={isSignUpdating ? 'Sign is updating...' : 'Click to open event in Google Calendar'}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -5213,13 +5673,14 @@ function EventCard({ ev, now, onPush, cleanName, isSignUpdating }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <p 
           style={{ fontWeight: 800, fontSize: 18, color: isActive ? '#ffffff' : '#cbd5e1', margin: 0, whiteSpace: 'normal', letterSpacing: '-0.02em', width: 'fit-content' }} 
-          className="hover:underline"
+          className="group-hover:underline"
         >
-          {ev.html_link || ev.id ? (
+          {eventUrl ? (
             <a 
-              href={ev.html_link || `https://calendar.google.com/calendar/r/event/${ev.id}`} 
+              href={eventUrl} 
               target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}
               onClick={(e) => e.stopPropagation()}
+              title="Click to open event in Google Calendar"
             >
               {summary}
             </a>
@@ -5227,13 +5688,14 @@ function EventCard({ ev, now, onPush, cleanName, isSignUpdating }) {
         </p>
         <p 
           style={{ fontSize: 14, fontWeight: 600, color: isActive ? 'rgba(255,255,255,0.9)' : '#64748b', margin: '2px 0 0 0', width: 'fit-content' }} 
-          className="hover:underline"
+          className="group-hover:underline"
         >
-          {ev.html_link || ev.id ? (
+          {eventUrl ? (
             <a 
-              href={ev.html_link || `https://calendar.google.com/calendar/r/event/${ev.id}`} 
+              href={eventUrl} 
               target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}
               onClick={(e) => e.stopPropagation()}
+              title="Click to open event in Google Calendar"
             >
               {timeStr}
             </a>
@@ -5848,15 +6310,61 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
   const [isAiExpanded, setIsAiExpanded] = useState(false);
   const [isLoyExpanded, setIsLoyExpanded] = useState(false);
-  const [aiProvider, setAiProvider] = useState(() => localStorage.getItem('led_ai_provider') || 'gemini');
+  const [isGoogleExpanded, setIsGoogleExpanded] = useState(false);
+  const [aiProvider, setAiProvider] = useState(() => {
+    return localStorage.getItem('led_last_generated_provider') === 'openai' ? 'openai' : 'gemini';
+  });
   const aiGeneratorRef = useRef(null);
 
   useEffect(() => {
-    if (!isModalOpen || form.mode !== 'image') {
+    if (isModalOpen) {
+      const defaultProvider = localStorage.getItem('led_last_generated_provider') === 'openai' ? 'openai' : 'gemini';
+      setAiProvider(defaultProvider);
+    } else {
       setIsAiExpanded(false);
       setIsLoyExpanded(false);
+      setIsGoogleExpanded(false);
     }
-  }, [isModalOpen, form.mode]);
+  }, [isModalOpen]);
+
+  useEffect(() => {
+    if (form.mode !== 'image') {
+      setIsAiExpanded(false);
+      setIsLoyExpanded(false);
+      setIsGoogleExpanded(false);
+    }
+  }, [form.mode]);
+
+  const handleSelectGoogleMedia = async (item) => {
+    if (!item) return;
+    try {
+      setIsLoadingMedia(true);
+      setSaveError('');
+      let blob;
+      const proxyUrl = getGoogleProxyMediaUrl(item.originalUrl);
+      const resp = await fetch(proxyUrl);
+      if (!resp.ok) throw new Error(`Proxy HTTP ${resp.status}`);
+      blob = await resp.blob();
+      if (!blob.type || (!blob.type.startsWith('image/') && !blob.type.startsWith('video/'))) {
+        throw new Error('Unsupported image format or corrupt file. Please choose another image.');
+      }
+      const isGif = item.isAnimated || item.originalUrl.toLowerCase().includes('.gif') || blob.type === 'image/gif';
+      const ext = isGif ? 'gif' : (blob.type.includes('png') ? 'png' : (blob.type.includes('jpeg') || blob.type.includes('jpg') ? 'jpg' : (blob.type.includes('mp4') ? 'mp4' : 'png')));
+      const filename = `${item.title ? item.title.slice(0, 24).replace(/[^a-zA-Z0-9_-]/g, '_') : 'google_media'}.${ext}`;
+      const file = new File([blob], filename, { type: blob.type || (isGif ? 'image/gif' : 'image/png') });
+
+      setForm(prev => ({
+        ...prev,
+        mode: 'image'
+      }));
+      handleMediaFile(file);
+    } catch (err) {
+      console.error('[handleSelectGoogleMedia] Error loading media:', err);
+      setSaveError(`Failed to load media: ${err.message}`);
+      setIsLoadingMedia(false);
+      throw err;
+    }
+  };
 
   const handleSelectLoyMedia = async (item) => {
     if (!item) return;
@@ -6781,7 +7289,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       }
       if (event.key === 'Enter') {
         if (event.isComposing || event.repeat) return;
-        if (event.target?.closest('[data-ai-side-panel]') || event.target?.closest('[data-loy-side-panel]')) return;
+        if (isGoogleExpanded || isAiExpanded || isLoyExpanded) return;
+        if (event.target?.closest('[data-ai-side-panel]') || event.target?.closest('[data-loy-side-panel]') || event.target?.closest('[data-google-side-panel]')) return;
         if (event.target?.tagName === 'BUTTON' && event.target?.innerText?.toLowerCase().includes('delete')) return;
         if (canSavePreset) {
           event.preventDefault();
@@ -6791,7 +7300,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isModalOpen, isSaving, form, canSavePreset, handleSave]);
+  }, [isModalOpen, isSaving, form, canSavePreset, handleSave, isGoogleExpanded, isAiExpanded, isLoyExpanded]);
 
   const exportOriginalMedia = () => {
     if (!form.imgSrc) return;
@@ -7116,7 +7625,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 alignItems: 'flex-start',
                 justifyContent: 'flex-start',
                 gap: '16px', 
-                width: (isAiExpanded || isLoyExpanded) && form.mode === 'image' ? '1244px' : '768px',
+                width: (isAiExpanded || isLoyExpanded || isGoogleExpanded) && form.mode === 'image' ? '1244px' : '768px',
                 maxWidth: 'none',
                 maxHeight: '92vh',
                 transition: 'max-width 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
@@ -7159,7 +7668,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               </div>
 
               <div style={{ marginBottom: '32px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%', opacity: isSaving ? 0.5 : 1, pointerEvents: isSaving ? 'none' : 'auto' }}>
-                <div className="preview-stack opacity-100 scale-100" style={{ margin: '0 auto', width: '100%', maxWidth: 'var(--preview-width)' }}>
+                <div className="preview-stack opacity-100 scale-100" style={{ position: 'relative', margin: '0 auto', width: '100%', maxWidth: 'var(--preview-width)', borderRadius: '18px', overflow: 'hidden' }}>
                   {form.mode === 'image' ? (
                     <>
                       <input 
@@ -7629,6 +8138,24 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                       )}
                     </div>
                   )}
+                  {isLoadingMedia && (
+                    <div 
+                      style={{
+                        position: 'absolute',
+                        inset: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        background: 'rgba(0, 0, 0, 0.45)',
+                        backdropFilter: 'blur(2px)',
+                        borderRadius: '18px',
+                        zIndex: 25,
+                        pointerEvents: 'none'
+                      }}
+                    >
+                      <RefreshCw size={26} className="animate-spin text-violet-400" />
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex flex-col gap-6">
@@ -7747,32 +8274,42 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     </div>
                     
                     {/* Default Toggle */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingRight: '4px', paddingTop: '12px', paddingBottom: '12px', opacity: isSaving ? 0.45 : 1, pointerEvents: isSaving ? 'none' : 'auto' }}>
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      paddingRight: '4px',
+                      paddingTop: '12px',
+                      paddingBottom: '12px',
+                      opacity: (!hasRequiredPresetContent || isSaving) ? 0.35 : 1,
+                      pointerEvents: (!hasRequiredPresetContent || isSaving) ? 'none' : 'auto'
+                    }}>
                       <div 
-                        onClick={() => !isSaving && setForm(prev => ({ ...prev, isDefault: !prev.isDefault }))}
+                        onClick={() => hasRequiredPresetContent && !isSaving && setForm(prev => ({ ...prev, isDefault: !prev.isDefault }))}
                         style={{ 
                           fontSize: '13px', 
                           fontWeight: 700, 
-                          color: '#cbd5e1', 
-                          cursor: isSaving ? 'not-allowed' : 'pointer', 
+                          color: (!hasRequiredPresetContent || isSaving) ? '#64748b' : '#cbd5e1', 
+                          cursor: (!hasRequiredPresetContent || isSaving) ? 'not-allowed' : 'pointer', 
                           display: 'flex', 
                           alignItems: 'center', 
                           gap: '8px',
                           userSelect: 'none'
                         }}
+                        title={!hasRequiredPresetContent ? "Add canvas content to enable Use as Default" : undefined}
                       >
                         <div
                           style={{
                             width: '18px',
                             height: '18px',
                             borderRadius: '6px',
-                            background: form.isDefault 
+                            background: (form.isDefault && hasRequiredPresetContent)
                               ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))' 
                               : 'rgba(255, 255, 255, 0.08)',
-                            border: form.isDefault 
-                              ? '1px solid rgba(255, 255, 255, 0.3)' 
+                            border: (form.isDefault && hasRequiredPresetContent)
+                              ? 'none' 
                               : '1px solid rgba(255, 255, 255, 0.2)',
-                            boxShadow: form.isDefault ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none',
+                            boxShadow: (form.isDefault && hasRequiredPresetContent) ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none',
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
@@ -7781,7 +8318,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                             flexShrink: 0
                           }}
                         >
-                          {form.isDefault && <Check size={13} strokeWidth={3.5} />}
+                          {form.isDefault && hasRequiredPresetContent && <Check size={13} strokeWidth={3.5} />}
                         </div>
                         <span>Use as Default</span>
                       </div>
@@ -8093,7 +8630,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 {/* Image / Video Controls */}
                 {form.mode === 'image' && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '16px' }}>
-                    {isLoadingMedia && <span role="status" className="text-xs text-slate-300" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><RefreshCw size={11} className="animate-spin" />Loading media...</span>}
                     {saveError && !isLoadingMedia && <span role="alert" style={{ color: '#f87171', fontSize: '12px', fontWeight: 600 }}>{saveError}</span>}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -8126,7 +8662,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                             if (isSaving) return;
                             setIsAiExpanded(prev => {
                               const next = !prev;
-                              if (next) setIsLoyExpanded(false);
+                              if (next) {
+                                setIsLoyExpanded(false);
+                                setIsGoogleExpanded(false);
+                              }
                               return next;
                             });
                           }}
@@ -8159,9 +8698,46 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                           disabled={isSaving}
                           onClick={() => {
                             if (isSaving) return;
+                            setIsGoogleExpanded(prev => {
+                              const next = !prev;
+                              if (next) {
+                                setIsAiExpanded(false);
+                                setIsLoyExpanded(false);
+                              }
+                              return next;
+                            });
+                          }}
+                          className={`btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5 transition-all ${!isGoogleExpanded ? 'inactive' : ''}`}
+                          aria-label="Google Images"
+                          style={{
+                            borderRadius: '12px',
+                            opacity: isSaving ? 0.35 : 1,
+                            cursor: isSaving ? 'not-allowed' : 'pointer',
+                            pointerEvents: isSaving ? 'none' : 'auto',
+                            background: isSaving
+                              ? 'rgba(255, 255, 255, 0.05)'
+                              : 'linear-gradient(#ffffff, #ffffff) padding-box, linear-gradient(135deg, #4285F4 0%, #EA4335 33%, #FBBC05 66%, #34A853 100%) border-box',
+                            border: isSaving ? '1px solid rgba(255, 255, 255, 0.08)' : '2px solid transparent',
+                            color: isSaving ? '#64748b' : '#0f172a',
+                            boxShadow: isSaving
+                              ? 'none'
+                              : '0 2px 10px rgba(0, 0, 0, 0.25), 0 0 8px rgba(66, 133, 244, 0.35)'
+                          }}
+                          title={isGoogleExpanded ? "Close Google Images" : "Google Images Search"}
+                        >
+                          <GoogleLogo size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSaving}
+                          onClick={() => {
+                            if (isSaving) return;
                             setIsLoyExpanded(prev => {
                               const next = !prev;
-                              if (next) setIsAiExpanded(false);
+                              if (next) {
+                                setIsAiExpanded(false);
+                                setIsGoogleExpanded(false);
+                              }
                               return next;
                             });
                           }}
@@ -8783,6 +9359,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     isExpanded={true}
                     onToggleExpand={setIsAiExpanded}
                     onCloseSidePanel={() => !isSaving && setIsAiExpanded(false)}
+                    provider={aiProvider}
                     onProviderChange={setAiProvider}
                     form={form} 
                     setForm={setForm} 
@@ -8790,6 +9367,47 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     onNotify={setUnifiedPushMessage}
                     style={{
                       height: '100%',
+                      borderRadius: '24px',
+                      padding: '24px'
+                    }}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Google Images Side Panel */}
+            <AnimatePresence>
+              {isGoogleExpanded && form.mode === 'image' && (
+                <motion.div
+                  data-google-side-panel="true"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.22, ease: 'easeOut' }}
+                  style={{
+                    position: 'absolute',
+                    left: '784px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    width: '460px',
+                    maxWidth: '460px',
+                    height: 'auto',
+                    maxHeight: '92vh',
+                    overflow: 'hidden',
+                    borderRadius: '24px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    opacity: isSaving ? 0.45 : 1,
+                    pointerEvents: isSaving ? 'none' : 'auto',
+                    cursor: isSaving ? 'not-allowed' : 'default'
+                  }}
+                >
+                  <GoogleMediaGallery 
+                    onClose={() => !isSaving && setIsGoogleExpanded(false)}
+                    onSelectMedia={handleSelectGoogleMedia}
+                    onNotify={setUnifiedPushMessage}
+                    form={form}
+                    style={{
                       borderRadius: '24px',
                       padding: '24px'
                     }}
@@ -8814,6 +9432,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     transform: 'translateY(-50%)',
                     width: '460px',
                     maxWidth: '460px',
+                    height: 'auto',
                     maxHeight: '92vh',
                     overflow: 'hidden',
                     borderRadius: '24px',

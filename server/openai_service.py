@@ -149,7 +149,8 @@ def generate_animated_gif(
     attachments: Optional[List[Dict[str, str]]] = None,
     api_key: Optional[str] = None,
     history: Optional[List[str]] = None,
-    model: Optional[str] = None
+    model: Optional[str] = None,
+    previous_script: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates an animated GIF adhering to 64x20 resolution using ChatGPT / OpenAI."""
     if Image is None:
@@ -186,9 +187,32 @@ The user previously requested:
 This current request ("{prompt}") is a follow-up or refinement in this ongoing conversation. Incorporate context from the previous requests while addressing the latest prompt.
 """
 
+    followup_guidance = ""
+    if previous_script and previous_script.strip():
+        followup_guidance = f"""
+=============================================================================
+FOLLOW-UP EDIT / REFINEMENT MODE:
+The user is asking to modify or refine an existing, working Python Pillow script from earlier in this conversation:
+Latest user instruction: "{prompt}"
+
+EXISTING SCRIPT:
+```python
+{previous_script.strip()}
+```
+
+REFINEMENT RULES:
+1. Do NOT rewrite the animation from scratch. Modify the existing script to incorporate the user's requested changes.
+2. Preserve existing animation timing, frame count, coordinate math, and styling unless the user explicitly requested to change them.
+3. If the user asks to capitalize words (e.g. "make each word capitalized"), update the text strings / capitalization in the existing script (e.g. "TURN OFF", "HIGH BEAM").
+4. If the user asks to "turn off the high beam" or remove an effect, disable or remove the flashing beam rays or graphic as requested.
+5. Strictly obey hardware constraints: exactly 1 horizontal line of text (never stack 2 lines vertically), minimum 12-16px font size, no top/bottom borders that squeeze text.
+6. Return the COMPLETE, updated executable Python script inside ```python ... ```.
+=============================================================================
+"""
+
     instruction = f"""{SYSTEM_CONSTRAINTS}
 
-Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".{history_guidance}{ref_guidance}
+Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a pixel-perfect animated GIF of 64x20 pixels matching: "{prompt}".{history_guidance}{ref_guidance}{followup_guidance}
 
 CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
 - Image resolution: EXACTLY width=64, height=20.
@@ -268,7 +292,8 @@ CRITICAL RULES FOR MAXIMUM SMOOTHNESS AND FAST HARDWARE TRANSFER:
         "frameCount": getattr(pil_gif, "n_frames", 1),
         "width": PANEL_W,
         "height": PANEL_H,
-        "suggestedName": f"ChatGPT GIF: {prompt[:24].strip()}"
+        "suggestedName": f"ChatGPT GIF: {prompt[:24].strip()}",
+        "script": getattr(gif_bytes, "script", reply_text)
     }
 
 
@@ -277,7 +302,8 @@ def generate_still_image(
     attachments: Optional[List[Dict[str, str]]] = None,
     api_key: Optional[str] = None,
     history: Optional[List[str]] = None,
-    model: Optional[str] = None
+    model: Optional[str] = None,
+    previous_script: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates a still 64x20 pixel-art image using ChatGPT / OpenAI."""
     if Image is None:
@@ -314,9 +340,23 @@ The user previously requested:
 This current request ("{prompt}") is a follow-up or refinement in this ongoing conversation. Incorporate context from the previous requests while addressing the latest prompt.
 """
 
+    followup_guidance = ""
+    if previous_script and previous_script.strip():
+        followup_guidance = f"""
+=============================================================================
+FOLLOW-UP EDIT / REFINEMENT MODE:
+Modify this existing, working Python script for '{prompt}':
+```python
+{previous_script.strip()}
+```
+Apply the requested changes to this script rather than starting from scratch.
+Return ONLY executable Python code inside a ```python ``` block.
+=============================================================================
+"""
+
     instruction = f"""{SYSTEM_CONSTRAINTS}
 
-Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a single pixel-perfect 64x20 image matching: "{prompt}".{history_guidance}{ref_guidance}
+Generate a complete, self-contained Python script using PIL (Pillow) and math/random that renders a single pixel-perfect 64x20 image matching: "{prompt}".{history_guidance}{ref_guidance}{followup_guidance}
 
 CRITICAL RULES:
 - Image resolution: EXACTLY width=64, height=20.
@@ -399,7 +439,8 @@ CRITICAL RULES:
         "pixels": pixels,
         "width": PANEL_W,
         "height": PANEL_H,
-        "suggestedName": f"ChatGPT: {prompt[:24].strip()}"
+        "suggestedName": f"ChatGPT: {prompt[:24].strip()}",
+        "script": getattr(img_bytes, "script", reply_text)
     }
 
 
@@ -408,10 +449,14 @@ def generate_video(
     attachments: Optional[List[Dict[str, str]]] = None,
     api_key: Optional[str] = None,
     history: Optional[List[str]] = None,
-    model: Optional[str] = None
+    model: Optional[str] = None,
+    previous_script: Optional[str] = None
 ) -> Dict[str, Any]:
     """Generates animation frames and packages as video/gif preset for the sign."""
-    gif_result = generate_animated_gif(prompt, attachments=attachments, api_key=api_key, history=history, model=model)
+    gif_result = generate_animated_gif(
+        prompt, attachments=attachments, api_key=api_key, history=history, model=model, previous_script=previous_script
+    )
     gif_result["fileType"] = "video"
     gif_result["suggestedName"] = f"ChatGPT Video: {prompt[:24].strip()}"
+    return gif_result
     return gif_result
