@@ -1,6 +1,8 @@
 import os
 import json
 import uuid
+import math
+import re
 """
 LOY SPACE API Service -- Integrates LEDSign with the LOY SPACE online material library.
 
@@ -19,6 +21,7 @@ ORIG_CDN = "https://lmq6store.popled.cn"
 GUEST_SESSION_FILE = os.path.join(os.path.dirname(__file__), ".loy_guest.json")
 USER_SESSION_FILE = os.path.join(os.path.dirname(__file__), ".loy_user.json")
 UPLOADS_TRACK_FILE = os.path.join(os.path.dirname(__file__), ".loy_uploads.json")
+MATERIALS_CACHE_FILE = os.path.join(os.path.dirname(__file__), ".loy_materials_cache.json")
 
 
 # Official categories matching LOY SPACE app's get_config (tags_type=2) order and 64x20 active tags
@@ -41,31 +44,79 @@ LOY_CATEGORIES = [
     {"id": 6, "name": "Business", "type": 1},
 ]
 
-# Common English to Chinese tags and category associations for search
+# Comprehensive English to Chinese tags and category associations for search
 SEARCH_ALIASES = {
-    "eye": {"tags": ["眼睛", "eye", "eyes"], "cat_id": 13},
-    "eyes": {"tags": ["眼睛", "eye", "eyes"], "cat_id": 13},
+    # Holidays, Christmas & Celebrations
+    "christmas": {"tags": ["圣诞", "christmas", "xmas", "santa", "merry", "noel"], "cat_id": 2},
+    "xmas": {"tags": ["圣诞", "christmas", "xmas", "santa"], "cat_id": 2},
+    "santa": {"tags": ["圣诞", "santa", "christmas"], "cat_id": 2},
+    "merry": {"tags": ["圣诞", "merry", "christmas"], "cat_id": 2},
+    "holiday": {"tags": ["节假日", "holiday", "holidays", "圣诞", "christmas", "新年"], "cat_id": 2},
+    "holidays": {"tags": ["节假日", "holiday", "holidays", "圣诞", "christmas", "新年"], "cat_id": 2},
+    "new year": {"tags": ["新年", "元旦", "new year"], "cat_id": 2},
+    "halloween": {"tags": ["万圣节", "halloween", "ghost", "pumpkin"], "cat_id": 2},
+
+    # Fire / Flame / Hot
+    "fire": {"tags": ["火", "焰", "炎", "fire", "flame", "hot"], "cat_id": 49},
+    "flame": {"tags": ["火", "焰", "flame", "fire"], "cat_id": 49},
+    "hot": {"tags": ["热门", "hot", "exclusive", "火"], "cat_id": 49},
+
+    # Characters, Animals & Icons
+    "bear": {"tags": ["熊", "小熊", "bear", "teddy"]},
+    "dog": {"tags": ["狗", "dog", "puppy"]},
+    "cat": {"tags": ["猫", "cat", "kitty"]},
+    "pikachu": {"tags": ["皮卡丘", "pikachu", "pika", "pokemon"]},
+    "pika": {"tags": ["皮卡丘", "pikachu", "pika"]},
+    "pokemon": {"tags": ["宝可梦", "皮卡丘", "pokemon"]},
+    "mario": {"tags": ["马里奥", "mario"]},
+    "battery": {"tags": ["电池", "battery", "bat"]},
+    "police": {"tags": ["police", "警", "交警"]},
+    "pacman": {"tags": ["吃豆人", "pacman"]},
+
+    # Emotions, Gestures & Symbols
+    "heart": {"tags": ["心", "爱", "heart", "love"]},
+    "love": {"tags": ["爱", "心", "love", "heart"]},
+    "star": {"tags": ["星", "star", "stars"]},
+    "skull": {"tags": ["骷髅", "skull"]},
+    "smile": {"tags": ["表情", "smile", "laugh", "happy", "笑"], "cat_id": 3},
+    "laugh": {"tags": ["表情", "smile", "laugh", "笑"], "cat_id": 3},
+    "happy": {"tags": ["表情", "happy", "smile", "笑"], "cat_id": 3},
+    "expression": {"tags": ["表情", "smile", "expression", "face", "emoji", "笑"], "cat_id": 3},
+    "emoji": {"tags": ["表情", "emoji", "smile"], "cat_id": 3},
+    "warning": {"tags": ["警示", "warning", "warn", "danger", "注意"], "cat_id": 10},
+    "warn": {"tags": ["警示", "warning", "warn", "danger"], "cat_id": 10},
+    "danger": {"tags": ["危险", "警示", "danger", "warning"], "cat_id": 10},
+
+    # Community Categories
+    "eye": {"tags": ["眼睛", "eye", "eyes", "眼"], "cat_id": 13},
+    "eyes": {"tags": ["眼睛", "eye", "eyes", "眼"], "cat_id": 13},
     "motorcycle": {"tags": ["机车", "摩托", "motorcycle", "bike", "moto"], "cat_id": 14},
+    "moto": {"tags": ["机车", "摩托", "moto", "motorcycle"], "cat_id": 14},
     "bike": {"tags": ["机车", "摩托", "motorcycle", "bike"], "cat_id": 14},
-    "car": {"tags": ["汽车", "car", "auto", "driver"], "cat_id": 5},
-    "driver": {"tags": ["汽车", "driver", "car"], "cat_id": 5},
-    "expression": {"tags": ["表情", "smile", "expression", "face", "emoji"], "cat_id": 3},
-    "smile": {"tags": ["表情", "smile", "laugh"], "cat_id": 3},
-    "warning": {"tags": ["警示", "warning", "warn", "danger"], "cat_id": 10},
-    "picture": {"tags": ["图片", "picture", "pic"], "cat_id": 12},
-    "pixel": {"tags": ["像素", "pixel"], "cat_id": 7},
-    "word": {"tags": ["文字", "word", "text"], "cat_id": 8},
-    "text": {"tags": ["文字", "word", "text"], "cat_id": 8},
-    "logo": {"tags": ["车标", "logo", "auto logos"], "cat_id": 11},
-    "logos": {"tags": ["车标", "logo", "auto logos"], "cat_id": 11},
-    "holiday": {"tags": ["节假日", "holiday", "holidays", "christmas", "xmas"], "cat_id": 2},
-    "holidays": {"tags": ["节假日", "holiday", "holidays"], "cat_id": 2},
-    "creativity": {"tags": ["创意", "creativity", "creative"], "cat_id": 9},
+    "car": {"tags": ["汽车", "车", "car", "auto", "driver"], "cat_id": 5},
+    "auto": {"tags": ["汽车", "车", "auto", "car"], "cat_id": 5},
+    "driver": {"tags": ["汽车", "车", "driver", "car"], "cat_id": 5},
+    "picture": {"tags": ["图片", "picture", "pic", "图"], "cat_id": 12},
+    "pixel": {"tags": ["像素", "pixel", "8bit"], "cat_id": 7},
+    "word": {"tags": ["文字", "word", "text", "字"], "cat_id": 8},
+    "text": {"tags": ["文字", "word", "text", "字"], "cat_id": 8},
+    "logo": {"tags": ["车标", "logo", "auto logos", "标"], "cat_id": 11},
+    "logos": {"tags": ["车标", "logo", "auto logos", "标"], "cat_id": 11},
+    "creativity": {"tags": ["创意", "creativity", "creative", "创"], "cat_id": 9},
     "creative": {"tags": ["创意", "creativity", "creative"], "cat_id": 9},
     "welfare": {"tags": ["公益", "public welfare", "welfare"], "cat_id": 4},
     "business": {"tags": ["商业", "business"], "cat_id": 6},
-    "hot": {"tags": ["热门", "hot", "exclusive"], "cat_id": 1},
-    "exclusive": {"tags": ["热门", "exclusive"], "cat_id": 1},
+    "exclusive": {"tags": ["专属", "exclusive"], "cat_id": 1},
+    "new": {"tags": ["最新", "new", "newest"], "cat_id": 48},
+
+    # Colors
+    "red": {"tags": ["红", "red"]},
+    "blue": {"tags": ["蓝", "blue"]},
+    "green": {"tags": ["绿", "green"]},
+    "yellow": {"tags": ["黄", "yellow"]},
+    "purple": {"tags": ["紫", "purple"]},
+    "white": {"tags": ["白", "white"]},
+    "cyan": {"tags": ["青", "cyan"]},
 }
 
 class LoySpaceService:
@@ -76,6 +127,77 @@ class LoySpaceService:
         self._last_login_time = 0
         self._categories_cache: Optional[List[Dict[str, Any]]] = None
         self._categories_cache_time: float = 0
+        self._cache_file = MATERIALS_CACHE_FILE
+        self._materials_pool: Dict[int, Dict[str, Any]] = {}
+        self._load_materials_cache()
+
+    def _load_materials_cache(self) -> None:
+        try:
+            if os.path.exists(self._cache_file):
+                with open(self._cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            try:
+                                iid = int(k)
+                                if isinstance(v, dict):
+                                    self._materials_pool[iid] = v
+                            except (ValueError, TypeError):
+                                pass
+        except Exception as e:
+            print(f"[LoySpaceService] Could not load materials cache: {e}")
+
+    def _save_materials_cache(self) -> None:
+        try:
+            temp_path = self._cache_file + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(self._materials_pool, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, self._cache_file)
+        except Exception as e:
+            print(f"[LoySpaceService] Could not save materials cache: {e}")
+
+    def _index_materials(self, raw_items: List[Dict[str, Any]], category_id: Optional[int] = None) -> None:
+        if not isinstance(raw_items, list) or not raw_items:
+            return
+        updated = False
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            iid = item.get("id")
+            if not iid:
+                continue
+            try:
+                iid = int(iid)
+            except (ValueError, TypeError):
+                continue
+            if category_id is not None and "tags" not in item:
+                item["tags"] = category_id
+            if iid not in self._materials_pool:
+                self._materials_pool[iid] = item
+                updated = True
+            else:
+                self._materials_pool[iid].update({k: v for k, v in item.items() if v is not None})
+        if updated:
+            self._save_materials_cache()
+
+    def _seed_initial_pool(self, w: int = 64, h: int = 20) -> None:
+        """Seed pool with Hot, Holidays, and New if cache is empty."""
+        try:
+            for cat_id, cat_type, pcount in [(49, 2, 200), (2, 1, 50), (48, 0, 200)]:
+                items = self._query_api("query_material_list", {
+                    "page_count": pcount,
+                    "page_index": 0,
+                    "w": w,
+                    "h": h,
+                    "type": cat_type,
+                    "tags": cat_id,
+                    "sort": 0,
+                    "lang": 2
+                })
+                if isinstance(items, list) and items:
+                    self._index_materials(items, cat_id)
+        except Exception as e:
+            print(f"[LoySpaceService] Seed error: {e}")
 
     def _ensure_login(self, force: bool = False) -> bool:
         """Authenticate as guest/appout user with LOY SPACE API."""
@@ -217,19 +339,19 @@ class LoySpaceService:
             })
         return cleaned_items
 
-    def _query_api(self, endpoint: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _query_api(self, endpoint: str, params: Dict[str, Any], timeout: float = 3.5) -> List[Dict[str, Any]]:
         params["userid"] = self._user_id
         params["ts"] = int(time.time() * 1000)
         params["token"] = self._generate_token(params, self._key)
         try:
-            resp = self._session.post(BASE_URL + endpoint, data=params, timeout=10)
+            resp = self._session.post(BASE_URL + endpoint, data=params, timeout=timeout)
             res_json = resp.json()
             if res_json.get("status") in (101, 102, 103):
                 if self._ensure_login(force=True):
                     params["userid"] = self._user_id
                     params["ts"] = int(time.time() * 1000)
                     params["token"] = self._generate_token(params, self._key)
-                    resp = self._session.post(BASE_URL + endpoint, data=params, timeout=10)
+                    resp = self._session.post(BASE_URL + endpoint, data=params, timeout=timeout)
                     res_json = resp.json()
             if res_json.get("status") == 0:
                 return res_json.get("data", [])
@@ -254,63 +376,117 @@ class LoySpaceService:
         # Handle Search
         if search_query and search_query.strip():
             raw_query = search_query.strip().lower()
-            collected_raw = []
-            seen_ids = set()
+            query_words = [w_term for w_term in re.split(r'\s+', raw_query) if w_term]
 
-            # 1. Look up any search aliases (e.g. eye -> 眼睛, plus category 13)
+            # 1. Expand search terms via aliases & categories
             alias_info = SEARCH_ALIASES.get(raw_query)
-            search_tags = [search_query.strip()]
+            search_terms = [raw_query] + query_words
             cat_id_to_fetch = None
             if alias_info:
-                search_tags.extend(alias_info.get("tags", []))
+                search_terms.extend(alias_info.get("tags", []))
                 cat_id_to_fetch = alias_info.get("cat_id")
 
-            # Also check if query is directly part of category names
+            # Check if query directly matches any known category name
             if not cat_id_to_fetch:
                 for c in LOY_CATEGORIES:
-                    if raw_query in c["name"].lower() or c["name"].lower() in raw_query:
+                    cname = c["name"].lower()
+                    if raw_query in cname or any(qw in cname for qw in query_words):
                         cat_id_to_fetch = c["id"]
                         break
 
-            # If matching category found, query its items
-            if cat_id_to_fetch:
-                cat_items = self._query_api("query_material_list", {
-                    "page_count": page_count,
-                    "page_index": page_index,
-                    "w": w,
-                    "h": h,
-                    "type": 1,
-                    "tags": cat_id_to_fetch,
-                    "sort": 0,
-                    "lang": 2
-                })
-                for it in cat_items:
-                    iid = it.get("id")
-                    if iid and iid not in seen_ids:
-                        seen_ids.add(iid)
-                        collected_raw.append(it)
+            # Deduplicate search terms (all lowercase for case-insensitive matching)
+            search_terms = list(dict.fromkeys([t.lower() for t in search_terms if t]))
 
-            # Query tag_diy for each variant
-            for stag in list(dict.fromkeys(search_tags))[:3]:
-                tag_items = self._query_api("query_material_list_by_tag_diy", {
-                    "page_count": page_count,
-                    "page_index": page_index,
-                    "w": w,
-                    "h": h,
-                    "tag_diy": stag,
-                    "lang": 2
-                })
-                for it in tag_items:
-                    iid = it.get("id")
-                    if iid and iid not in seen_ids:
-                        seen_ids.add(iid)
-                        collected_raw.append(it)
+            def _score_pool() -> List[Dict[str, Any]]:
+                candidates = []
+                for item in self._materials_pool.values():
+                    m_name = (item.get("m_name") or item.get("name") or "").lower()
+                    mark = (item.get("mark") or "").lower()
+                    name_en = (item.get("name_en") or "").lower()
+                    mark_en = (item.get("mark_en") or "").lower()
+                    tag_diy = (item.get("tag_diy") or "").lower()
+                    all_text = f"{m_name} {mark} {name_en} {mark_en} {tag_diy}"
 
-            cleaned_items = self._clean_items(collected_raw, w, h)
+                    score = 0.0
+                    for term in search_terms:
+                        if term in m_name:
+                            score += 100.0
+                            if m_name.startswith(term):
+                                score += 40.0
+                        elif term in mark:
+                            score += 40.0
+                        elif term in tag_diy:
+                            score += 50.0
+                        elif term in all_text:
+                            score += 25.0
+
+                    if cat_id_to_fetch and item.get("tags") == cat_id_to_fetch:
+                        score += 20.0
+
+                    if score > 0:
+                        use = item.get("count_use", 0) or 0
+                        fav = item.get("count_favorite", 0) or 0
+                        try:
+                            score += math.log1p(float(use)) * 2.0 + math.log1p(float(fav))
+                        except Exception:
+                            pass
+                        candidates.append((score, item))
+
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                return [item for _, item in candidates]
+
+            # Fast path: Score our indexed local pool first. If matches are found, return immediately!
+            matched_raw = _score_pool()
+
+            # If no matches found locally, try fetching the specific category or remote tags with a fast timeout
+            if not matched_raw:
+                if cat_id_to_fetch:
+                    has_cat_in_pool = any(it.get("tags") == cat_id_to_fetch for it in self._materials_pool.values())
+                    if not has_cat_in_pool:
+                        cat_items = self._query_api("query_material_list", {
+                            "page_count": 200,
+                            "page_index": 0,
+                            "w": w,
+                            "h": h,
+                            "type": 2 if cat_id_to_fetch == 49 else (0 if cat_id_to_fetch == 48 else 1),
+                            "tags": cat_id_to_fetch,
+                            "sort": 0,
+                            "lang": 2
+                        }, timeout=3.0)
+                        if isinstance(cat_items, list) and cat_items:
+                            self._index_materials(cat_items, cat_id_to_fetch)
+                            matched_raw = _score_pool()
+
+                if not matched_raw:
+                    # Try remote tag_diy search once with short timeout
+                    diy_tags_to_check = [raw_query]
+                    if alias_info:
+                        diy_tags_to_check.extend(alias_info.get("tags", [])[:1])
+                    for stag in list(dict.fromkeys(diy_tags_to_check))[:1]:
+                        tag_items = self._query_api("query_material_list_by_tag_diy", {
+                            "page_count": 50,
+                            "page_index": 0,
+                            "w": w,
+                            "h": h,
+                            "tag_diy": stag,
+                            "lang": 2
+                        }, timeout=2.5)
+                        if isinstance(tag_items, list) and tag_items:
+                            self._index_materials(tag_items)
+                    matched_raw = _score_pool()
+
+            # Clean and paginate
+            cleaned_items = self._clean_items(matched_raw, w, h)
+            total_matches = len(cleaned_items)
+            start_idx = page_index * page_count
+            end_idx = start_idx + page_count
+            paginated = cleaned_items[start_idx:end_idx]
+
             return {
                 "status": 0,
-                "data": cleaned_items,
-                "has_more": len(cleaned_items) >= page_count,
+                "data": paginated,
+                "has_more": end_idx < total_matches,
+                "total_count": total_matches,
                 "page_index": page_index
             }
 
@@ -325,6 +501,9 @@ class LoySpaceService:
             "sort": 0,
             "lang": 2
         })
+
+        if isinstance(raw_items, list) and raw_items:
+            self._index_materials(raw_items, tag_id)
 
         cleaned_items = self._clean_items(raw_items, w, h)
         return {

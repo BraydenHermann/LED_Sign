@@ -5489,15 +5489,20 @@ function CalendarView({ status, events, invites, loading, fetchEvents, now, onPu
             </div>
           )}
 
-          {events?.length === 0 ? (
+          {loading && !events ? (
+            <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
+              <RefreshCw size={24} className="animate-spin text-blue-400" style={{ marginBottom: 12 }} />
+              <p className="text-slate-400">Loading today's schedule...</p>
+            </div>
+          ) : (!events || events.length === 0) ? (
             <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
               <p className="text-slate-400">No events scheduled today.</p>
             </div>
           ) : (
             <div className="w-full grid grid-cols-1 gap-4">
-              {events?.map((ev, i) => (
+              {events.map((ev, i) => (
                 <EventCard
-                  key={i}
+                  key={ev.id || i}
                   ev={ev}
                   now={now}
                   onPush={onPush}

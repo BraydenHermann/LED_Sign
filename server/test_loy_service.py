@@ -44,6 +44,14 @@ class TestLoySpaceIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(item.get("w"), 64)
             self.assertEqual(item.get("h"), 20)
 
+    async def test_materials_search_christmas(self):
+        res = await main.get_loy_materials(search="christmas", page_index=0, page_count=10)
+        self.assertEqual(res.get("status"), 0)
+        items = res.get("data", [])
+        self.assertTrue(len(items) > 0)
+        names = [it.get("name", "").lower() for it in items]
+        self.assertTrue(any("christ" in n or "圣诞" in n for n in names))
+
     async def test_proxy_media_security(self):
         # Disallow domains not belonging to popled.cn
         with self.assertRaises(HTTPException) as cm:
