@@ -2378,12 +2378,21 @@ export default function App() {
     };
   }, []);
 
-  const fetchEvents = async () => {
-    if (!status?.calendar_connected) return [];
+  const fetchingEventsRef = useRef(false);
+  const fetchEvents = async (force = false) => {
+    if (!status?.calendar_connected) {
+      setCalLoading(false);
+      return [];
+    }
+    if (fetchingEventsRef.current && !force) {
+      return events || [];
+    }
+    fetchingEventsRef.current = true;
     setCalLoading(true);
     try {
       const isClean = localStorage.getItem('loy_clean_name') !== 'false';
-      const res = await axios.get(`${API_BASE}/calendar/today?clean_name=${isClean}`);
+      const url = `${API_BASE}/calendar/today?clean_name=${isClean}${force ? '&force=true' : ''}`;
+      const res = await axios.get(url, { timeout: 10000 });
       const rawEvs = res.data?.events || [];
       const rawInvites = res.data?.invites || [];
       const evs = rawEvs.map(ev => ({
@@ -2392,11 +2401,13 @@ export default function App() {
       }));
       setEvents(evs);
       setInvites(rawInvites);
-      setCalLoading(false);
       return evs;
     } catch (e) {
+      console.warn('[fetchEvents] Error fetching calendar events:', e);
+      return events || [];
+    } finally {
+      fetchingEventsRef.current = false;
       setCalLoading(false);
-      return [];
     }
   };
 
@@ -5182,7 +5193,7 @@ function CalendarView({ status, events, invites, loading, fetchEvents, now, onPu
           <h3 className="text-2xl font-black" style={{ margin: 0, whiteSpace: 'nowrap' }}>Today's Schedule</h3>
           {status.calendar_connected && (
             <>
-              <button onClick={fetchEvents} className="btn-styled inactive" style={{ padding: '6px 10px', marginLeft: 4 }} disabled={loading} title="Refresh">
+              <button onClick={() => fetchEvents(true)} className="btn-styled inactive" style={{ padding: '6px 10px', marginLeft: 4 }} disabled={loading} title="Refresh">
                 <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
               </button>
               <button 

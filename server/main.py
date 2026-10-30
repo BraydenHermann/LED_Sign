@@ -2036,9 +2036,9 @@ async def logout():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/calendar/today")
-async def get_today_events(clean_name: bool = True):
+async def get_today_events(clean_name: bool = True, force: bool = False):
     try:
-        schedule = await asyncio.to_thread(calendar_service.get_today_schedule, clean_name=clean_name)
+        schedule = await asyncio.to_thread(calendar_service.get_today_schedule, clean_name=clean_name, force_refresh=force)
         if not schedule:
             return {"events": [], "invites": []}
         return {

@@ -1,4 +1,5 @@
 import json
+import threading
 import secrets
 import time
 import datetime
@@ -87,6 +88,9 @@ class CalendarService:
         self._pending_states = {}
         self._last_code_verifier = None
         self._state_storage_path = os.path.join(base_dir, ".oauth_pending.json")
+        self._schedule_lock = threading.Lock()
+        self._schedule_cache = {}
+        self._cache_ttl = 15
         if os.path.exists(self.token_path):
             try:
                 self.creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
@@ -327,26 +331,70 @@ class CalendarService:
         ).execute()
         return result.get('items', [])
 
-    def get_today_schedule(self, clean_name=True):
+    def get_today_schedule(self, clean_name=True, force_refresh=False):
         """
         Return timed events and pending invites for today only (all-day events excluded).
         Returns a dict: {"events": [accepted_events], "invites": [pending_invites]}
         """
-        service = self._get_service()
-        if not service:
-            return {"events": [], "invites": []}
-
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        today_end = today_start + datetime.timedelta(days=1)
 
-        result = service.events().list(
-            calendarId='primary',
-            timeMin=today_start.isoformat(),
-            timeMax=today_end.isoformat(),
-            singleEvents=True,
-            orderBy='startTime'
-        ).execute()
+        if not force_refresh:
+            with self._schedule_lock:
+                cached = self._schedule_cache.get(clean_name)
+                if cached:
+                    cache_time, data = cached
+                    if time.time() - cache_time < self._cache_ttl:
+                        events_copy = []
+                        for ev in data.get("events", []):
+                            ev_copy = dict(ev)
+                            try:
+                                s_dt = datetime.datetime.fromisoformat(ev["start_iso"].replace('Z', '+00:00'))
+                                e_dt = datetime.datetime.fromisoformat(ev["end_iso"].replace('Z', '+00:00'))
+                                ev_copy["is_active"] = (s_dt <= now_utc <= e_dt)
+                            except Exception:
+                                pass
+                            events_copy.append(ev_copy)
+                        return {"events": events_copy, "invites": data.get("invites", [])}
+
+        with self._schedule_lock:
+            if not force_refresh:
+                cached = self._schedule_cache.get(clean_name)
+                if cached:
+                    cache_time, data = cached
+                    if time.time() - cache_time < self._cache_ttl:
+                        events_copy = []
+                        for ev in data.get("events", []):
+                            ev_copy = dict(ev)
+                            try:
+                                s_dt = datetime.datetime.fromisoformat(ev["start_iso"].replace('Z', '+00:00'))
+                                e_dt = datetime.datetime.fromisoformat(ev["end_iso"].replace('Z', '+00:00'))
+                                ev_copy["is_active"] = (s_dt <= now_utc <= e_dt)
+                            except Exception:
+                                pass
+                            events_copy.append(ev_copy)
+                        return {"events": events_copy, "invites": data.get("invites", [])}
+
+            service = self._get_service()
+            if not service:
+                return {"events": [], "invites": []}
+
+            today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = today_start + datetime.timedelta(days=1)
+
+            try:
+                result = service.events().list(
+                    calendarId='primary',
+                    timeMin=today_start.isoformat(),
+                    timeMax=today_end.isoformat(),
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+            except Exception as e:
+                print(f"[calendar] Error fetching events from Google: {e}")
+                cached = self._schedule_cache.get(clean_name)
+                if cached:
+                    return cached[1]
+                return {"events": [], "invites": []}
 
         events = []
         invites = []
@@ -464,7 +512,10 @@ class CalendarService:
             else:
                 print(f"[calendar] Skipping declined event: {cleaned_summary}")
 
-        return {"events": events, "invites": invites}
+        schedule_result = {"events": events, "invites": invites}
+        with self._schedule_lock:
+            self._schedule_cache[clean_name] = (time.time(), schedule_result)
+        return schedule_result
 
     def get_today_events(self, clean_name=True):
         """Return timed events for today only (all-day events excluded), each with is_active flag."""
@@ -509,6 +560,8 @@ class CalendarService:
                 eventId=event_id,
                 body={'attendees': attendees}
             ).execute()
+            with self._schedule_lock:
+                self._schedule_cache.clear()
             return {"status": "success", "event_id": event_id, "response_status": response}
         except Exception as e:
             err_str = str(e)

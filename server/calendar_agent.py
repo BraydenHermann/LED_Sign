@@ -1,10 +1,9 @@
-﻿import time
+import time
 import datetime
 import os
 import urllib.request
 import urllib.error
 import json
-import calendar_service
 from win11toast import toast
 
 # Track state in memory
@@ -36,13 +35,18 @@ def run_loop():
     print("[calendar_agent] Started standalone calendar monitor.")
     
     while True:
-        time.sleep(10)
+        time.sleep(15)
         
         try:
-            if not (os.path.exists(calendar_service.token_path) or (calendar_service.creds is not None and calendar_service.creds.valid)):
+            # Query backend for today's schedule to share cache and avoid Google API rate limits
+            req = urllib.request.Request("http://127.0.0.1:8000/calendar/today?clean_name=true")
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                    events = data.get("events", [])
+            except Exception:
                 continue
 
-            events = calendar_service.get_today_events(clean_name=True)
             if not events:
                 continue
                 
@@ -87,6 +91,9 @@ def run_loop():
                 if last_pushed_event_id != event_id:
                     last_pushed_event_id = event_id
                     send_push_request(summary, time_str)
+            else:
+                last_notified_event_id = None
+                last_pushed_event_id = None
                     
         except Exception as e:
             print(f"[calendar_agent] Loop error: {e}")
