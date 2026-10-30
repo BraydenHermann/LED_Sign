@@ -5635,16 +5635,17 @@ function EventCard({ ev, now, onPush, cleanName, isSignUpdating }) {
 
   const handleCardClick = (e) => {
     if (isSignUpdating) return;
-    if (eventUrl) {
-      window.open(eventUrl, '_blank', 'noopener,noreferrer');
-    }
+    // If the click was on the link (title/time), don't push
+    if (e.target.closest('a')) return;
+    const displayStr = getEventDisplayString(ev, isClean);
+    onPush(displayStr, true);
   };
 
   return (
     <div
-      className="glass-panel transition-all group"
+      className="glass-panel transition-all"
       onClick={handleCardClick}
-      title={isSignUpdating ? 'Sign is updating...' : 'Click to open event in Google Calendar'}
+      title={isSignUpdating ? 'Sign is updating...' : 'Click to push event to sign (Saved Slot 1)'}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -5673,12 +5674,14 @@ function EventCard({ ev, now, onPush, cleanName, isSignUpdating }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <p 
           style={{ fontWeight: 800, fontSize: 18, color: isActive ? '#ffffff' : '#cbd5e1', margin: 0, whiteSpace: 'normal', letterSpacing: '-0.02em', width: 'fit-content' }} 
-          className="group-hover:underline"
         >
           {eventUrl ? (
             <a 
               href={eventUrl} 
-              target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}
+              target="_blank" 
+              rel="noopener noreferrer" 
+              style={{ color: 'inherit', textDecoration: 'none' }}
+              className="hover:underline"
               onClick={(e) => e.stopPropagation()}
               title="Click to open event in Google Calendar"
             >
@@ -5688,12 +5691,14 @@ function EventCard({ ev, now, onPush, cleanName, isSignUpdating }) {
         </p>
         <p 
           style={{ fontSize: 14, fontWeight: 600, color: isActive ? 'rgba(255,255,255,0.9)' : '#64748b', margin: '2px 0 0 0', width: 'fit-content' }} 
-          className="group-hover:underline"
         >
           {eventUrl ? (
             <a 
               href={eventUrl} 
-              target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none' }}
+              target="_blank" 
+              rel="noopener noreferrer" 
+              style={{ color: 'inherit', textDecoration: 'none' }}
+              className="hover:underline"
               onClick={(e) => e.stopPropagation()}
               title="Click to open event in Google Calendar"
             >
