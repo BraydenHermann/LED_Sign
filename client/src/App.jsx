@@ -2840,8 +2840,7 @@ export default function App() {
       preSavingSlot1Ref.current = true;
       try {
         const isShowingSlot1 = (lastPushedId === 'hw-slot-0') ||
-          String(lastPushedId || '').startsWith('event-') ||
-          (status?.display_mode === 'preset-0');
+          String(lastPushedId || '').startsWith('event-');
 
         console.log(`[auto-pre-save] Pre-saving next event to Slot 1 (isShowingSlot1=${isShowingSlot1}): "${nextCleanText}"`);
 
