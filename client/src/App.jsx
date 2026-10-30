@@ -2418,8 +2418,14 @@ export default function App() {
               if (idx === 1) {
                 // Slot 2 is reserved for the Default Preset. Never clear it to null!
                 const defPreset = (presets || []).find(p => p.isDefault);
-                const pData = s.preset_data || defPreset;
-                const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : (defPreset?.thumbnail || null);
+                const currentMac = (status?.address || (activeMac && activeMac !== 'DEFAULT' ? activeMac : DEFAULT_MAC)).toUpperCase();
+                const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + currentMac);
+                const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + currentMac)) &&
+                  (!defPreset?.id || !syncedPresetId || syncedPresetId === String(defPreset.id));
+                const pData = isDefaultSynced ? (s.preset_data || defPreset) : (defPreset || s.preset_data);
+                const previewUrl = isDefaultSynced
+                  ? (s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : (defPreset?.thumbnail || null))
+                  : (defPreset?.thumbnail || (s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null));
                 if (pData || previewUrl) {
                   const hwPreset = {
                     ...(pData || defPreset || {}),
@@ -2585,9 +2591,14 @@ export default function App() {
     const mac = (targetMac || status?.address || DEFAULT_MAC).toUpperCase();
     const lastId = effectiveLastId || lastPushedId || getSavedLastPushedId(mac);
     if (!lastId) return false;
-    const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + mac));
-    if (!isDefaultSynced) return false;
-    return lastId === 'hw-slot-1' || Boolean(defPreset?.id && lastId === defPreset.id);
+    if (defPreset?.mode === 'clock') {
+      return lastId === 'clock-default' || lastId === 'clock' || Boolean(defPreset.id && lastId === defPreset.id);
+    }
+    const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + mac);
+    const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + mac)) &&
+      (!defPreset?.id || !syncedPresetId || syncedPresetId === String(defPreset.id));
+    if (isDefaultSynced && lastId === 'hw-slot-1') return true;
+    return Boolean(defPreset?.id && lastId === defPreset.id);
   };
 
   // Auto-push / Blanking / Default logic based on the local clock
@@ -2709,23 +2720,46 @@ export default function App() {
                 console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
               });
           } else {
-            const defPreset = (presets || []).find(p => p.isDefault);
-            if (isDefaultAlreadyLastPushed(defPreset, targetMac, lastPushedId)) {
-              console.log("[auto-push] Default preset was already the last preset pushed; skipping re-send.");
-              setLastPushedId('hw-slot-1');
+            const defPreset = (presets || []).find(p => p.isDefault) || (presets || []).find(p => p.mode === 'clock');
+            if (!defPreset) {
+              console.log("[auto-push] Event window ended, but no default preset found.");
               return;
             }
-            // Play hardware slot 1 — the reserved default
-            console.log("[auto-push] Event window ended, playing hardware default slot (slot 1)");
-            setLastPushedId('hw-slot-1');
-            axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
-              .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
-              .catch(e => {
-                console.warn("[auto-push] No default saved to slot 1 yet or play failed:", e);
-                if (defPreset) {
-                  handlePush(defPreset, false, false, 'hw-slot-1').catch(() => {});
-                }
+            const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + targetMac);
+            const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + targetMac)) &&
+              (!defPreset.id || !syncedPresetId || syncedPresetId === String(defPreset.id));
+
+            if (isDefaultAlreadyLastPushed(defPreset, targetMac, lastPushedId)) {
+              console.log("[auto-push] Default preset was already the last preset pushed; skipping re-send.");
+              setLastPushedId(defPreset.mode === 'clock' ? (defPreset.id || 'clock-default') : (isDefaultSynced ? 'hw-slot-1' : (defPreset.id || 'hw-slot-1')));
+              return;
+            }
+
+            console.log(`[auto-push] Event window ended, restoring default preset "${defPreset.name || 'Default'}"`);
+
+            if (defPreset.mode === 'clock') {
+              handlePush(defPreset, false, true, defPreset.id || 'clock-default').catch(e => {
+                console.warn("[auto-push] Could not push default clock:", e);
               });
+            } else if (isDefaultSynced) {
+              // Play hardware slot 1 — the verified synced default
+              console.log("[auto-push] Playing verified hardware default slot (slot 1)");
+              setLastPushedId('hw-slot-1');
+              axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`)
+                .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+                .catch(e => {
+                  console.warn("[auto-push] Hardware slot 1 play failed, falling back to direct push:", e);
+                  localStorage.removeItem('loy_hw_default_synced_' + targetMac);
+                  localStorage.removeItem('loy_hw_default_preset_id_' + targetMac);
+                  handlePush(defPreset, false, true, defPreset.id || 'hw-slot-1').catch(() => {});
+                });
+            } else {
+              // Not synced to hardware slot 1: push preset directly
+              console.log("[auto-push] Default preset not synced to hardware slot 1, pushing directly");
+              handlePush(defPreset, false, true, defPreset.id || 'hw-slot-1').catch(e => {
+                console.warn("[auto-push] Could not push default preset:", e);
+              });
+            }
           }
           return;
         }
@@ -2774,6 +2808,9 @@ export default function App() {
               return { ...prev, [targetMac]: curList };
             });
             localStorage.setItem('loy_hw_default_synced_' + targetMac, 'true');
+            if (def.id) {
+              localStorage.setItem('loy_hw_default_preset_id_' + targetMac, String(def.id));
+            }
             defaultJustSavedToSign = true;
           } catch (e) {
             console.warn("[connect] Failed to push default to slot 1:", e);
@@ -2830,19 +2867,32 @@ export default function App() {
           } else if (!defaultJustSavedToSign && isDefaultAlreadyLastPushed(def, targetMac, savedLastPushedId)) {
             console.log("[connect] Default preset was already the last preset pushed; skipping re-send.");
             setIsManualOverride(false);
-            setLastPushedId('hw-slot-1');
+            setLastPushedId(def?.mode === 'clock' ? (def.id || 'clock-default') : 'hw-slot-1');
           } else {
             setIsManualOverride(false);
-            console.log("[connect] Playing hardware default slot (slot 1)");
-            setLastPushedId('hw-slot-1');
-            try {
-              await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
-            } catch (e) {
-              console.warn("[connect] No default saved to slot 1 yet:", e);
-              if (e.response?.status === 409) throw e;
-              if (def) {
-                await handlePush(def, false, false, 'hw-slot-1');
+            const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + targetMac);
+            const isSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + targetMac)) &&
+              (!def?.id || !syncedPresetId || syncedPresetId === String(def.id));
+            if (def?.mode === 'clock') {
+              console.log("[connect] Restoring default clock preset");
+              await handlePush(def, false, true, def.id || 'clock-default');
+            } else if (isSynced) {
+              console.log("[connect] Playing hardware default slot (slot 1)");
+              setLastPushedId('hw-slot-1');
+              try {
+                await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
+              } catch (e) {
+                console.warn("[connect] Hardware default play failed, pushing directly:", e);
+                localStorage.removeItem('loy_hw_default_synced_' + targetMac);
+                localStorage.removeItem('loy_hw_default_preset_id_' + targetMac);
+                if (e.response?.status === 409) throw e;
+                if (def) {
+                  await handlePush(def, false, true, def.id || 'hw-slot-1');
+                }
               }
+            } else if (def) {
+              console.log("[connect] Default not synced to slot 1, pushing directly");
+              await handlePush(def, false, true, def.id || 'hw-slot-1');
             }
           }
         }
@@ -2960,28 +3010,36 @@ export default function App() {
         }
         setLastPushedId(data.id || 'clock-default');
       } else if (data.isDefault && status?.connected) {
-        // Default preset: play saved default preset (hardware slot 1) directly from hardware
-        try {
-          await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || '')}`);
-          if (manual && !skipMessages) {
-            handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
-          }
-          setLastPushedId('hw-slot-1');
-        } catch (defErr) {
-          if (defErr.response?.status === 404) {
-            // Hardware slot not saved yet for this sign — push the local preset data directly
-            console.log('[handlePush] Default HW slot not found, pushing local preset data directly');
-            const fallbackData = { ...data };
-            if (fallbackData.mode === 'text') delete fallbackData.pixels;
-            await axios.post(`${API_BASE}/push-text`, fallbackData);
+        const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
+        const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + targetMac);
+        const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + targetMac)) &&
+          (!data.id || !syncedPresetId || syncedPresetId === String(data.id));
+
+        if (isDefaultSynced) {
+          try {
+            await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
             if (manual && !skipMessages) {
               handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
             }
-            setLastPushedId(data.id || 'hw-slot-1');
-          } else {
-            throw defErr;
+            setLastPushedId('hw-slot-1');
+            fetchStatus();
+            return;
+          } catch (defErr) {
+            console.warn('[handlePush] Hardware default slot play failed, falling back to direct push:', defErr);
+            localStorage.removeItem('loy_hw_default_synced_' + targetMac);
+            localStorage.removeItem('loy_hw_default_preset_id_' + targetMac);
           }
         }
+
+        // Hardware slot 1 not synced or play failed — push the preset data directly
+        console.log('[handlePush] Pushing default preset data directly');
+        const fallbackData = { ...data };
+        if (fallbackData.mode === 'text') delete fallbackData.pixels;
+        await axios.post(`${API_BASE}/push-text`, fallbackData);
+        if (manual && !skipMessages) {
+          handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        }
+        setLastPushedId(data.id || 'hw-slot-1');
       } else if (isEvent) {
         if (status.connected && manual) {
           setPresetView('saved');
@@ -6042,7 +6100,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   const syncDefaultPresetToSavedSlot = async (defaultPreset) => {
     // A new local default invalidates every sign's previous slot-1 upload.
     for (const key of Object.keys(localStorage)) {
-      if (key.startsWith('loy_hw_default_synced_')) localStorage.removeItem(key);
+      if (key.startsWith('loy_hw_default_synced_') || key.startsWith('loy_hw_default_preset_id_')) {
+        localStorage.removeItem(key);
+      }
     }
     const presetForSign = { ...defaultPreset };
     if (presetForSign.mode === 'text') delete presetForSign.pixels;
@@ -6111,6 +6171,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         return next;
       });
       localStorage.setItem('loy_hw_default_synced_' + status.address.toUpperCase(), 'true');
+      if (defaultPreset.id) {
+        localStorage.setItem('loy_hw_default_preset_id_' + status.address.toUpperCase(), String(defaultPreset.id));
+      }
       setLastPushedId('hw-slot-1');
       setPushMessage('Saved to Slot 2!');
       syncHardwareSlots();

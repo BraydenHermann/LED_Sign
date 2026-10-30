@@ -255,6 +255,18 @@ async def calendar_background_loop():
                         print(f"[auto-push] Pushed calendar event to sign: {summary}")
                     except Exception as e:
                         print(f"[auto-push] Failed to push calendar event: {e}")
+            else:
+                if last_pushed_event_id is not None:
+                    sign_mac = (connected_client.address or "").upper() if connected_client and connected_client.is_connected and connection_ready else ""
+                    if sign_mac and (time.monotonic() - ui_last_seen_monotonic >= 15):
+                        try:
+                            async with preset_switch_lock:
+                                require_connected_sign(sign_mac)
+                                await _play_preset(1, sign_mac)
+                                print(f"[auto-push] Event window ended, restored default slot 1 for {sign_mac}")
+                        except Exception as e:
+                            print(f"[auto-push] Could not restore slot 1 on event end: {e}")
+                    last_pushed_event_id = None
         except Exception as e:
             print(f"[calendar] Background loop error: {e}")
 
