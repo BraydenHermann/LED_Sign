@@ -178,6 +178,29 @@ function selectCalendarEvent(events, atTime) {
   return candidates.sort((a, b) => new Date(b.start_iso) - new Date(a.start_iso))[0] || null;
 }
 
+// Select the next upcoming calendar event today to pre-save to slot 1
+function selectNextCalendarEvent(events, atTime = new Date()) {
+  if (!events || !events.length) return null;
+  const valid = events.filter(ev => {
+    if (!ev || !ev.end_iso) return false;
+    if (ev.response_status?.toLowerCase() === 'declined') return false;
+    return new Date(ev.end_iso) > atTime;
+  });
+  if (!valid.length) return null;
+
+  const inWindow = selectCalendarEvent(events, atTime);
+  if (inWindow) return inWindow;
+
+  const upcoming = valid.filter(ev => new Date(ev.start_iso) > atTime);
+  if (upcoming.length) {
+    upcoming.sort((a, b) => new Date(a.start_iso) - new Date(b.start_iso));
+    return upcoming[0];
+  }
+
+  valid.sort((a, b) => new Date(a.start_iso) - new Date(b.start_iso));
+  return valid[0];
+}
+
 // Strip diacritics/accents and unsupported characters so hardware-limited signs and previews receive pure clean ASCII
 // e.g. "Sébastien" → "Sebastien", "naïve" → "naive", "œ" → "oe", "—" → "-"
 function normalizeForSign(str) {
@@ -2692,7 +2715,7 @@ export default function App() {
                 const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
                 const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
                 new Notification('Upcoming Meeting', {
-                  body: `${currentEvent.summary || 'Untitled Event'} starts ${timeLabel}`,
+                  body: `${cleanEventTitle(currentEvent.summary, true)} starts ${timeLabel}`,
                   icon: '/favicon.ico',
                   tag: `meeting-${targetId}`,
                 });
@@ -2780,6 +2803,100 @@ export default function App() {
       console.error("[auto-push] Error:", err);
     }
   }, [now, events, status.connected, isManualOverride, presets, lastPushedId]);
+
+  // Auto-pre-save the next calendar event to hardware Slot 1 (slot_id: 0) without displaying it
+  const preSavingSlot1Ref = useRef(false);
+  useEffect(() => {
+    if (!status?.connected || !dbLoaded || isSignUpdating || pushingRef.current || initializingConnectionRef.current ||
+        !initializedConnectionMacsRef.current.has(status.address?.toUpperCase())) return;
+    if (preSavingSlot1Ref.current) return;
+
+    // Check if an event is currently active in its 5-minute pre-window or in session
+    const currentActiveEvent = selectCalendarEvent(events, now);
+    if (currentActiveEvent) {
+      // The 5m auto-push effect handles active events
+      return;
+    }
+
+    const nextEv = selectNextCalendarEvent(events, now);
+    if (!nextEv) return;
+
+    const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
+    const nextSummary = getEventDisplayString(nextEv);
+    const nextCleanText = normalizeForSign(
+      nextSummary.includes('|||') ? nextSummary.split('|||')[0].trim() : nextSummary.trim()
+    );
+
+    const currentSlot1Text = getSlot1EventText(targetMac);
+    const isCalSynced = Boolean(localStorage.getItem('loy_hw_cal_synced_' + targetMac));
+
+    // Already saved to Slot 1
+    if (isCalSynced && currentSlot1Text && currentSlot1Text === nextCleanText) {
+      return;
+    }
+
+    const preSave = async () => {
+      if (preSavingSlot1Ref.current || pushingRef.current || isSignUpdating) return;
+      preSavingSlot1Ref.current = true;
+      try {
+        const isShowingSlot1 = (lastPushedId === 'hw-slot-0') ||
+          String(lastPushedId || '').startsWith('event-') ||
+          (status?.display_mode === 'preset-0');
+
+        console.log(`[auto-pre-save] Pre-saving next event to Slot 1 (isShowingSlot1=${isShowingSlot1}): "${nextCleanText}"`);
+
+        const eventData = {
+          mode: 'text',
+          name: nextCleanText,
+          text: nextCleanText,
+          textColor: '#ffffff',
+          bgColor: '#000000',
+          animation: 'continuous left shift',
+          speed: speed || 8,
+          rotation: 0,
+          spacing: 1,
+          views: 1
+        };
+
+        const saveRes = await savePresetToSign({
+          slot_id: 0,
+          address: targetMac,
+          preset: eventData,
+          is_currently_playing: false,
+          activate_on_save: false
+        });
+
+        const savedThumb = saveRes.data?.preview_url
+          ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}`
+          : null;
+
+        setSavedPresets(prev => {
+          const next = [...prev];
+          next[0] = {
+            slotNumber: 1,
+            hwSlotId: 0,
+            preset: { ...eventData, id: 'hw-slot-0', thumbnail: savedThumb || eventData.thumbnail }
+          };
+          return next;
+        });
+
+        localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
+        localStorage.setItem('loy_hw_cal_text_' + targetMac, nextCleanText);
+
+        if (isShowingSlot1) {
+          console.log("[auto-pre-save] Was showing slot 1; blanking screen to black");
+          setLastPushedId('blank');
+          await axios.post(`${API_BASE}/clear?mac=${encodeURIComponent(targetMac)}`).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('[auto-pre-save] Failed to pre-save next event to Slot 1:', err);
+      } finally {
+        preSavingSlot1Ref.current = false;
+      }
+    };
+
+    preSave();
+  }, [events, now, status?.connected, status?.address, dbLoaded, isSignUpdating]);
 
   // Sync on connection
   useEffect(() => {

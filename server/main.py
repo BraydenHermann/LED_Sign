@@ -3609,6 +3609,7 @@ class SavePresetRequest(BaseModel):
     address: str
     progress_id: Optional[str] = None
     is_currently_playing: Optional[bool] = None
+    activate_on_save: Optional[bool] = True
 
 @app.get("/save-progress/{progress_id}")
 async def get_save_progress(progress_id: str):
@@ -3698,6 +3699,8 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
     preset = req.preset
     slot_id = req.slot_id # 0-indexed slot index (0 to 11)
     is_playing_target_slot = req.is_currently_playing if req.is_currently_playing is not None else (current_display_mode == f"preset-{slot_id}")
+    activate = req.activate_on_save if req.activate_on_save is not None else True
+    prev_display_mode = current_display_mode
     
     if preset.mode == 'clock':
         preset_json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{slot_id}.json")
@@ -4046,18 +4049,6 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
-                    select_pkt = protocol.build_slot_select_command(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
-                    await asyncio.sleep(0.1)
-
-                    play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
-                    await asyncio.sleep(0.05)
-
-                    # Re-enable physical screen display to show newly saved preset
-                    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
-                    await asyncio.sleep(0.05)
-
                     hardware_slots_state[slot_id] = {
                         "slot_id": slot_id,
                         "occupied": True,
@@ -4110,6 +4101,13 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     if not connected_client or not connected_client.is_connected:
                         raise Exception("BLE disconnected after commit")
 
+                    hardware_slots_state[slot_id] = {
+                        "slot_id": slot_id,
+                        "occupied": True,
+                        "key": hashlib.md5(ystp_bytes).hexdigest()
+                    }
+
+                if activate:
                     select_pkt = protocol.build_slot_select_command(slot_id)
                     await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
                     await asyncio.sleep(0.05)
@@ -4124,14 +4122,41 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     if brightness != 15:
                         await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
                         await asyncio.sleep(0.05)
+                    current_display_mode = f"preset-{slot_id}"
+                else:
+                    if prev_display_mode == f"preset-{slot_id}":
+                        # If previously showing this slot, make screen black
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(False), response=True)
+                        current_display_mode = "blank"
+                    elif prev_display_mode and prev_display_mode.startswith("preset-"):
+                        try:
+                            prev_slot = int(prev_display_mode.split("-")[1])
+                            select_pkt = protocol.build_slot_select_command(prev_slot)
+                            await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                            await asyncio.sleep(0.05)
+                            play_pkt = protocol.build_user_slot_play_command(prev_slot, loop_mode=1)
+                            await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+                            await asyncio.sleep(0.05)
+                            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
+                            await asyncio.sleep(0.05)
+                            if brightness != 15:
+                                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
+                                await asyncio.sleep(0.05)
+                            current_display_mode = prev_display_mode
+                        except Exception as restore_err:
+                            print(f"[save_preset] Failed to restore previous preset: {restore_err}")
+                    elif prev_display_mode == "clock":
+                        try:
+                            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
+                            await asyncio.sleep(0.05)
+                            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_on_command(), response=True)
+                            current_display_mode = "clock"
+                        except Exception as restore_err:
+                            print(f"[save_preset] Failed to restore clock: {restore_err}")
+                    else:
+                        current_display_mode = prev_display_mode or "blank"
 
-                    hardware_slots_state[slot_id] = {
-                        "slot_id": slot_id,
-                        "occupied": True,
-                        "key": hashlib.md5(ystp_bytes).hexdigest()
-                    }
-
-                print(f"[save_preset] Done. Slot {slot_id} saved (is_anim={is_anim}).")
+                print(f"[save_preset] Done. Slot {slot_id} saved (is_anim={is_anim}, activated={activate}).")
                 written_to_sign = True
             except SaveCancelledException:
                 print(f"[save_preset] Cancelled by user. Slot {slot_id} aborted.")
@@ -4167,27 +4192,28 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
         save_preview_bytes(_json.dumps(preset.model_dump()).encode("utf-8"), preset_json_path)
         save_preview_bytes(gif_bytes, preset_gif_path)
 
-        current_gif = os.path.join(STATIC_DIR, "current.gif")
-        current_png = os.path.join(STATIC_DIR, "current.png")
-        if is_anim:
-            save_preview_bytes(gif_bytes, current_gif)
-            if os.path.exists(current_png):
-                try: os.remove(current_png)
-                except Exception: pass
-        else:
-            if pil_frames:
-                try:
-                    im = pil_frames[0].copy()
-                    im.thumbnail((PANEL_W, PANEL_H))
-                    im.convert("RGB").save(current_png)
-                except Exception: pass
-            if os.path.exists(current_gif):
-                try: os.remove(current_gif)
-                except Exception: pass
+        if activate:
+            current_gif = os.path.join(STATIC_DIR, "current.gif")
+            current_png = os.path.join(STATIC_DIR, "current.png")
+            if is_anim:
+                save_preview_bytes(gif_bytes, current_gif)
+                if os.path.exists(current_png):
+                    try: os.remove(current_png)
+                    except Exception: pass
+            else:
+                if pil_frames:
+                    try:
+                        im = pil_frames[0].copy()
+                        im.thumbnail((PANEL_W, PANEL_H))
+                        im.convert("RGB").save(current_png)
+                    except Exception: pass
+                if os.path.exists(current_gif):
+                    try: os.remove(current_gif)
+                    except Exception: pass
 
-        # Increment frames sent to signal status updates
-        current_display_mode = f"preset-{slot_id}"
-        current_width = PANEL_W
+            # Increment frames sent to signal status updates
+            current_display_mode = f"preset-{slot_id}"
+            current_width = PANEL_W
         frames_sent += 1
         report_progress(100, "Complete")
         return {"status": "success", "preview_url": f"/static/preset_{mac_str}_{slot_id}.gif", "written_to_sign": written_to_sign}
