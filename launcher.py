@@ -76,29 +76,10 @@ _lock = threading.Lock()
 # Serializes concurrent start_backend() calls (e.g. two launcher instances
 # opening simultaneously, or guardian_loop racing with restart_servers).
 _start_backend_lock = threading.Lock()
-_calendar_proc = None
 _quit_flag = False
 
-def start_calendar_agent():
-    global _calendar_proc
-    with _lock:
-        if _calendar_proc and _calendar_proc.poll() is None:
-            return
-        command = [*background_python_command(), "-u", os.path.join(BASE_DIR, "server", "calendar_agent.py")]
-        try:
-            _calendar_proc = subprocess.Popen(
-                command,
-                cwd=BASE_DIR,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **hidden_process_kwargs(),
-            )
-            launcher_log(f"Started calendar agent (PID {_calendar_proc.pid})")
-        except OSError as error:
-            launcher_log(f"Could not start calendar agent: {error}")
-
 def guardian_loop():
-    global _backend_proc, _calendar_proc, _quit_flag
+    global _backend_proc, _quit_flag
     while not _quit_flag:
         time.sleep(2)
         if _quit_flag:
@@ -117,17 +98,9 @@ def guardian_loop():
                     while port_open(8000) and time.monotonic() < deadline:
                         time.sleep(0.25)
                     _backend_proc = None
-            # Check calendar agent
-            if _calendar_proc is not None:
-                ret = _calendar_proc.poll()
-                if ret is not None:
-                    launcher_log(f"Calendar agent crashed with exit code {ret}! Restarting...")
-                    _calendar_proc = None
 
         if _backend_proc is None and not port_open(8000) and not _quit_flag:
             start_backend()
-        if _calendar_proc is None and not _quit_flag:
-            start_calendar_agent()
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +226,7 @@ def start_frontend():
 
 
 def stop_servers():
-    global _backend_proc, _frontend_proc, _calendar_proc, _quit_flag
+    global _backend_proc, _frontend_proc, _quit_flag
     _quit_flag = True
     launcher_log("Stopping LED Sign servers...")
     try:
@@ -266,7 +239,7 @@ def stop_servers():
     with _lock:
         force_kill_port(8000)
         force_kill_port(5173)
-        for proc in (_backend_proc, _frontend_proc, _calendar_proc):
+        for proc in (_backend_proc, _frontend_proc):
             if proc and proc.poll() is None:
                 try:
                     subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, **hidden_process_kwargs())
@@ -277,7 +250,6 @@ def stop_servers():
                         pass
         _backend_proc = None
         _frontend_proc = None
-        _calendar_proc = None
 
 
 def restart_backend():

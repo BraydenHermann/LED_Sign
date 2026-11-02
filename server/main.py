@@ -220,7 +220,6 @@ async def stop_all_playback(blank: bool = False):
 
 app = FastAPI()
 _calendar_bg_task = None
-last_notified_event_id = None
 last_pushed_event_id = None
 
 async def show_event_in_slot_one(sign_mac: str, summary: str, end_iso: str):
@@ -247,7 +246,7 @@ async def show_event_in_slot_one(sign_mac: str, summary: str, end_iso: str):
 
 
 async def calendar_background_loop():
-    global current_display_mode, last_notified_event_id, last_pushed_event_id
+    global current_display_mode, last_pushed_event_id
     
     while True:
         await asyncio.sleep(10)
@@ -289,21 +288,10 @@ async def calendar_background_loop():
                 summary = target_event.get('summary', 'Event')
                 time_str = target_event.get('time', '')
                 
-                if last_notified_event_id != event_id:
-                    last_notified_event_id = event_id
-                    try:
-                        from win11toast import toast
-                        start_dt = datetime.datetime.fromisoformat(target_event['start_iso'])
-                        minutes_until = max(0, round((start_dt - now_local).total_seconds() / 60.0))
-                        time_label = 'now' if minutes_until <= 1 else f'in {minutes_until} min'
-                        icon_path = os.path.abspath(os.path.join(STATIC_DIR, '..', '..', 'client', 'public', 'favicon.ico'))
-                        toast('Upcoming Meeting', f'{summary} starts {time_label}', duration='short', icon=icon_path if os.path.exists(icon_path) else None)
-                    except Exception as e:
-                        print(f"[calendar] Notification error: {e}")
-                
+                # Meeting reminders come from the open web app only.
                 # The open dashboard owns its calendar-to-slot workflow. The
                 # server fallback is only needed when no dashboard is active.
-                if time.monotonic() - ui_last_seen_monotonic < 15:
+                if time.monotonic() - ui_last_seen_monotonic < UI_OPEN_WINDOW:
                     continue
                 sign_mac = (connected_client.address or "").upper() if connected_client and connected_client.is_connected and connection_ready else ""
                 event_key = (sign_mac, event_id)
@@ -317,7 +305,7 @@ async def calendar_background_loop():
             else:
                 if last_pushed_event_id is not None:
                     sign_mac = (connected_client.address or "").upper() if connected_client and connected_client.is_connected and connection_ready else ""
-                    if sign_mac and (time.monotonic() - ui_last_seen_monotonic >= 15):
+                    if sign_mac and (time.monotonic() - ui_last_seen_monotonic >= UI_OPEN_WINDOW):
                         try:
                             async with preset_switch_lock:
                                 require_connected_sign(sign_mac)
@@ -354,6 +342,9 @@ brightness: int = 15
 power: bool = True
 start_time = datetime.datetime.now()
 ui_last_seen_monotonic: float = 0.0
+# Browsers slow timers in background tabs to about once a minute, so an open
+# dashboard can go that long between heartbeats.
+UI_OPEN_WINDOW = 90.0
 
 # Clock State (last pushed clock configuration)
 current_clock_color: str = "#ffffff"
@@ -413,7 +404,7 @@ async def ui_heartbeat():
 
 @app.get("/ui-open")
 async def ui_open():
-    return {"open": (time.monotonic() - ui_last_seen_monotonic) < 15.0}
+    return {"open": (time.monotonic() - ui_last_seen_monotonic) < UI_OPEN_WINDOW}
 
 async def _auto_reconnect(mac: str, delay: float = 4.0, intent: Optional[int] = None):
     """Background task: waits `delay` seconds then tries to reconnect to `mac`."""

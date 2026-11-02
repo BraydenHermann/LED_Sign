@@ -2201,7 +2201,6 @@ export default function App() {
   const [isManualOverride, setIsManualOverrideState] = useState(false);
   const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
-  const lastNotifiedEventIdRef = useRef(null);
   // Retain the manually selected saved slot while a calendar event temporarily
   // uses its dedicated calendar slot, so it can be restored when the event ends.
   const calendarReturnPresetRef = useRef(null);
@@ -2527,6 +2526,41 @@ export default function App() {
     }
   }, []);
 
+  // Meeting reminders. These are the only reminders (the Python services no
+  // longer show any), so they do not depend on the sign being connected or on
+  // what the sign is showing. Background tabs still run this check, at most a
+  // minute late. Each meeting is announced once, across reloads and tabs.
+  useEffect(() => {
+    try {
+      const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000;
+      for (const key of Object.keys(localStorage)) {
+        if (key.startsWith('loy_notified_') && Number(localStorage.getItem(key)) < cutoff) localStorage.removeItem(key);
+      }
+    } catch { /* storage unavailable */ }
+  }, []);
+  useEffect(() => {
+    if (!('Notification' in window) || Notification.permission !== 'granted' || !Array.isArray(events)) return;
+    const nowMs = now.getTime();
+    for (const ev of events) {
+      if (ev.response_status?.toLowerCase() === 'declined') continue;
+      const start = Date.parse(ev.start_iso);
+      const end = Date.parse(ev.end_iso);
+      if (!(start - 5 * 60000 <= nowMs && nowMs <= end)) continue;
+      const key = `loy_notified_${ev.id}_${ev.start_iso}`;
+      try {
+        if (localStorage.getItem(key)) continue;
+        localStorage.setItem(key, String(Date.now()));
+      } catch { /* storage unavailable: the tag below still collapses repeats */ }
+      const minutesUntilStart = Math.max(0, Math.round((start - nowMs) / 60000));
+      const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
+      new Notification('Upcoming Meeting', {
+        body: `${cleanEventTitle(ev.summary, true)} starts ${timeLabel}`,
+        icon: '/favicon.png',
+        tag: `meeting-${ev.id}-${ev.start_iso}`,
+      });
+    }
+  }, [events, now]);
+
   // Handle timezone changes or returning to the app after settings changes
   useEffect(() => {
     const handleRefresh = () => {
@@ -2851,7 +2885,6 @@ export default function App() {
         if (targetContent.type === 'event') {
           if (isEventAlreadyLastPushed(targetContent.summary, targetMac, lastPushedId, targetId)) {
             console.log("[auto-push] Active event was already the last preset pushed; skipping re-send:", currentEvent.summary);
-            lastNotifiedEventIdRef.current = targetId;
             setLastPushedId(targetId);
             return;
           }
@@ -2881,36 +2914,9 @@ export default function App() {
 
           if (isCalSynced && currentSlot1Text && currentSlot1Text === targetCleanText) {
             console.log("[auto-push] Slot 1 already has event text, playing slot 0 directly:", targetCleanText);
-            // Notify on first detection even when taking the shortcut path
-            if (lastNotifiedEventIdRef.current !== targetId) {
-              lastNotifiedEventIdRef.current = targetId;
-              if ('Notification' in window && Notification.permission === 'granted') {
-                const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
-                const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
-                new Notification('Upcoming Meeting', {
-                  body: `${cleanEventTitle(currentEvent.summary, true)} starts ${timeLabel}`,
-                  icon: '/favicon.ico',
-                  tag: `meeting-${targetId}`,
-                });
-              }
-            }
             setLastPushedId(targetId);
             axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`).catch(() => {});
             return;
-          }
-
-          // Send browser notification the first time this event enters its window
-          if (lastNotifiedEventIdRef.current !== targetId) {
-            lastNotifiedEventIdRef.current = targetId;
-            if ('Notification' in window && Notification.permission === 'granted') {
-              const minutesUntilStart = Math.max(0, Math.round((new Date(currentEvent.start_iso) - new Date()) / 60000));
-              const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
-              new Notification('Upcoming Meeting', {
-                body: `${cleanEventTitle(currentEvent.summary, true)} starts ${timeLabel}`,
-                icon: '/favicon.ico',
-                tag: `meeting-${targetId}`,
-              });
-            }
           }
 
           console.log(`[auto-push] Auto-applying event 5m before start: "${currentEvent.summary}"`);
@@ -3143,7 +3149,6 @@ export default function App() {
           const targetEventId = `event-${active.id}-${activeStr}`;
           if (!defaultJustSavedToSign && isEventAlreadyLastPushed(activeStr, targetMac, priorLastPushedId, targetEventId)) {
             console.log("[connect] Active event was already the last preset pushed; skipping re-send:", active.summary);
-            lastNotifiedEventIdRef.current = targetEventId;
             setLastPushedId(targetEventId);
           } else {
             console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
