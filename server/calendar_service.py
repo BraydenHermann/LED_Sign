@@ -378,7 +378,10 @@ class CalendarService:
             if not service:
                 return {"events": [], "invites": []}
 
-            today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            # "Today" is the local calendar day, not the UTC day, which starts
+            # hours early or late depending on the machine's offset.
+            local_now = now_utc.astimezone()
+            today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
             today_end = today_start + datetime.timedelta(days=1)
 
             try:
@@ -391,8 +394,10 @@ class CalendarService:
                 ).execute()
             except Exception as e:
                 print(f"[calendar] Error fetching events from Google: {e}")
+                # Fall back to the last result only while it is still for
+                # today; a page left open must never show a previous day.
                 cached = self._schedule_cache.get(clean_name)
-                if cached:
+                if cached and datetime.datetime.fromtimestamp(cached[0]).date() == today_start.date():
                     return cached[1]
                 return {"events": [], "invites": []}
 

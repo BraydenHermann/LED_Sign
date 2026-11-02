@@ -153,6 +153,30 @@ async def safe_write_gatt_char(char_uuid: str, data: Union[bytes, bytearray], re
     else:
         raise RuntimeError("Sign is not connected")
 
+async def write_slot_packet(packet: bytes, label: str, large: bool = False):
+    """Write one slot-transfer packet and wait for the sign to accept it.
+
+    A dropped write-without-response fragment leaves the sign with a short or
+    garbled packet. Committing after that stores a corrupt slot, so every
+    transfer packet must be acknowledged with error code 0 before continuing.
+    """
+    sno = struct.unpack('<H', packet[6:8])[0]
+    waiter = asyncio.get_running_loop().create_future()
+    _slot_ack_waiters[sno] = waiter
+    try:
+        if large:
+            await write_large_gatt_char(connected_client, protocol.WRITE_UUID, packet, response=True)
+        else:
+            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=True)
+        try:
+            error_code = await asyncio.wait_for(waiter, timeout=SLOT_ACK_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Sign did not confirm {label}; the transfer was stopped before saving")
+        if error_code != 0:
+            raise RuntimeError(f"Sign rejected {label} (error {error_code}); the transfer was stopped before saving")
+    finally:
+        _slot_ack_waiters.pop(sno, None)
+
 async def stop_all_playback(blank: bool = False):
     """Halts the onboard hardware playlist engine, active slot playback, and clock."""
     global connected_client, connection_ready
@@ -310,6 +334,9 @@ connected_device_id: str = ""
 RECOVERY_CONTACTS_PATH = os.path.join(_SERVER_DIR, "recovery_contacts.json")
 _auth_reply_waiter: Optional[asyncio.Future] = None
 _auth_reply_sno: Optional[int] = None
+# Slot-transfer packets awaiting the sign's status reply, keyed by SNO.
+_slot_ack_waiters: dict = {}
+SLOT_ACK_TIMEOUT = 3.0
 password_enabled: Optional[bool] = None
 password_command_lock = asyncio.Lock()
 password_diagnostic_notifications = 0
@@ -437,6 +464,12 @@ def notification_handler(sender, data: bytearray):
                     _auth_reply_waiter.set_result({"ok": cmd == 0, "error_code": cmd, "password_enabled": reported_password})
                 elif sub_type == 0x83:
                     _auth_reply_waiter.set_result({"ok": True, "error_code": 0, "password_enabled": reported_password})
+
+            # Status replies (sub 0x82/0x84) carry the error code in the tag
+            # byte; 0 means the sign accepted the packet intact.
+            slot_waiter = _slot_ack_waiters.get(packet_sno)
+            if slot_waiter is not None and not slot_waiter.done() and sub_type in (0x82, 0x84):
+                slot_waiter.set_result(cmd)
 
             if cmd_type == 0x81 and sub_type == 0x83 and cmd == 0x35:
                 payload = packet[10:-2] if len(packet) > 12 else packet[10:]
@@ -1672,10 +1705,11 @@ async def get_hardware_slots(mac: str = ""):
 @app.post("/clear")
 async def clear():
     global connected_client, connection_ready, active_scroller_task, current_display_mode, current_width
-    
+
+    require_connected_sign()
     # Cancel any active scrolling/flipper task cleanly
     await cancel_active_worker()
-        
+
     if connected_client and connected_client.is_connected and connection_ready:
         try:
             await stop_all_playback(blank=True)
@@ -1721,8 +1755,7 @@ async def set_power(on: bool):
             return {"status": "success"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-    power = on
-    return {"status": "success"}
+    raise HTTPException(status_code=409, detail="Sign is not connected")
 
 @app.post("/brightness")
 async def set_brightness(level: int):
@@ -2754,7 +2787,11 @@ def generate_text_animation_frames(text: str, anim_name: str, render_font, fg_rg
 @app.post("/push-text")
 async def push_text(req: PushTextRequest):
     global connected_client, connection_ready, frames_sent, active_scroller_task, current_display_mode, current_width, current_speed
-    
+
+    # A push that never reaches the sign must not report success or replace
+    # the live preview; the dashboard would record it as the last push.
+    require_connected_sign()
+
     # 1. Cancel previous scroller/flipper task cleanly
     await cancel_active_worker()
 
@@ -3034,7 +3071,7 @@ async def push_text(req: PushTextRequest):
         th = bbox[3] - bbox[1]
         
         if tw <= 0 or th <= 0:
-            return {"status": "error", "message": "Nothing to render"}
+            raise HTTPException(status_code=400, detail="Nothing to render")
             
         # Determine canvas width
         # Determine canvas width
@@ -3159,12 +3196,14 @@ async def push_text(req: PushTextRequest):
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
 
             return {"status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[push-text] Error: {e}")
         err_str = str(e)
         if "-2147023673" in err_str or "canceled" in err_str.lower() or "disconnected" in err_str.lower():
             connection_ready = False
-            return {"status": "disconnected"}
+            raise HTTPException(status_code=409, detail="Sign disconnected during push")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -3524,7 +3563,8 @@ async def set_clock(on: bool = True, color: Optional[str] = "#10B981", bg_color:
     
     if on and clock_style == "default":
         color = "#ffffff"
-        
+
+    require_connected_sign()
     await cancel_active_worker()
     try:
         gif_path = os.path.join(STATIC_DIR, "current.gif")
@@ -3713,9 +3753,6 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
             report_progress(25, "Preparing clock preset")
             await check_save_cancelled()
 
-            with open(preset_json_path, "w") as f:
-                _json.dump(preset.model_dump(), f)
-
             now = datetime.datetime.now()
             fmt = preset.timeFormat or "12h"
             c_style = getattr(preset, 'clockStyle', 'default') or 'default'
@@ -3728,11 +3765,6 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
             await check_save_cancelled()
 
             preview_img, _ = render_clock_frame(now, fmt, c_style, c_color, c_bg, show_sec)
-            preview_img.save(preset_gif_path, format="GIF")
-            preview_img.save(current_png, format="PNG")
-            if os.path.exists(current_gif):
-                try: os.remove(current_gif)
-                except Exception: pass
 
             report_progress(75, "Configuring sign clock")
             await check_save_cancelled()
@@ -3752,6 +3784,17 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                 else:
                     await set_clock(on=True, color=c_color, bg_color=c_bg, format=fmt, show_seconds=show_sec, clock_style=c_style)
 
+            # Publish the slot cache only once the sign accepted the clock.
+            require_connected_sign(req.address)
+            save_preview_bytes(_json.dumps(preset.model_dump()).encode("utf-8"), preset_json_path)
+            gif_io = io.BytesIO()
+            preview_img.save(gif_io, format="GIF")
+            save_preview_bytes(gif_io.getvalue(), preset_gif_path)
+            preview_img.save(current_png, format="PNG")
+            if os.path.exists(current_gif):
+                try: os.remove(current_gif)
+                except Exception: pass
+
             hardware_slots_state[slot_id] = {
                 "slot_id": slot_id,
                 "occupied": True,
@@ -3765,10 +3808,6 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
         except SaveCancelledException:
             print(f"[save_preset] Cancelled by user. Clock slot {slot_id} aborted.")
             report_progress(0, "Cancelled")
-            for p in (preset_json_path, preset_gif_path):
-                if p and os.path.exists(p):
-                    try: os.remove(p)
-                    except Exception: pass
             if connected_client and connected_client.is_connected:
                 try:
                     await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
@@ -3970,7 +4009,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
         # video. Run it outside FastAPI's event loop so /save-progress remains
         # available while the browser waits for the encoded payload.
         def encode_gif() -> bytes:
-            gif_io = BytesIO()
+            gif_io = io.BytesIO()
             pil_frames[0].save(
                 gif_io,
                 format="GIF",
@@ -4017,11 +4056,11 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
 
                     await check_save_cancelled()
                     init_pkt = protocol.build_slot_session_init(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, init_pkt, response=True)
+                    await write_slot_packet(init_pkt, "the transfer start")
                     await asyncio.sleep(0.05)
 
                     hdr_pkt = protocol.build_slot_file_header(slot_id, anim_code=anim_code, speed_val=speed_val, stay_time=stay_time)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, hdr_pkt, response=True)
+                    await write_slot_packet(hdr_pkt, "the file header")
                     await asyncio.sleep(0.05)
 
                     chunk_size = 960
@@ -4032,7 +4071,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                             raise Exception(f"BLE disconnected during chunk write (chunk {c_idx}/{total_chunks})")
                         c_data = slot_payload[c_idx * chunk_size : (c_idx + 1) * chunk_size]
                         chunk_pkt = protocol.build_slot_file_chunk(slot_id, c_idx, total_chunks, chunk_size, c_data)
-                        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
+                        await write_slot_packet(chunk_pkt, f"chunk {c_idx + 1} of {total_chunks}", large=True)
                         await asyncio.sleep(0.035)
                         report_progress(60 + (30 * (c_idx + 1) / total_chunks), "Writing to sign")
 
@@ -4042,7 +4081,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     await check_save_cancelled()
                     await asyncio.sleep(0.1)
                     commit_pkt = protocol.build_slot_commit(slot_id, slot_payload)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
+                    await write_slot_packet(commit_pkt, "the slot commit")
                     await asyncio.sleep(0.2)
                     report_progress(95, "Finalizing on sign")
 
@@ -4069,11 +4108,11 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
 
                     await check_save_cancelled()
                     init_pkt = protocol.build_slot_session_init(slot_id)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, init_pkt, response=True)
+                    await write_slot_packet(init_pkt, "the transfer start")
                     await asyncio.sleep(0.05)
 
                     hdr_pkt = protocol.build_slot_file_header(slot_id, anim_code=anim_code, speed_val=speed_val, stay_time=stay_time)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, hdr_pkt, response=True)
+                    await write_slot_packet(hdr_pkt, "the file header")
                     await asyncio.sleep(0.05)
 
                     chunk_size = 960
@@ -4084,7 +4123,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                             raise Exception(f"BLE disconnected during chunk write (chunk {c_idx}/{total_chunks})")
                         c_data = ystp_bytes[c_idx * chunk_size : (c_idx + 1) * chunk_size]
                         chunk_pkt = protocol.build_slot_file_chunk(slot_id, c_idx, total_chunks, chunk_size, c_data)
-                        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, chunk_pkt, response=True)
+                        await write_slot_packet(chunk_pkt, f"chunk {c_idx + 1} of {total_chunks}", large=True)
                         await asyncio.sleep(0.02)
                         report_progress(60 + (30 * (c_idx + 1) / total_chunks), "Writing to sign")
 
@@ -4094,7 +4133,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     await check_save_cancelled()
                     await asyncio.sleep(0.05)
                     commit_pkt = protocol.build_slot_commit(slot_id, ystp_bytes)
-                    await safe_write_gatt_char(protocol.WRITE_UUID, commit_pkt, response=True)
+                    await write_slot_packet(commit_pkt, "the slot commit")
                     await asyncio.sleep(0.1)
                     report_progress(95, "Finalizing on sign")
 

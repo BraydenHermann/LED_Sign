@@ -2402,9 +2402,18 @@ export default function App() {
   }, []);
 
   const fetchingEventsRef = useRef(false);
+  // When a refresh cannot reach the calendar, keep only events that are still
+  // today's, so a page left open overnight never shows a previous day.
+  const dropPastDayEvents = (list) => {
+    if (!list) return list;
+    const today = new Date().toDateString();
+    return list.filter(ev => ev?.start_iso && new Date(ev.start_iso).toDateString() === today);
+  };
   const fetchEvents = async (force = false) => {
     if (!status?.calendar_connected) {
       setCalLoading(false);
+      setEvents(prev => dropPastDayEvents(prev));
+      setInvites(prev => dropPastDayEvents(prev));
       return [];
     }
     if (fetchingEventsRef.current && !force) {
@@ -2427,7 +2436,10 @@ export default function App() {
       return evs;
     } catch (e) {
       console.warn('[fetchEvents] Error fetching calendar events:', e);
-      return events || [];
+      const stillToday = dropPastDayEvents(events) || [];
+      setEvents(stillToday);
+      setInvites(prev => dropPastDayEvents(prev));
+      return stillToday;
     } finally {
       fetchingEventsRef.current = false;
       setCalLoading(false);
@@ -3065,6 +3077,9 @@ export default function App() {
     pushingRef.current = true;
     if (manual) setIsManualOverride(true);
     setPushing(true);
+    // Restored if this push fails, so a push that never reached the sign is
+    // not remembered (and skipped on reconnect) as the sign's current content.
+    const previousPushedId = lastPushedId;
     
     let data;
     let pushName = '';
@@ -3256,6 +3271,7 @@ export default function App() {
       fetchStatus();
     } catch (e) {
       console.error('[push] Failed:', e);
+      setLastPushedId(previousPushedId);
       const detail = e.response?.data?.detail;
       const errorMsg = typeof detail === 'string' ? detail : (Array.isArray(detail) ? detail[0]?.msg : (detail?.message || JSON.stringify(detail)));
       const isDisconnectError = !status.connected || e.response?.status === 409 ||
@@ -3724,17 +3740,20 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     console.log('[assignPresetToSlot] Called with globalIdx:', globalIdx, 'preset:', preset);
     if (!preset) {
       console.warn('[assignPresetToSlot] No preset provided');
+      if (pushingRef) pushingRef.current = false;
       return;
     }
 
     // Slots 0 and 1 are reserved (Calendar and Default) — block manual assignment
     if (globalIdx === 0 || globalIdx === 1) {
       setPushMessage(`Slot ${globalIdx + 1} is reserved and cannot be manually assigned.`);
+      if (pushingRef) pushingRef.current = false;
       return;
     }
 
     if (preset.text?.includes('|||')) {
       setPushMessage('Event presets cannot be saved to slots.');
+      if (pushingRef) pushingRef.current = false;
       return;
     }
 

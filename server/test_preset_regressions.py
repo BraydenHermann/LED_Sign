@@ -3,6 +3,7 @@ import asyncio
 import base64
 import io
 import json
+import struct
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,14 +20,29 @@ class FakeSign:
     _backend = object()
     mtu_size = 247
 
-    def __init__(self, fail_at=None):
+    def __init__(self, fail_at=None, reject_sno=None, silent=False):
         self.writes = []
         self.fail_at = fail_at
+        self.reject_sno = reject_sno
+        self.silent = silent
+        self.pending = bytearray()
 
     async def write_gatt_char(self, uuid, data, response=True):
         self.writes.append(bytes(data))
         if len(self.writes) == self.fail_at:
             raise OSError("Simulated Bluetooth write failure")
+        # Reassemble fragments and acknowledge each complete packet the way
+        # the sign does: a status reply echoing the SNO, tag 0 for success.
+        self.pending.extend(data)
+        while len(self.pending) >= 6 and self.pending[:2] == b"\xaa\x55":
+            total = struct.unpack("<H", self.pending[4:6])[0] + 6
+            if len(self.pending) < total:
+                break
+            sno = bytes(self.pending[6:8])
+            del self.pending[:total]
+            if not self.silent:
+                code = 7 if struct.unpack("<H", sno)[0] == self.reject_sno else 0
+                main.notification_handler(None, bytearray(b"\xaa\x55\xff\xff\x07\x00" + sno + bytes([0x81, 0x82, code, 0, 0])))
 
 
 class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +56,8 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
             "active_scroller_task": None,
             "preset_switch_lock": asyncio.Lock(),
             "ble_lock": asyncio.Lock(),
+            "notification_buffer": bytearray(),
+            "SLOT_ACK_TIMEOUT": 0.05,
         }.items():
             patcher = patch.object(main, name, value)
             patcher.start()
@@ -175,6 +193,54 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
                 await main.save_preset(cancel_req)
         self.assertEqual(error.exception.status_code, 499)
         self.assertEqual(error.exception.detail, "Save cancelled by user")
+
+    async def test_rejected_chunk_stops_before_commit_and_keeps_cache(self):
+        previous = Path(self.directory.name) / "preset_aabbccddeeff_8.gif"
+        previous.write_bytes(b"last good preset")
+        # Predict the SNO of the first chunk: init and header precede it,
+        # after the three playback/power packets sent before the transfer.
+        main.connected_client = FakeSign(reject_sno=(main.protocol._sno + 5) % 0xFFFF)
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(HTTPException) as error:
+                await main.save_preset(self.request())
+        self.assertIn("rejected chunk 1", error.exception.detail)
+        self.assertEqual(previous.read_bytes(), b"last good preset")
+        self.assertFalse((Path(self.directory.name) / "preset_aabbccddeeff_8.json").exists())
+        commit_tag = bytes([0x35, 0x19])
+        self.assertFalse(any(commit_tag in w for w in main.connected_client.writes))
+
+    async def test_unacknowledged_transfer_is_not_success(self):
+        main.connected_client = FakeSign(silent=True)
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(HTTPException) as error:
+                await main.save_preset(self.request())
+        self.assertIn("did not confirm", error.exception.detail)
+        self.assertFalse((Path(self.directory.name) / "preset_aabbccddeeff_8.json").exists())
+
+    async def test_live_pushes_refuse_disconnected_sign(self):
+        main.connected_client = None
+        for call in (
+            lambda: main.push_text(main.PushTextRequest(mode="text", text="HI")),
+            lambda: main.set_clock(on=True, clock_style="default"),
+            lambda: main.clear(),
+            lambda: main.set_power(True),
+        ):
+            with self.assertRaises(HTTPException) as error:
+                await call()
+            self.assertEqual(error.exception.status_code, 409)
+        self.assertFalse((Path(self.directory.name) / "current.gif").exists())
+        self.assertFalse((Path(self.directory.name) / "current.png").exists())
+
+    async def test_failed_clock_save_keeps_previous_cache(self):
+        previous = Path(self.directory.name) / "preset_aabbccddeeff_10.json"
+        previous.write_text('{"mode": "text", "text": "last good"}')
+        main.connected_client = FakeSign(fail_at=1)
+        req = main.SavePresetRequest(slot_id=10, address=FakeSign.address, preset=main.PushTextRequest(mode="clock", clockStyle="default"), progress_id="clock-fail")
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(HTTPException):
+                await main.save_preset(req)
+        self.assertEqual(json.loads(previous.read_text())["text"], "last good")
+        self.assertFalse((Path(self.directory.name) / "preset_aabbccddeeff_10.gif").exists())
 
 
 if __name__ == "__main__":

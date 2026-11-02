@@ -280,6 +280,25 @@ def stop_servers():
         _calendar_proc = None
 
 
+def restart_backend():
+    """Stop the running backend so the guardian starts it from current code.
+
+    The guardian loop (in this process or in the tray instance that already
+    owns the mutex) restarts the backend as soon as port 8000 is free.
+    """
+    launcher_log("Restarting backend on launch.")
+    try:
+        req = urllib.request.Request("http://127.0.0.1:8000/disconnect", method="POST")
+        with urllib.request.urlopen(req, timeout=5.0):
+            pass
+    except Exception as err:
+        launcher_log(f"Disconnect request before restart: {err}")
+    force_kill_port(8000)
+    deadline = time.monotonic() + 5
+    while port_open(8000) and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
 def restart_servers(icon=None, item=None):
     global _quit_flag
     launcher_log("Restart Servers requested.")
@@ -369,9 +388,10 @@ def main():
     BASE_DIR = find_base_dir()
 
     # --- Single-instance guard (Windows named mutex) ---
-    # If the user double-clicks the shortcut while a tray instance is already
-    # running, we just open the browser and exit rather than killing the servers
-    # mid-connection. The mutex is released automatically when this process exits.
+    # Launching the app (other than a --background start) always restarts the
+    # backend so code changes take effect. If a tray instance already runs, its
+    # guardian restarts the backend; this instance then opens the browser and
+    # exits. The mutex is released automatically when this process exits.
     _mutex = None
     already_running = False
     try:
@@ -381,9 +401,14 @@ def main():
     except Exception:
         pass
 
+    restart_on_launch = '--background' not in sys.argv
+
     if already_running:
-        # Another tray instance owns the mutex. Just open/focus the browser tab.
-        if '--background' not in sys.argv:
+        # Another tray instance owns the mutex and its guardian loop restarts
+        # the backend once this instance frees port 8000.
+        if restart_on_launch:
+            if port_open(8000):
+                restart_backend()
             webbrowser.open("http://localhost:5173/")
         return
 
@@ -397,6 +422,8 @@ def main():
             launcher_log("Stopping outdated servers...")
             stop_servers()
             time.sleep(1)
+        elif restart_on_launch:
+            restart_backend()
         else:
             launcher_log("Preserving healthy existing LED Sign backend.")
     _quit_flag = False
