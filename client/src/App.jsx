@@ -1603,7 +1603,7 @@ export const normalizeSavedPresets = (list) => {
 // Previous/next control shared by the Saved and Local preset grids.
 // Left/Right arrow keys page while `keyboard` is on, and holding a dragged
 // preset over an arrow flips the page so it can be dropped on another page.
-function PresetPager({ page, totalPages, onPage, label, keyboard = true }) {
+function PresetPager({ page, totalPages, onPage, keyboard = true }) {
   const pageRef = useRef(page);
   pageRef.current = page;
   const flipTimerRef = useRef(null);
@@ -1692,7 +1692,7 @@ function PresetPager({ page, totalPages, onPage, label, keyboard = true }) {
         onDragOver={dragFlip(-1)} onDragLeave={stopFlip} onDrop={stopFlip}>
         <ChevronLeft size={18} />
       </button>
-      <span className="text-xs font-bold text-slate-400">{label}</span>
+      <span className="text-xs font-bold text-slate-400">Page {page + 1} of {totalPages}</span>
       <button className="btn-styled inactive" style={buttonStyle} onClick={() => onPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} aria-label="Next page"
         onDragOver={dragFlip(1)} onDragLeave={stopFlip} onDrop={stopFlip}>
         <ChevronRight size={18} />
@@ -1957,17 +1957,6 @@ export default function App() {
       } else if (hadLiveConnectionRef.current) {
         disconnectedStatusPollsRef.current += 1;
         if (disconnectedStatusPollsRef.current < 3) return res.data;
-      }
-      if (res.data?.session_id) {
-        const currentServerSession = res.data.session_id;
-        const storedServerSession = sessionStorage.getItem('loy_server_session_id');
-        if (storedServerSession && storedServerSession !== currentServerSession) {
-          console.log('[session] Server restart detected, clearing cached passcodes.');
-          clearAllSessionPasscodes();
-        }
-        try {
-          sessionStorage.setItem('loy_server_session_id', currentServerSession);
-        } catch (e) {}
       }
       setStatus(res.data);
       if (res.data && res.data.connected && res.data.address) {
@@ -4969,7 +4958,6 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               totalPages={totalSavedPages}
               onPage={setSavedPage}
               keyboard={assigningSlotIndex === null && !isModalOpen && !scanOpen && !passcodeTarget}
-              label={`Slots ${savedPage * slotsPerPage + 1}–${Math.min((savedPage + 1) * slotsPerPage, savedPresets.length)} of ${savedPresets.length}`}
             />
             <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '24px', width: '100%' }}>
@@ -7958,7 +7946,6 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           totalPages={totalLocalPages}
           onPage={setLocalPage}
           keyboard={!isModalOpen}
-          label={`Presets ${shownLocalPage * localPerPage + 1}–${Math.min((shownLocalPage + 1) * localPerPage, sortedLocalPresets.length)} of ${sortedLocalPresets.length}`}
         />
         <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100, marginTop: 0 }}>
           <div style={{ 
