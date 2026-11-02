@@ -48,6 +48,7 @@ import gemini_service
 import openai_service
 from loy_space_service import loy_space_service, USER_SESSION_FILE
 from sync_service import DriveSync, SyncUnavailable
+from event_text import event_sign_text, event_slot_preset
 
 
 def hex_to_rgb_global(hex_str: Optional[str], default=(0,0,0)):
@@ -222,6 +223,29 @@ _calendar_bg_task = None
 last_notified_event_id = None
 last_pushed_event_id = None
 
+async def show_event_in_slot_one(sign_mac: str, summary: str, end_iso: str):
+    """Show an event exactly as the dashboard does: save it to slot 1 (index 0)
+    with the same text and style, then play it. Never push the raw
+    "title ||| time" form, which the sign would draw with its pipes."""
+    text = normalize_for_sign(event_sign_text(summary, end_iso))
+    mac_str = sign_mac.replace(":", "").lower()
+    cached_text = None
+    try:
+        with open(os.path.join(STATIC_DIR, f"preset_{mac_str}_0.json"), "r") as f:
+            cached_text = (_json.load(f).get("text") or "").strip()
+    except (OSError, ValueError):
+        pass
+    if cached_text == text:
+        async with preset_switch_lock:
+            require_connected_sign(sign_mac)
+            await _play_preset(0, sign_mac)
+        return
+    await save_preset(SavePresetRequest(
+        slot_id=0, address=sign_mac, preset=PushTextRequest(**event_slot_preset(text)),
+        is_currently_playing=False, activate_on_save=True,
+    ))
+
+
 async def calendar_background_loop():
     global current_display_mode, last_notified_event_id, last_pushed_event_id
     
@@ -285,16 +309,11 @@ async def calendar_background_loop():
                 event_key = (sign_mac, event_id)
                 if sign_mac and last_pushed_event_id != event_key:
                     try:
-                        async with preset_switch_lock:
-                            require_connected_sign(sign_mac)
-                            req = PushTextRequest(text=f"{summary} ||| {time_str}")
-                            result = await push_text(req)
-                            if result.get("status") != "success":
-                                raise RuntimeError("Calendar push did not complete")
-                            last_pushed_event_id = event_key
-                        print(f"[auto-push] Pushed calendar event to sign: {summary}")
+                        await show_event_in_slot_one(sign_mac, summary, target_event.get('end_iso', ''))
+                        last_pushed_event_id = event_key
+                        print(f"[auto-push] Showing calendar event from slot 1: {summary}")
                     except Exception as e:
-                        print(f"[auto-push] Failed to push calendar event: {e}")
+                        print(f"[auto-push] Failed to show calendar event: {e}")
             else:
                 if last_pushed_event_id is not None:
                     sign_mac = (connected_client.address or "").upper() if connected_client and connected_client.is_connected and connection_ready else ""
@@ -2877,6 +2896,9 @@ async def push_text(req: PushTextRequest):
 
     try:
         if req.mode == "text" or (req.pixels is None and req.text):
+            # "title ||| times" is an internal format; never draw the pipes.
+            if req.text and "|||" in req.text:
+                req.text = req.text.split("|||", 1)[0].strip()
             unifont_path = os.path.join(os.path.dirname(__file__), "unifont.otf")
             try:
                 if os.path.exists(unifont_path):

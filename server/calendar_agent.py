@@ -8,30 +8,14 @@ from win11toast import toast
 
 # Track state in memory
 last_notified_event_id = None
-last_pushed_event_id = None
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 ICON_PATH = os.path.abspath(os.path.join(STATIC_DIR, "..", "..", "client", "public", "favicon.ico"))
 if not os.path.exists(ICON_PATH):
     ICON_PATH = None
 
-def send_push_request(summary, time_str):
-    req_body = json.dumps({
-        "text": f"{summary} ||| {time_str}",
-        "textColor": "#FFFFFF",
-        "bgColor": "#000000",
-        "speed": 8
-    }).encode('utf-8')
-    
-    req = urllib.request.Request("http://127.0.0.1:8000/push-text", data=req_body, headers={'Content-Type': 'application/json'})
-    try:
-        urllib.request.urlopen(req, timeout=3)
-        print(f"[calendar_agent] Pushed calendar event to sign: {summary}")
-    except Exception as e:
-        print(f"[calendar_agent] Server not available to push text: {e}")
-
 def run_loop():
-    global last_notified_event_id, last_pushed_event_id
+    global last_notified_event_id
     print("[calendar_agent] Started standalone calendar monitor.")
     
     while True:
@@ -74,7 +58,6 @@ def run_loop():
             if target_event:
                 event_id = target_event['id']
                 summary = target_event.get('summary', 'Event')
-                time_str = target_event.get('time', '')
                 
                 if last_notified_event_id != event_id:
                     last_notified_event_id = event_id
@@ -88,12 +71,11 @@ def run_loop():
                     except Exception as e:
                         print(f"[calendar_agent] Notification error: {e}")
                         
-                if last_pushed_event_id != event_id:
-                    last_pushed_event_id = event_id
-                    send_push_request(summary, time_str)
+                # Showing the event on the sign belongs to the dashboard, or
+                # to the server's own fallback when no dashboard is open; a
+                # push from here bypassed slot 1 and drew "|||" on the sign.
             else:
                 last_notified_event_id = None
-                last_pushed_event_id = None
                     
         except Exception as e:
             print(f"[calendar_agent] Loop error: {e}")
