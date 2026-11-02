@@ -15,7 +15,7 @@ axios.defaults.adapter = async config => {
 await assert.rejects(savePresetToSign({}), /older version/);
 await assert.rejects(processVideoMedia({}), /older version/);
 assert.equal(posts, 0, 'Do not send new-format requests to the old backend');
-status = { api_version: 6, connected: true };
+status = { api_version: 7, connected: true };
 assert.equal((await savePresetToSign({})).data.written_to_sign, true);
 assert.throws(() => requireCompletedWrite({ status: 'success' }), /did not confirm/);
 assert.throws(() => requireCompletedWrite({ written_to_sign: false }), /could not finish writing/);

@@ -98,5 +98,23 @@ def run_loop():
         except Exception as e:
             print(f"[calendar_agent] Loop error: {e}")
 
+def wait_for_single_instance():
+    """Block until no other calendar agent runs.
+
+    A tray launcher that is killed leaves its agent running, and the next
+    launcher starts another one, which would show every reminder twice.
+    Waiting (rather than exiting) keeps the launcher from respawning this one.
+    """
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        mutex = kernel32.CreateMutexW(None, False, "LEDSignCalendarAgentMutex")
+        kernel32.WaitForSingleObject(mutex, 0xFFFFFFFF)
+        return mutex
+    except Exception:
+        return None
+
+
 if __name__ == "__main__":
+    _instance_mutex = wait_for_single_instance()
     run_loop()

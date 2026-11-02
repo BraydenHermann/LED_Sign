@@ -46,7 +46,8 @@ from loy_web_protocol import LOYWebProtocol
 from calendar_service import CalendarService
 import gemini_service
 import openai_service
-from loy_space_service import loy_space_service
+from loy_space_service import loy_space_service, USER_SESSION_FILE
+from sync_service import DriveSync, SyncUnavailable
 
 
 def hex_to_rgb_global(hex_str: Optional[str], default=(0,0,0)):
@@ -177,6 +178,21 @@ async def write_slot_packet(packet: bytes, label: str, large: bool = False):
     finally:
         _slot_ack_waiters.pop(sno, None)
 
+async def query_slot_inventory():
+    """Refresh hardware_slots_state for every slot from the sign itself."""
+    for start in range(0, MAX_HW_SLOTS, SLOT_QUERY_BATCH):
+        packet = protocol.build_query_slots_command(start, min(SLOT_QUERY_BATCH, MAX_HW_SLOTS - start))
+        sno = struct.unpack('<H', packet[6:8])[0]
+        waiter = asyncio.get_running_loop().create_future()
+        _inventory_waiters[sno] = waiter
+        try:
+            await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=True)
+            await asyncio.wait_for(waiter, timeout=2.0)
+        except asyncio.TimeoutError:
+            print(f"[slots] No inventory reply for slots {start}-{start + SLOT_QUERY_BATCH - 1}")
+        finally:
+            _inventory_waiters.pop(sno, None)
+
 async def stop_all_playback(blank: bool = False):
     """Halts the onboard hardware playlist engine, active slot playback, and clock."""
     global connected_client, connection_ready
@@ -300,6 +316,7 @@ async def startup_event():
 
 protocol = LOYWebProtocol()
 calendar_service = CalendarService()
+drive_sync = DriveSync(calendar_service, USER_SESSION_FILE)
 
 # Hardware State
 connected_client: Optional[BleakClient] = None
@@ -328,7 +345,13 @@ current_clock_style: str = "default"
 
 # Hardware Slots State
 # Hardware Slots State
-hardware_slots_state = {i: {"slot_id": i, "occupied": False, "key": ""} for i in range(60)}
+# The firmware addresses 60 user slots (its play command lists 0-59).
+MAX_HW_SLOTS = 60
+# Inventory replies hold at most 12 entries before the length needs a wider
+# encoding, so the sign is queried in batches of this size.
+SLOT_QUERY_BATCH = 12
+hardware_slots_state = {i: {"slot_id": i, "occupied": False, "key": ""} for i in range(MAX_HW_SLOTS)}
+_inventory_waiters: dict = {}
 notification_buffer = bytearray()
 connected_device_id: str = ""
 RECOVERY_CONTACTS_PATH = os.path.join(_SERVER_DIR, "recovery_contacts.json")
@@ -475,6 +498,9 @@ def notification_handler(sender, data: bytearray):
                 payload = packet[10:-2] if len(packet) > 12 else packet[10:]
                 if len(payload) > 3 and payload[0] == 0x35 and payload[1] == 0x81:
                     entries = payload[3:]
+                elif len(payload) > 2 and payload[0] == 0x35 and payload[1] < 0x80:
+                    # Short replies (fewer than 7 slots) use a one-byte length.
+                    entries = payload[2:2 + payload[1]]
                 elif len(payload) > 2 and payload[0] == 0x81:
                     entries = payload[2:]
                 elif len(payload) > 1:
@@ -487,7 +513,7 @@ def notification_handler(sender, data: bytearray):
                     s_id = entries[i]
                     s_key = entries[i+1:i+21]
                     is_occ = any(b != 0 for b in s_key)
-                    if 0 <= s_id < 60:
+                    if 0 <= s_id < MAX_HW_SLOTS:
                         hardware_slots_state[s_id] = {
                             "slot_id": s_id,
                             "occupied": is_occ,
@@ -496,6 +522,9 @@ def notification_handler(sender, data: bytearray):
                     i += 21
                 occ_slots = [s for s, v in hardware_slots_state.items() if v.get("occupied")]
                 print(f"[notification_handler] Hardware slot inventory updated. Occupied slots: {occ_slots}")
+                waiter = _inventory_waiters.pop(packet_sno, None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(True)
     except Exception as e:
         print(f"[notification_handler error] {e}")
 
@@ -1090,6 +1119,40 @@ async def get_loy_my_materials(page_index: int = 0, page_count: int = 24):
     return await asyncio.to_thread(_fetch)
 
 
+class SyncPushRequest(BaseModel):
+    manifest: dict
+    presets: dict = {}
+
+
+class SyncFetchRequest(BaseModel):
+    ids: List[str]
+
+
+def _sync_call(fn, *args):
+    try:
+        return fn(*args)
+    except SyncUnavailable as err:
+        # 409 tells the dashboard to show what the user needs to do instead
+        # of retrying; the reason is machine-readable.
+        raise HTTPException(status_code=409, detail={"reason": err.reason, "message": str(err)})
+
+
+@app.get("/sync/manifest")
+async def sync_manifest():
+    return await asyncio.to_thread(_sync_call, drive_sync.get_manifest)
+
+
+@app.post("/sync/presets")
+async def sync_fetch_presets(req: SyncFetchRequest):
+    return {"presets": await asyncio.to_thread(_sync_call, drive_sync.get_presets, req.ids)}
+
+
+@app.post("/sync/push")
+async def sync_push(req: SyncPushRequest):
+    await asyncio.to_thread(_sync_call, drive_sync.push, req.manifest, req.presets)
+    return {"status": "success"}
+
+
 class LoyLoginRequest(BaseModel):
     user: str
     pwd: str
@@ -1172,7 +1235,8 @@ async def get_status():
         "connected": connected,
         "session_id": SERVER_SESSION_ID,
         "password_enabled": password_enabled if connected else None,
-        "api_version": 6,
+        "api_version": 7,
+        "max_slots": MAX_HW_SLOTS,
         "address": address,
         "preview_url": preview_url,
         "preview_ts": preview_ts,
@@ -1436,9 +1500,7 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             # Preserve the sign's current onboard playback across BLE reconnects
             # instead of re-sending slot play commands or halting playback.
             try:
-                # Query hardware slot inventory (first 12 slots only)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.build_query_slots_command(0, 12), response=False)
-                await asyncio.sleep(0.05)
+                await query_slot_inventory()
             except Exception as se:
                 print(f"[connect] Warning initializing slots: {se}")
 
@@ -1662,10 +1724,13 @@ async def get_hardware_slots(mac: str = ""):
             
     current_mac = (mac or (connected_client.address if connected_client else "") or "").replace(':', '').lower()
     slots_res = []
-    for slot_id in range(12):
+    for slot_id in range(MAX_HW_SLOTS):
         slot_data = hardware_slots_state.get(slot_id, {"slot_id": slot_id, "occupied": False})
         slot_info = dict(slot_data)
         slot_info["slot_id"] = slot_id
+        # What the sign's own inventory reports, independent of local caches;
+        # programs saved by the LOY SPACE app have no cached preview here.
+        slot_info["on_sign"] = bool(slot_data.get("occupied"))
 
         json_path = None
         gif_path = None
@@ -1810,7 +1875,12 @@ async def _play_preset(id: int, mac: str = ""):
     try:
         json_path = os.path.join(STATIC_DIR, f"preset_{mac_str}_{id}.json")
         gif_path  = os.path.join(STATIC_DIR, f"preset_{mac_str}_{id}.gif")
-        if not os.path.exists(json_path) and not os.path.exists(gif_path):
+        if not 0 <= id < MAX_HW_SLOTS:
+            raise HTTPException(status_code=422, detail=f"Slot {id + 1} does not exist on this sign")
+        on_sign_only = not os.path.exists(json_path) and not os.path.exists(gif_path)
+        # Slots filled by the LOY SPACE app have no local cache; play them
+        # from the sign without updating the preview.
+        if on_sign_only and not hardware_slots_state.get(id, {}).get("occupied"):
             raise HTTPException(status_code=404, detail=f"Slot {id + 1} has no saved preset")
         current_display_mode = f"preset-{id}"
 
@@ -3708,6 +3778,8 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
 
     if not req.address.strip():
         raise HTTPException(status_code=422, detail="A sign address is required to save a preset")
+    if not 0 <= req.slot_id < MAX_HW_SLOTS:
+        raise HTTPException(status_code=422, detail=f"Slot {req.slot_id + 1} does not exist on this sign")
     mac_str = require_connected_sign(req.address)
     target_client = connected_client
     
@@ -4264,6 +4336,30 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/hardware-slots/{slot_id}/erase")
+async def erase_hardware_slot(slot_id: int, mac: str = ""):
+    """Mark a slot empty on the sign, then re-read the sign's own inventory."""
+    global hardware_saving
+    if not 2 <= slot_id < MAX_HW_SLOTS:
+        raise HTTPException(status_code=422, detail="Only user slots 3-60 can be erased")
+    # Verified on hardware: the sign accepts this record and then reports the
+    # slot as empty in its inventory.
+    async with preset_switch_lock:
+        require_connected_sign(mac)
+        hardware_saving = True
+        try:
+            await write_slot_packet(protocol.build_slot_erase(slot_id), "the slot erase")
+            await query_slot_inventory()
+        except HTTPException:
+            raise
+        except Exception as err:
+            raise HTTPException(status_code=500, detail=str(err))
+        finally:
+            hardware_saving = False
+    state = hardware_slots_state.get(slot_id, {})
+    return {"slot_id": slot_id, "on_sign": bool(state.get("occupied")), "key": state.get("key", "")}
+
+
 @app.delete("/delete-preset/{slot_id}")
 async def delete_preset(slot_id: int, mac: str = "", was_active: Optional[bool] = None):
     global connected_client, connection_ready, hardware_slots_state, current_display_mode
@@ -4273,6 +4369,12 @@ async def delete_preset(slot_id: int, mac: str = "", was_active: Optional[bool] 
         was_showing_cleared_preset = was_active
     else:
         was_showing_cleared_preset = (current_display_mode == f"preset-{slot_id}")
+
+    # Empty the slot on the sign too, so it does not linger as "Saved on
+    # sign". Offline, only the local copy is removed.
+    sign_connected = bool(connected_client and connected_client.is_connected and connection_ready)
+    if sign_connected and slot_id >= 2:
+        await erase_hardware_slot(slot_id, mac)
 
     # 1. Delete all cached preset files for this slot on disk
     for f in glob.glob(os.path.join(STATIC_DIR, f"preset_*_{slot_id}.*")):

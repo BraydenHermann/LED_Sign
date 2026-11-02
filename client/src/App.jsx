@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { savePresetToSign, cancelSavePreset, processVideoMedia } from './serverApi';
 import { fitEventSignText } from './eventText';
+import { runSync, applyPresetChanges, SYNC_APPLIED_EVENT } from './cloudSync';
 import GeminiMediaGenerator, { GeminiLogo, OpenAILogo } from './GeminiMediaGenerator';
 import LoySpaceGallery, { LoySpaceLogo } from './LoySpaceGallery';
 import GoogleMediaGallery, { GoogleLogo } from './GoogleMediaGallery';
@@ -1542,11 +1543,14 @@ const TextPresetCardPreview = ({ preset }) => {
   );
 };
 
+// User slots the sign's firmware addresses (its play command lists 0-59).
+export const HW_SLOT_COUNT = 60;
+
 export const normalizeSavedPresets = (list) => {
   if (!Array.isArray(list)) {
-    return Array(12).fill(null).map((_, i) => ({ slotNumber: i + 1, hwSlotId: i, preset: null }));
+    return Array(HW_SLOT_COUNT).fill(null).map((_, i) => ({ slotNumber: i + 1, hwSlotId: i, preset: null }));
   }
-  const normalized = list.slice(0, 12).map((item, idx) => {
+  const normalized = list.slice(0, HW_SLOT_COUNT).map((item, idx) => {
     let hwId = item?.hwSlotId;
     if (hwId === undefined || hwId === null) {
       if (item?.preset?.hwSlotId !== undefined && item?.preset?.hwSlotId !== null) {
@@ -1570,15 +1574,18 @@ export const normalizeSavedPresets = (list) => {
     return {
       slotNumber: item?.slotNumber || (idx + 1),
       hwSlotId: hwId,
-      preset
+      preset,
+      // The sign holds content here that this app has no copy of (for
+      // example a program saved from the LOY SPACE app).
+      onSign: Boolean(item?.onSign)
     };
   });
 
-  while (normalized.length < 12) {
+  while (normalized.length < HW_SLOT_COUNT) {
     const nextIdx = normalized.length;
     const usedIds = new Set(normalized.map(s => s.hwSlotId));
     let freeHwId = nextIdx;
-    for (let h = 0; h < 12; h++) {
+    for (let h = 0; h < HW_SLOT_COUNT; h++) {
       if (!usedIds.has(h)) {
         freeHwId = h;
         break;
@@ -1592,6 +1599,107 @@ export const normalizeSavedPresets = (list) => {
   }
   return normalized;
 };
+
+// Previous/next control shared by the Saved and Local preset grids.
+// Left/Right arrow keys page while `keyboard` is on, and holding a dragged
+// preset over an arrow flips the page so it can be dropped on another page.
+function PresetPager({ page, totalPages, onPage, label, keyboard = true }) {
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const flipTimerRef = useRef(null);
+
+  useEffect(() => {
+    if (!keyboard || totalPages <= 1) return;
+    const onKey = (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.defaultPrevented) return;
+      const el = document.activeElement;
+      if (el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName))) return;
+      e.preventDefault();
+      const next = e.key === 'ArrowLeft' ? pageRef.current - 1 : pageRef.current + 1;
+      onPage(Math.max(0, Math.min(totalPages - 1, next)));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [keyboard, totalPages, onPage]);
+
+  useEffect(() => () => clearTimeout(flipTimerRef.current), []);
+
+  // Esc (or dropping nowhere) cancels a drag: stop flipping and go back to
+  // the page the drag started on. The browser reports that as a dragend
+  // whose dropEffect is "none".
+  const onPageRef = useRef(onPage);
+  onPageRef.current = onPage;
+  useEffect(() => {
+    let startPage = null;
+    let lastDragOver = 0;
+    let watchdog = null;
+    const onStart = () => {
+      startPage = pageRef.current;
+      lastDragOver = Date.now();
+      // After a page flip the dragged card is unmounted, so the browser has
+      // no element to send dragend to when Esc is pressed. Browsers repeat
+      // dragover during a drag; when that stops with no drop, end it here.
+      clearInterval(watchdog);
+      watchdog = setInterval(() => {
+        if (Date.now() - lastDragOver > 1000) document.dispatchEvent(new Event('dragend'));
+      }, 250);
+    };
+    const onOver = () => { lastDragOver = Date.now(); };
+    const onEnd = (e) => {
+      clearInterval(watchdog);
+      watchdog = null;
+      clearTimeout(flipTimerRef.current);
+      flipTimerRef.current = null;
+      const cancelled = e.type === 'dragend' && (e.dataTransfer?.dropEffect ?? 'none') === 'none';
+      if (cancelled && startPage !== null && startPage !== pageRef.current) onPageRef.current(startPage);
+      startPage = null;
+    };
+    document.addEventListener('dragstart', onStart, true);
+    document.addEventListener('dragover', onOver, true);
+    document.addEventListener('dragend', onEnd, true);
+    document.addEventListener('drop', onEnd, true);
+    return () => {
+      clearInterval(watchdog);
+      document.removeEventListener('dragstart', onStart, true);
+      document.removeEventListener('dragover', onOver, true);
+      document.removeEventListener('dragend', onEnd, true);
+      document.removeEventListener('drop', onEnd, true);
+    };
+  }, []);
+
+  if (totalPages <= 1) return null;
+  const stopFlip = () => {
+    clearTimeout(flipTimerRef.current);
+    flipTimerRef.current = null;
+  };
+  // Flip after a short hover, then keep flipping while the drag stays there.
+  const dragFlip = (step) => (e) => {
+    e.preventDefault();
+    if (flipTimerRef.current) return;
+    const tick = () => {
+      const next = pageRef.current + step;
+      if (next < 0 || next > totalPages - 1) return stopFlip();
+      onPage(next);
+      flipTimerRef.current = setTimeout(tick, 800);
+    };
+    flipTimerRef.current = setTimeout(tick, 450);
+  };
+  const buttonStyle = { width: 32, height: 32, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.05)' };
+  return (
+    <div className="glass-panel w-full" style={{ maxWidth: 1100, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 6, borderRadius: 16, marginBottom: 16 }}>
+      <button className="btn-styled inactive" style={buttonStyle} onClick={() => onPage(Math.max(0, page - 1))} disabled={page === 0} aria-label="Previous page"
+        onDragOver={dragFlip(-1)} onDragLeave={stopFlip} onDrop={stopFlip}>
+        <ChevronLeft size={18} />
+      </button>
+      <span className="text-xs font-bold text-slate-400">{label}</span>
+      <button className="btn-styled inactive" style={buttonStyle} onClick={() => onPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} aria-label="Next page"
+        onDragOver={dragFlip(1)} onDragLeave={stopFlip} onDrop={stopFlip}>
+        <ChevronRight size={18} />
+      </button>
+    </div>
+  );
+}
 
 export default function App() {
   const fontReady = useFontReady();
@@ -2317,6 +2425,65 @@ export default function App() {
     }
   }, [presets, dbLoaded]);
 
+  // Sync presets, settings and AI keys with the signed-in Google account.
+  const [syncStatus, setSyncStatus] = useState({ state: 'idle' });
+  const syncStatusRef = useRef(syncStatus);
+  syncStatusRef.current = syncStatus;
+  const presetsRef = useRef(presets);
+  presetsRef.current = presets;
+  const cloudSyncingRef = useRef(false);
+  const runCloudSync = async () => {
+    if (!status.calendar_connected || !dbLoaded || cloudSyncingRef.current) return;
+    cloudSyncingRef.current = true;
+    setSyncStatus(prev => ({ ...prev, state: 'syncing' }));
+    try {
+      const { presetsChanged, plan, downloaded } = await runSync(presetsRef.current, API_BASE);
+      if (presetsChanged) setPresets(prev => applyPresetChanges(prev, plan, downloaded));
+      setSyncStatus({ state: 'ok', lastSync: Date.now() });
+    } catch (e) {
+      console.warn('[sync] Failed:', e);
+      setSyncStatus({ state: 'error', reason: e.reason || 'error', message: e.message });
+    } finally {
+      cloudSyncingRef.current = false;
+    }
+  };
+  const runCloudSyncRef = useRef(runCloudSync);
+  runCloudSyncRef.current = runCloudSync;
+  useEffect(() => {
+    if (!status.calendar_connected || !dbLoaded) return;
+    runCloudSyncRef.current();
+    const id = setInterval(() => runCloudSyncRef.current(), 120000);
+    // Returning from Google's consent tab (or the Cloud console) should retry
+    // right away instead of waiting for the next interval.
+    const onFocus = () => {
+      const last = syncStatusRef.current;
+      if (last.state === 'error' || !last.lastSync || Date.now() - last.lastSync > 30000) runCloudSyncRef.current();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [status.calendar_connected, dbLoaded]);
+  // Upload local edits shortly after they settle.
+  useEffect(() => {
+    if (!dbLoaded) return;
+    const id = setTimeout(() => runCloudSyncRef.current(), 5000);
+    return () => clearTimeout(id);
+  }, [presets, dbLoaded]);
+  // Reflect settings that arrived from another device.
+  useEffect(() => {
+    const onApplied = (e) => {
+      const values = e.detail || {};
+      if ('loy_clean_name' in values) setCleanName(values.loy_clean_name !== 'false');
+      if ('loy_device_names_v2' in values) {
+        try { setDeviceNames(JSON.parse(values.loy_device_names_v2 || '{}')); } catch { /* ignore */ }
+      }
+    };
+    window.addEventListener(SYNC_APPLIED_EVENT, onApplied);
+    return () => window.removeEventListener(SYNC_APPLIED_EVENT, onApplied);
+  }, []);
+
   // Keep reserved default slot (slot 2 / index 1) in saved presets synced with default local preset
   useEffect(() => {
     if (!dbLoaded) return;
@@ -2460,7 +2627,7 @@ export default function App() {
           let updated = false;
           hwSlots.forEach(s => {
             const idx = s.slot_id;
-            if (idx >= 0 && idx < 12) {
+            if (idx >= 0 && idx < HW_SLOT_COUNT) {
               if (idx === 1) {
                 // Slot 2 is reserved for the Default Preset. Never clear it to null!
                 const defPreset = (presets || []).find(p => p.isDefault);
@@ -2580,7 +2747,12 @@ export default function App() {
               } else if (idx >= 2 && currentList[targetSlotIndex]?.preset) {
                 // Slot no longer occupied on hardware — clear card
                 updated = true;
-                currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], preset: null };
+                currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], preset: null, onSign: Boolean(s.on_sign) };
+              }
+              if (idx >= 2 && targetSlotIndex >= 0 && !currentList[targetSlotIndex]?.preset &&
+                  Boolean(currentList[targetSlotIndex]?.onSign) !== Boolean(s.on_sign)) {
+                updated = true;
+                currentList[targetSlotIndex] = { ...currentList[targetSlotIndex], onSign: Boolean(s.on_sign) };
               }
             }
           });
@@ -3297,7 +3469,7 @@ export default function App() {
 
   return (
     <div className="app-container">
-      <header className="header-row" style={{ marginBottom: 40 }}>
+      <header className="header-row" style={{ marginBottom: apiError ? 16 : 0 }}>
         <div className="logo-group"></div>
         
         {apiError && (
@@ -3431,6 +3603,8 @@ export default function App() {
             cleanName={cleanName}
             setCleanName={setCleanName}
             onNotify={setUnifiedPushMessage}
+            syncStatus={syncStatus}
+            onSyncNow={() => runCloudSyncRef.current()}
           />
         </div>
       </div>
@@ -3516,6 +3690,25 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
   };
   const [assigningSlotIndex, setAssigningSlotIndex] = useState(null);
+  // Feedback for "Clear Slot" shown inside the assign dialog itself; the
+  // dashboard status line sits behind the dialog where it cannot be seen.
+  const [clearingSlot, setClearingSlot] = useState(false);
+  // A slot dragged to another page unmounts, so its own dragend never fires.
+  useEffect(() => {
+    const reset = () => setTimeout(() => {
+      setSavedDraggedIdx(null);
+      setSavedDragOverIdx(null);
+      document.body.classList.remove('preset-dragging');
+    }, 0);
+    document.addEventListener('dragend', reset, true);
+    document.addEventListener('drop', reset, true);
+    return () => {
+      document.removeEventListener('dragend', reset, true);
+      document.removeEventListener('drop', reset, true);
+    };
+  }, []);
+  const [clearSlotError, setClearSlotError] = useState('');
+  useEffect(() => { setClearSlotError(''); }, [assigningSlotIndex]);
   const [savedPage, setSavedPage] = useState(0);
   const isAssignmentReminder = pushMessage === 'Please assign animated text, GIFs, and videos to a Saved Preset before pushing.';
   const previewRef = useRef(null);
@@ -3762,7 +3955,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       delete presetCopy.pixels;
     }
 
-    if (globalIdx >= 12) {
+    if (globalIdx >= HW_SLOT_COUNT) {
       if (typeof setPushingPresetTarget === 'function') {
         setPushingPresetTarget({
           type: 'saved',
@@ -3955,7 +4148,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     setIsManualOverride(true);
 
     try {
-      if (hwSlotId < 12) {
+      if (hwSlotId < HW_SLOT_COUNT) {
         // Notify server to switch active hardware preset slot and update live preview
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof fetchStatus === 'function') await fetchStatus();
@@ -4770,6 +4963,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           
 
           {presetView === 'saved' && status.connected && (
+            <>
+            <PresetPager
+              page={savedPage}
+              totalPages={totalSavedPages}
+              onPage={setSavedPage}
+              keyboard={assigningSlotIndex === null && !isModalOpen && !scanOpen && !passcodeTarget}
+              label={`Slots ${savedPage * slotsPerPage + 1}–${Math.min((savedPage + 1) * slotsPerPage, savedPresets.length)} of ${savedPresets.length}`}
+            />
             <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '24px', width: '100%' }}>
                 {savedPresets.slice(savedPage * slotsPerPage, (savedPage + 1) * slotsPerPage).map((slot, localIdx) => {
@@ -4790,11 +4991,13 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         onDragLeave={!isReserved ? () => setSavedDragOverIdx(null) : undefined}
                         onDrop={!isReserved ? (e) => handleDropOnSlot(e, globalIdx) : undefined}
                         onPointerDown={handlePointerDown}
-                        onPointerUp={(e) => handlePointerUp(e, () => playSavedPreset(globalIdx, null))}
+                        onPointerUp={(e) => handlePointerUp(e, () => playSavedPreset(globalIdx, slot.onSign
+                          ? { id: `hw-slot-${slot.hwSlotId}`, hwSlotId: slot.hwSlotId, name: `slot ${globalIdx + 1}` }
+                          : null))}
                         className={`preset-card empty-slot relative transition-all cursor-pointer ${isReserved ? 'preset-card-reserved' : ''} ${globalIdx === savedDragOverIdx ? 'preset-card-drag-target' : ''}`}
                         style={{
                           '--reserved-color': reservedColor,
-                          opacity: pushing ? (isReserved ? 0.4 : 0.3) : (isReserved ? 0.7 : 1),
+                          opacity: pushing ? 0.4 : 1,
                           cursor: pushing ? 'not-allowed' : 'pointer',
                           pointerEvents: pushing ? 'none' : undefined,
                         }}
@@ -4815,8 +5018,13 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                           <>
                             <Plus size={20} className="text-slate-600 mb-1" />
                             <p style={{ fontSize: '10px', fontWeight: 900, color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0 }}>
-                              Empty
+                              {slot.onSign ? 'Saved on sign' : 'Empty'}
                             </p>
+                            {slot.onSign && (
+                              <p style={{ fontSize: '9px', color: 'rgba(255,255,255,0.25)', marginTop: 4, textAlign: 'center' }}>
+                                No preview · tap to play
+                              </p>
+                            )}
                           </>
                         )}
                         {!isReserved && (
@@ -4967,6 +5175,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 })}
               </div>
             </div>
+            </>
           )}
 
           {/* Assign Preset Modal */}
@@ -5000,29 +5209,36 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                               ? slotObj.preset.hwSlotId 
                               : (slotObj?.hwSlotId !== undefined ? slotObj.hwSlotId : assigningSlotIndex);
 
-                            if (hwSlotId < 12) {
+                            if (hwSlotId < HW_SLOT_COUNT) {
                               try {
                                 const wasActive = (lastPushedId === `hw-slot-${hwSlotId}`) || (status?.display_mode === `preset-${hwSlotId}`);
+                                setClearingSlot(true);
+                                setClearSlotError('');
                                 setPushing(true);
                                 setPushMessage(`Clearing slot ${assigningSlotIndex + 1}...`);
                                 await axios.delete(`${API_BASE}/delete-preset/${hwSlotId}?mac=${encodeURIComponent(status.address || DEFAULT_MAC)}&was_active=${wasActive}`);
                                 setPushMessage(`Cleared slot ${assigningSlotIndex + 1}!`);
                                 
-                                const nextSaved = [...savedPresets];
-                                nextSaved[assigningSlotIndex] = { ...nextSaved[assigningSlotIndex], preset: null };
-                                setSavedPresets(nextSaved);
-                                if (typeof syncHardwareSlots === 'function') {
-                                  await syncHardwareSlots();
-                                }
+                                const clearedIndex = assigningSlotIndex;
+                                setSavedPresets(prev => {
+                                  const next = [...prev];
+                                  next[clearedIndex] = { ...next[clearedIndex], preset: null, onSign: false };
+                                  return next;
+                                });
+                                // Close right away; the card is already empty.
+                                setAssigningSlotIndex(null);
                                 if (lastPushedId === `hw-slot-${hwSlotId}`) {
                                   if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
                                 }
+                                if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
                                 if (typeof fetchStatus === 'function') fetchStatus();
-                                setAssigningSlotIndex(null);
                               } catch (err) {
                                 console.error('Failed to delete hardware preset:', err);
-                                setPushMessage(`Error: ${err.message}`);
+                                const detail = err.response?.data?.detail || err.message;
+                                setClearSlotError(`Could not clear this slot: ${detail}`);
+                                setPushMessage(`Error: ${detail}`);
                               } finally {
+                                setClearingSlot(false);
                                 setPushing(false);
                               }
                             }
@@ -5050,13 +5266,16 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                           }}
                           title="Clear Slot"
                         >
-                          <Trash2 size={14} className="mr-1" /> Clear Slot
+                          {clearingSlot
+                            ? <><RefreshCw size={14} className="mr-1 animate-spin" aria-hidden="true" /> Clearing…</>
+                            : <><Trash2 size={14} className="mr-1" /> Clear Slot</>}
                         </button>
                       )}
                       <button onClick={() => setAssigningSlotIndex(null)} style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onMouseOver={e => e.currentTarget.style.color='#fff'} onMouseOut={e => e.currentTarget.style.color='#64748b'}><X size={24} /></button>
                     </div>
                   </div>
 
+                  {clearSlotError && <p role="alert" style={{ color: '#fca5a5', fontSize: 12, margin: '0 0 12px' }}>{clearSlotError}</p>}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '24px' }}>
                     {presets?.filter(p => {
                       if (!p?.id) return false;
@@ -5232,7 +5451,7 @@ function GoogleCalendarLogo({ size = 16, style = {} }) {
 }
 
 /* ─── Calendar ───────────────────────────────────────────────────────── */
-function CalendarView({ status, events, invites, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify }) {
+function CalendarView({ status, events, invites, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify, syncStatus, onSyncNow }) {
   const [calError, setCalError] = useState('');
   const [acceptingId, setAcceptingId] = useState(null);
   const [scopeModalOpen, setScopeModalOpen] = useState(false);
@@ -5343,6 +5562,24 @@ function CalendarView({ status, events, invites, loading, fetchEvents, now, onPu
           )}
         </div>
       </div>
+      {status.calendar_connected && syncStatus && syncStatus.state !== 'idle' && (
+        <div role="status" style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 12, color: syncStatus.state === 'error' ? '#fca5a5' : '#94a3b8' }}>
+          {syncStatus.state === 'syncing' && <><RefreshCw size={12} className="animate-spin" aria-hidden="true" /><span>Syncing presets and settings…</span></>}
+          {syncStatus.state === 'ok' && <><Check size={12} className="text-emerald-400" aria-hidden="true" /><span>Presets and settings synced with your Google account</span></>}
+          {syncStatus.state === 'error' && (
+            <>
+              <span>{syncStatus.reason === 'needs_permission' ? 'Sync needs permission to store data in your Google Drive.' : `Sync failed: ${syncStatus.message}`}</span>
+              <button
+                onClick={syncStatus.reason === 'needs_permission' ? handleSignIn : onSyncNow}
+                className="btn-styled inactive"
+                style={{ padding: '4px 10px', fontSize: 12 }}
+              >
+                {syncStatus.reason === 'needs_permission' ? 'Allow' : 'Retry'}
+              </button>
+            </>
+          )}
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginBottom: '32px' }}>
         <p className="text-slate-400 text-sm">
           {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
@@ -6200,6 +6437,17 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
 /* ─── Media ──────────────────────────────────────────────────────────── */
 function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, setSlotSaveProgress, setSlotSavePhase }) {
   const fontReady = useFontReady();
+  const [localPage, setLocalPage] = useState(0);
+  // A card dragged to another page unmounts, so its own dragend never fires.
+  useEffect(() => {
+    const reset = () => setTimeout(() => { setDraggedId(null); setDragOverId(null); }, 0);
+    document.addEventListener('dragend', reset, true);
+    document.addEventListener('drop', reset, true);
+    return () => {
+      document.removeEventListener('dragend', reset, true);
+      document.removeEventListener('drop', reset, true);
+    };
+  }, []);
   const [draggedId, setDraggedId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
 
@@ -7693,9 +7941,25 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     }
   };
 
+  // Twelve cards per page, like Saved: Create Preset first, then 11 presets.
+  const localPerPage = 11;
+  const sortedLocalPresets = (presets || [])
+    .filter(p => p?.id)
+    .sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0));
+  const totalLocalPages = Math.max(1, Math.ceil(sortedLocalPresets.length / localPerPage));
+  const shownLocalPage = Math.min(localPage, totalLocalPages - 1);
+
   return (
     <div className="flex flex-col items-center pb-12 w-full">
       {presetView === 'local' && (
+        <>
+        <PresetPager
+          page={shownLocalPage}
+          totalPages={totalLocalPages}
+          onPage={setLocalPage}
+          keyboard={!isModalOpen}
+          label={`Presets ${shownLocalPage * localPerPage + 1}–${Math.min((shownLocalPage + 1) * localPerPage, sortedLocalPresets.length)} of ${sortedLocalPresets.length}`}
+        />
         <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100, marginTop: 0 }}>
           <div style={{ 
             display: 'grid', 
@@ -7731,10 +7995,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               <p className="text-xs font-black text-emerald-500/60 uppercase tracking-widest">Create Preset</p>
             </div>
 
-            {presets
-              ?.filter(p => p?.id)
-              ?.sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0))
-              ?.map(p => {
+            {sortedLocalPresets
+              .slice(shownLocalPage * localPerPage, (shownLocalPage + 1) * localPerPage)
+              .map(p => {
               const isClock = p.mode === 'clock' || p.id === 'clock-default';
               const canPushDirectly = canPushLocalPresetDirectly(p);
               const isThisPresetPushing = pushing && pushingPresetTarget && (
@@ -7825,6 +8088,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
             })}
           </div>
         </div>
+        </>
       )}
 
       {isModalOpen && createPortal(

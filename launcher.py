@@ -407,11 +407,16 @@ def main():
         # Another tray instance owns the mutex and its guardian loop restarts
         # the backend once this instance frees port 8000.
         if restart_on_launch:
+            tab_was_open = browser_tab_is_open()
             if port_open(8000):
                 restart_backend()
-            webbrowser.open("http://localhost:5173/")
+            # Reuse an open page: it keeps the sign's session passcode and
+            # reconnects by itself, which a new tab cannot do.
+            if not tab_was_open:
+                webbrowser.open("http://localhost:5173/")
         return
 
+    tab_was_open = browser_tab_is_open()
     if port_open(8000):
         try:
             with urllib.request.urlopen('http://127.0.0.1:8000/status', timeout=2) as response:
@@ -433,7 +438,7 @@ def main():
     # Only create a tab after the servers are ready and no existing LED Sign
     # page is reporting itself open. This works across separate browser windows.
     def open_if_needed():
-        if '--background' in sys.argv:
+        if '--background' in sys.argv or tab_was_open:
             return
         if wait_for_port(5173) and wait_for_port(8000) and not browser_tab_is_open():
             webbrowser.open("http://localhost:5173/")

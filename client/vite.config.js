@@ -43,6 +43,11 @@ export default defineConfig({
       '/static': 'http://127.0.0.1:8000',
       '/disconnect': 'http://127.0.0.1:8000',
       '/hardware-slots': 'http://127.0.0.1:8000',
+      '/sync': {
+        target: 'http://127.0.0.1:8000',
+        proxyTimeout: 300000,
+        timeout: 300000
+      },
       '/api': {
         target: 'http://127.0.0.1:8000',
         proxyTimeout: 300000,

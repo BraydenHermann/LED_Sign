@@ -13,7 +13,9 @@ from googleapiclient.discovery import build
 
 SCOPES = [
     'https://www.googleapis.com/auth/calendar.events',
-    'https://www.googleapis.com/auth/calendar.readonly'
+    'https://www.googleapis.com/auth/calendar.readonly',
+    # Hidden per-app Drive folder used to sync presets and settings between devices
+    'https://www.googleapis.com/auth/drive.appdata'
 ]
 REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8000/auth/callback')
 

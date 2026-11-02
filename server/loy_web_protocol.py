@@ -399,6 +399,16 @@ class LOYWebProtocol(BaseProtocol):
         payload = bytes([0x35, len(val)]) + val
         return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
 
+    def build_slot_erase(self, slot_id: int):
+        """CMD=0x35 commit with an all-zero file record.
+
+        The slot inventory reports empty slots with an all-zero key; this
+        writes exactly that record. Not from vendor documentation.
+        """
+        val = bytes([slot_id]) + bytes(20) + bytes(4)
+        payload = bytes([0x35, len(val)]) + val
+        return self.build_packet(payload, cmd_type=0xC1, sub_type=0x02)
+
     def build_direct_slot_save_packet(self, slot_id: int, ystp_bytes: bytes, anim_code: int = 1, speed_val: int = 13, stay_time: int = 3):
         """Build the complete compound single-packet file transfer for a hardware slot.
         Matches official iOS app LOY SPACE trace:

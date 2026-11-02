@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { generateAiMedia, getAiProviders } from './serverApi';
+import { SYNC_APPLIED_EVENT } from './cloudSync';
 
 // Brand colors
 const GEMINI_GRADIENT = 'linear-gradient(to right, #4796E3 0%, #9177C7 50%, #CA6673 100%)';
@@ -136,6 +137,17 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
       setShowKeys(false);
     }
   }, [isExpanded]);
+
+  // Keys can arrive from another device through Google sync.
+  useEffect(() => {
+    const onApplied = (e) => {
+      const values = e.detail || {};
+      if ('led_gemini_api_key' in values) setGeminiKey(values.led_gemini_api_key || '');
+      if ('led_openai_api_key' in values) setOpenaiKey(values.led_openai_api_key || '');
+    };
+    window.addEventListener(SYNC_APPLIED_EVENT, onApplied);
+    return () => window.removeEventListener(SYNC_APPLIED_EVENT, onApplied);
+  }, []);
 
   const updateKey = (which, value) => {
     const v = value.trim();

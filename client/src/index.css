@@ -347,14 +347,13 @@ body.preset-dragging .preset-card-reserved .preset-card-badge { opacity: 1; }
 }
 .preset-card.empty-slot {
   flex-direction: column;
-  background: rgba(0, 0, 0, 0.4);
+  background: #000;
   border: 2px dashed rgba(255, 255, 255, 0.15);
 }
 .preset-card.empty-slot.preset-card-reserved { border: 2px solid var(--glass-border); }
 .preset-card.empty-slot.preset-card-reserved:hover,
 body.preset-dragging .preset-card.empty-slot.preset-card-reserved { border-color: var(--reserved-color); }
 .preset-card.empty-slot:not(.preset-card-reserved):hover {
-  background: rgba(255, 255, 255, 0.05);
   border-color: transparent;
 }
 .preset-card.empty-slot.preset-card-drag-target {
@@ -599,7 +598,7 @@ body.preset-dragging .preset-card.empty-slot.preset-card-reserved { border-color
   align-items: center;
   gap: 14px;
   flex-wrap: nowrap;
-  margin-top: 36px;
+  margin-top: 16px;
 }
 
 .mac-display {

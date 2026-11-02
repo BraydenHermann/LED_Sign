@@ -243,5 +243,20 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((Path(self.directory.name) / "preset_aabbccddeeff_10.gif").exists())
 
 
+    async def test_clearing_a_slot_erases_it_on_the_sign(self):
+        (Path(self.directory.name) / "preset_aabbccddeeff_14.json").write_text("{}")
+        with patch.object(main, "query_slot_inventory", new=AsyncMock()):
+            await main.delete_preset(14, mac=FakeSign.address, was_active=False)
+        erase = bytes([0x35, 25, 14]) + bytes(24)
+        self.assertTrue(any(erase in w for w in main.connected_client.writes))
+        self.assertFalse((Path(self.directory.name) / "preset_aabbccddeeff_14.json").exists())
+
+    async def test_reserved_slots_cannot_be_erased(self):
+        with self.assertRaises(HTTPException) as error:
+            await main.erase_hardware_slot(1)
+        self.assertEqual(error.exception.status_code, 422)
+        self.assertEqual(main.connected_client.writes, [])
+
+
 if __name__ == "__main__":
     unittest.main()
