@@ -339,13 +339,15 @@ class CalendarService:
         Returns a dict: {"events": [accepted_events], "invites": [pending_invites]}
         """
         now_utc = datetime.datetime.now(datetime.timezone.utc)
+        local_today = now_utc.astimezone().date()
 
         if not force_refresh:
             with self._schedule_lock:
                 cached = self._schedule_cache.get(clean_name)
                 if cached:
                     cache_time, data = cached
-                    if time.time() - cache_time < self._cache_ttl:
+                    cached_date = datetime.datetime.fromtimestamp(cache_time).astimezone().date()
+                    if cached_date == local_today and (time.time() - cache_time < self._cache_ttl):
                         events_copy = []
                         for ev in data.get("events", []):
                             ev_copy = dict(ev)
@@ -363,7 +365,8 @@ class CalendarService:
                 cached = self._schedule_cache.get(clean_name)
                 if cached:
                     cache_time, data = cached
-                    if time.time() - cache_time < self._cache_ttl:
+                    cached_date = datetime.datetime.fromtimestamp(cache_time).astimezone().date()
+                    if cached_date == local_today and (time.time() - cache_time < self._cache_ttl):
                         events_copy = []
                         for ev in data.get("events", []):
                             ev_copy = dict(ev)

@@ -2414,14 +2414,17 @@ export default function App() {
   }, [presets, dbLoaded]);
 
   // Sync presets, settings and AI keys with the signed-in Google account.
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const [syncStatus, setSyncStatus] = useState({ state: 'idle' });
   const syncStatusRef = useRef(syncStatus);
   syncStatusRef.current = syncStatus;
   const presetsRef = useRef(presets);
   presetsRef.current = presets;
   const cloudSyncingRef = useRef(false);
-  const runCloudSync = async () => {
-    if (!status.calendar_connected || !dbLoaded || cloudSyncingRef.current) return;
+  const runCloudSync = async (isRetry = false) => {
+    if (!statusRef.current?.calendar_connected || !dbLoaded || cloudSyncingRef.current) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     cloudSyncingRef.current = true;
     setSyncStatus(prev => ({ ...prev, state: 'syncing' }));
     try {
@@ -2430,6 +2433,16 @@ export default function App() {
       setSyncStatus({ state: 'ok', lastSync: Date.now() });
     } catch (e) {
       console.warn('[sync] Failed:', e);
+      // If network error/timeout on wake up, silently retry once after 5 seconds before showing an error banner
+      if (!isRetry && (e.message?.includes('timeout') || e.message?.includes('Network Error'))) {
+        cloudSyncingRef.current = false;
+        setTimeout(() => {
+          if (!cloudSyncingRef.current && statusRef.current?.calendar_connected) {
+            runCloudSyncRef.current(true);
+          }
+        }, 5000);
+        return;
+      }
       setSyncStatus({ state: 'error', reason: e.reason || 'error', message: e.message });
     } finally {
       cloudSyncingRef.current = false;
@@ -2437,28 +2450,41 @@ export default function App() {
   };
   const runCloudSyncRef = useRef(runCloudSync);
   runCloudSyncRef.current = runCloudSync;
+
+  const ONE_HOUR_MS = 60 * 60 * 1000;
   useEffect(() => {
     if (!status.calendar_connected || !dbLoaded) return;
+    // Initial sync on mount/connect
     runCloudSyncRef.current();
-    const id = setInterval(() => runCloudSyncRef.current(), 120000);
-    // Returning from Google's consent tab (or the Cloud console) should retry
-    // right away instead of waiting for the next interval.
+    // Check periodically every hour
+    const id = setInterval(() => runCloudSyncRef.current(), ONE_HOUR_MS);
+    // Returning from Google's consent tab or refocusing after an hour
     const onFocus = () => {
       const last = syncStatusRef.current;
-      if (last.state === 'error' || !last.lastSync || Date.now() - last.lastSync > 30000) runCloudSyncRef.current();
+      if (last.state === 'error' || !last.lastSync || Date.now() - last.lastSync > ONE_HOUR_MS) {
+        runCloudSyncRef.current();
+      }
     };
     window.addEventListener('focus', onFocus);
+    window.addEventListener('online', onFocus);
     return () => {
       clearInterval(id);
       window.removeEventListener('focus', onFocus);
+      window.removeEventListener('online', onFocus);
     };
   }, [status.calendar_connected, dbLoaded]);
-  // Upload local edits shortly after they settle.
+
+  // Upload local edits shortly after they settle (presets, cleanName, deviceNames).
+  const isFirstMountRef = useRef(true);
   useEffect(() => {
     if (!dbLoaded) return;
-    const id = setTimeout(() => runCloudSyncRef.current(), 5000);
+    if (isFirstMountRef.current) {
+      isFirstMountRef.current = false;
+      return;
+    }
+    const id = setTimeout(() => runCloudSyncRef.current(), 4000);
     return () => clearTimeout(id);
-  }, [presets, dbLoaded]);
+  }, [presets, cleanName, deviceNames, dbLoaded]);
   // Reflect settings that arrived from another device.
   useEffect(() => {
     const onApplied = (e) => {
@@ -2561,37 +2587,9 @@ export default function App() {
     }
   }, [events, now]);
 
-  // Handle timezone changes or returning to the app after settings changes
-  useEffect(() => {
-    const handleRefresh = () => {
-      const currentTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const savedTz = localStorage.getItem('loy_tz');
-      
-      if (savedTz && currentTz !== savedTz) {
-        console.log(`[app] Timezone changed from ${savedTz} to ${currentTz}. Reloading...`);
-        localStorage.setItem('loy_tz', currentTz);
-        window.location.hash = '#calendar';
-        window.location.reload();
-        return;
-      }
-      
-      console.log("[app] Window focused, syncing events...");
-      setNow(new Date());
-      fetchEvents();
-    };
-
-    // Initialize TZ
-    localStorage.setItem('loy_tz', Intl.DateTimeFormat().resolvedOptions().timeZone);
-
-    window.addEventListener('timezonechange', handleRefresh);
-    window.addEventListener('focus', handleRefresh);
-    return () => {
-      window.removeEventListener('timezonechange', handleRefresh);
-      window.removeEventListener('focus', handleRefresh);
-    };
-  }, []);
-
   const fetchingEventsRef = useRef(false);
+  const fetchEventsRef = useRef();
+
   // When a refresh cannot reach the calendar, keep only events that are still
   // today's, so a page left open overnight never shows a previous day.
   const dropPastDayEvents = (list) => {
@@ -2599,8 +2597,9 @@ export default function App() {
     const today = new Date().toDateString();
     return list.filter(ev => ev?.start_iso && new Date(ev.start_iso).toDateString() === today);
   };
+
   const fetchEvents = async (force = false) => {
-    if (!status?.calendar_connected) {
+    if (!statusRef.current?.calendar_connected) {
       setCalLoading(false);
       setEvents(prev => dropPastDayEvents(prev));
       setInvites(prev => dropPastDayEvents(prev));
@@ -2614,7 +2613,7 @@ export default function App() {
     try {
       const isClean = localStorage.getItem('loy_clean_name') !== 'false';
       const url = `${API_BASE}/calendar/today?clean_name=${isClean}${force ? '&force=true' : ''}`;
-      const res = await axios.get(url, { timeout: 10000 });
+      const res = await axios.get(url, { timeout: 12000 });
       const rawEvs = res.data?.events || [];
       const rawInvites = res.data?.invites || [];
       const evs = rawEvs.map(ev => ({
@@ -2626,15 +2625,77 @@ export default function App() {
       return evs;
     } catch (e) {
       console.warn('[fetchEvents] Error fetching calendar events:', e);
-      const stillToday = dropPastDayEvents(events) || [];
-      setEvents(stillToday);
-      setInvites(prev => dropPastDayEvents(prev));
-      return stillToday;
+      setEvents(prev => dropPastDayEvents(prev) || []);
+      setInvites(prev => dropPastDayEvents(prev) || []);
+      // If network error or timeout occurred (e.g. machine waking from sleep), auto-retry once after 3s
+      if (!force && (e.message?.includes('timeout') || e.message?.includes('Network Error') || (typeof navigator !== 'undefined' && !navigator.onLine))) {
+        setTimeout(() => {
+          if (statusRef.current?.calendar_connected) {
+            fetchEventsRef.current?.(true);
+          }
+        }, 3000);
+      }
+      return [];
     } finally {
       fetchingEventsRef.current = false;
       setCalLoading(false);
     }
   };
+  fetchEventsRef.current = fetchEvents;
+
+  // Day rollover detection: whenever `now` ticks (every 10s), detect if the local calendar day changed
+  const lastCalendarDayRef = useRef(new Date().toDateString());
+  useEffect(() => {
+    const todayStr = now.toDateString();
+    if (lastCalendarDayRef.current !== todayStr) {
+      console.log(`[calendar] Day transition detected: ${lastCalendarDayRef.current} -> ${todayStr}. Updating to new day immediately.`);
+      lastCalendarDayRef.current = todayStr;
+      // Immediately drop yesterday's events so they vanish from the display right away
+      setEvents(prev => dropPastDayEvents(prev));
+      setInvites(prev => dropPastDayEvents(prev));
+      // Fetch fresh events for today immediately
+      fetchEventsRef.current?.(true);
+    }
+  }, [now]);
+
+  // Handle timezone changes, window focus, or online recovery (wake from sleep)
+  useEffect(() => {
+    const handleRefresh = () => {
+      const currentTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const savedTz = localStorage.getItem('loy_tz');
+      
+      if (savedTz && currentTz !== savedTz) {
+        console.log(`[app] Timezone changed from ${savedTz} to ${currentTz}. Reloading...`);
+        localStorage.setItem('loy_tz', currentTz);
+        window.location.hash = '#calendar';
+        window.location.reload();
+        return;
+      }
+      
+      const nowDate = new Date();
+      setNow(nowDate);
+      const todayStr = nowDate.toDateString();
+      if (lastCalendarDayRef.current !== todayStr) {
+        lastCalendarDayRef.current = todayStr;
+        setEvents(prev => dropPastDayEvents(prev));
+        setInvites(prev => dropPastDayEvents(prev));
+      }
+      console.log("[app] Window focused/online, refreshing calendar events...");
+      fetchEventsRef.current?.(true);
+    };
+
+    // Initialize TZ
+    localStorage.setItem('loy_tz', Intl.DateTimeFormat().resolvedOptions().timeZone);
+
+    window.addEventListener('timezonechange', handleRefresh);
+    window.addEventListener('focus', handleRefresh);
+    window.addEventListener('online', handleRefresh);
+    return () => {
+      window.removeEventListener('timezonechange', handleRefresh);
+      window.removeEventListener('focus', handleRefresh);
+      window.removeEventListener('online', handleRefresh);
+    };
+  }, []);
 
   const syncHardwareSlots = async () => {
     const targetMac = status?.address || (activeMac && activeMac !== 'DEFAULT' ? activeMac : '');
@@ -3227,8 +3288,8 @@ export default function App() {
 
   // Regular poll
   useEffect(() => {
-    fetchEvents();
-    const id = setInterval(fetchEvents, 60000); // Check for last-minute additions every minute
+    fetchEventsRef.current?.();
+    const id = setInterval(() => fetchEventsRef.current?.(), 60000); // Check for last-minute additions every minute
     return () => clearInterval(id);
   }, [status.calendar_connected]);
 
@@ -5529,7 +5590,9 @@ function CalendarView({ status, events, invites, loading, fetchEvents, now, onPu
     }
   };
 
-
+  const todayStr = (now || new Date()).toDateString();
+  const todayEvents = (events || []).filter(ev => !ev?.start_iso || new Date(ev.start_iso).toDateString() === todayStr);
+  const todayInvites = (invites || []).filter(inv => !inv?.start_iso || new Date(inv.start_iso).toDateString() === todayStr);
 
   return (
     <div className="flex flex-col items-center py-12 w-full" style={{ maxWidth: 860, margin: '0 auto' }}>
@@ -5723,7 +5786,7 @@ function CalendarView({ status, events, invites, loading, fetchEvents, now, onPu
               </div>
 
               <div className="w-full grid grid-cols-1 gap-3">
-                {invites.map((inv) => (
+                {todayInvites.map((inv) => (
                   <InviteCard
                     key={inv.id}
                     invite={inv}
@@ -5738,18 +5801,18 @@ function CalendarView({ status, events, invites, loading, fetchEvents, now, onPu
             </div>
           )}
 
-          {loading && !events ? (
+          {loading && (!events || todayEvents.length === 0) ? (
             <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
               <RefreshCw size={24} className="animate-spin text-blue-400" style={{ marginBottom: 12 }} />
               <p className="text-slate-400">Loading today's schedule...</p>
             </div>
-          ) : (!events || events.length === 0) ? (
+          ) : todayEvents.length === 0 ? (
             <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
               <p className="text-slate-400">No events scheduled today.</p>
             </div>
           ) : (
             <div className="w-full grid grid-cols-1 gap-4">
-              {events.map((ev, i) => (
+              {todayEvents.map((ev, i) => (
                 <EventCard
                   key={ev.id || i}
                   ev={ev}
