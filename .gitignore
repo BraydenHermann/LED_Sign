@@ -38,6 +38,7 @@ scratch/
 !/launcher_icon.ico
 led-sign-launcher.log
 led-sign-server.log
+*.log
 all_writes.txt
 functions.txt
 8args.txt

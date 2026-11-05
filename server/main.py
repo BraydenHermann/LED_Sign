@@ -7,6 +7,49 @@ platform.system = lambda: "Windows"
 platform.machine = lambda: "AMD64"
 platform._wmi_query = lambda *args, **kwargs: iter([])
 
+_SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SERVER_DIR not in sys.path:
+    sys.path.insert(0, _SERVER_DIR)
+
+class SafeStream:
+    def __init__(self, target, log_path=None):
+        self.target = target
+        self.log_file = None
+        if log_path:
+            try:
+                self.log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+            except Exception:
+                self.log_file = None
+
+    def write(self, s):
+        if self.log_file:
+            try:
+                self.log_file.write(s)
+                self.log_file.flush()
+            except Exception:
+                pass
+        if self.target:
+            try:
+                self.target.write(s)
+            except Exception:
+                pass
+
+    def flush(self):
+        if self.log_file:
+            try:
+                self.log_file.flush()
+            except Exception:
+                pass
+        if self.target:
+            try:
+                self.target.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+_log_file_path = os.path.join(_SERVER_DIR, "server.log")
 try:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
@@ -14,9 +57,9 @@ try:
         sys.stderr.reconfigure(line_buffering=True)
 except Exception:
     pass
-_SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SERVER_DIR not in sys.path:
-    sys.path.insert(0, _SERVER_DIR)
+
+sys.stdout = SafeStream(sys.stdout, _log_file_path)
+sys.stderr = SafeStream(sys.stderr, _log_file_path)
 import io
 import html
 import json as _json
@@ -1987,6 +2030,8 @@ async def _play_preset(id: int, mac: str = ""):
                 await asyncio.sleep(0.05)
 
         return {"status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -2159,7 +2204,14 @@ async def get_today_events(clean_name: bool = True, force: bool = False):
             "invites": schedule.get("invites", [])
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[calendar/today error] {e}")
+        try:
+            cached = calendar_service._schedule_cache.get(clean_name)
+            if cached and isinstance(cached, tuple) and len(cached) > 1:
+                return cached[1]
+        except Exception:
+            pass
+        return {"events": [], "invites": []}
 
 @app.post("/calendar/events/{event_id}/accept")
 @app.post("/calendar/events/{event_id}/respond")

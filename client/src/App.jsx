@@ -1603,13 +1603,13 @@ export const normalizeSavedPresets = (list) => {
 // Previous/next control shared by the Saved and Local preset grids.
 // Left/Right arrow keys page while `keyboard` is on, and holding a dragged
 // preset over an arrow flips the page so it can be dropped on another page.
-function PresetPager({ page, totalPages, onPage, keyboard = true }) {
+function PresetPager({ page, totalPages, onPage, keyboard = true, disabled = false }) {
   const pageRef = useRef(page);
   pageRef.current = page;
   const flipTimerRef = useRef(null);
 
   useEffect(() => {
-    if (!keyboard || totalPages <= 1) return;
+    if (disabled || !keyboard || totalPages <= 1) return;
     const onKey = (e) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.defaultPrevented) return;
@@ -1621,7 +1621,7 @@ function PresetPager({ page, totalPages, onPage, keyboard = true }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [keyboard, totalPages, onPage]);
+  }, [disabled, keyboard, totalPages, onPage]);
 
   useEffect(() => () => clearTimeout(flipTimerRef.current), []);
 
@@ -1676,7 +1676,7 @@ function PresetPager({ page, totalPages, onPage, keyboard = true }) {
   // Flip after a short hover, then keep flipping while the drag stays there.
   const dragFlip = (step) => (e) => {
     e.preventDefault();
-    if (flipTimerRef.current) return;
+    if (disabled || flipTimerRef.current) return;
     const tick = () => {
       const next = pageRef.current + step;
       if (next < 0 || next > totalPages - 1) return stopFlip();
@@ -1688,13 +1688,51 @@ function PresetPager({ page, totalPages, onPage, keyboard = true }) {
   const buttonStyle = { width: 32, height: 32, padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.05)' };
   return (
     <div className="glass-panel w-full" style={{ maxWidth: 1100, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: 6, borderRadius: 16, marginBottom: 16 }}>
-      <button className="btn-styled inactive" style={buttonStyle} onClick={() => onPage(Math.max(0, page - 1))} disabled={page === 0} aria-label="Previous page"
-        onDragOver={dragFlip(-1)} onDragLeave={stopFlip} onDrop={stopFlip}>
+      <button 
+        className="btn-styled inactive" 
+        style={{
+          ...buttonStyle,
+          opacity: (disabled || page === 0) ? 0.4 : 1,
+          cursor: (disabled || page === 0) ? 'not-allowed' : 'pointer',
+          pointerEvents: (disabled || page === 0) ? 'none' : 'auto'
+        }} 
+        onClick={() => !disabled && onPage(Math.max(0, page - 1))} 
+        disabled={disabled || page === 0} 
+        aria-label="Previous page"
+        title={disabled ? "Sign is updating..." : "Previous page"}
+        onDragOver={!disabled ? dragFlip(-1) : undefined} 
+        onDragLeave={stopFlip} 
+        onDrop={stopFlip}
+      >
         <ChevronLeft size={18} />
       </button>
-      <span className="text-xs font-bold text-slate-400">Page {page + 1} of {totalPages}</span>
-      <button className="btn-styled inactive" style={buttonStyle} onClick={() => onPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} aria-label="Next page"
-        onDragOver={dragFlip(1)} onDragLeave={stopFlip} onDrop={stopFlip}>
+      <span 
+        className="text-xs font-bold text-slate-400"
+        style={{
+          opacity: disabled ? 0.4 : 1,
+          cursor: 'default',
+          userSelect: 'none',
+          transition: 'opacity 0.15s ease'
+        }}
+      >
+        Page {page + 1} of {totalPages}
+      </span>
+      <button 
+        className="btn-styled inactive" 
+        style={{
+          ...buttonStyle,
+          opacity: (disabled || page >= totalPages - 1) ? 0.4 : 1,
+          cursor: (disabled || page >= totalPages - 1) ? 'not-allowed' : 'pointer',
+          pointerEvents: (disabled || page >= totalPages - 1) ? 'none' : 'auto'
+        }} 
+        onClick={() => !disabled && onPage(Math.min(totalPages - 1, page + 1))} 
+        disabled={disabled || page >= totalPages - 1} 
+        aria-label="Next page"
+        title={disabled ? "Sign is updating..." : "Next page"}
+        onDragOver={!disabled ? dragFlip(1) : undefined} 
+        onDragLeave={stopFlip} 
+        onDrop={stopFlip}
+      >
         <ChevronRight size={18} />
       </button>
     </div>
@@ -2913,11 +2951,11 @@ export default function App() {
       if (events) {
         const nextEvent = selectCalendarEvent(events, now);
         const nextEventId = nextEvent ? `${nextEvent.id}-${nextEvent.start_iso}` : null;
-        if (lastActiveEventIdRef.current && nextEventId !== lastActiveEventIdRef.current) {
-          console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current} -> ${nextEventId || 'none'}. Clearing manual override.`);
+        if (nextEventId !== lastActiveEventIdRef.current) {
+          console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current || 'none'} -> ${nextEventId || 'none'}. Clearing manual override.`);
           setIsManualOverride(false);
+          lastActiveEventIdRef.current = nextEventId;
         }
-        lastActiveEventIdRef.current = nextEventId;
       }
     } catch (err) {
       console.error("[auto-push] Error during transition check:", err);
@@ -2976,7 +3014,20 @@ export default function App() {
           if (isCalSynced && currentSlot1Text && currentSlot1Text === targetCleanText) {
             console.log("[auto-push] Slot 1 already has event text, playing slot 0 directly:", targetCleanText);
             setLastPushedId(targetId);
-            axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`).catch(() => {});
+            setPushing(true);
+            handleSetPushMessage('Playing from Slot 1...');
+            axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`)
+              .then(() => {
+                handleSetPushMessage('Pushed Slot 1 to sign!');
+                if (typeof fetchStatus === 'function') fetchStatus();
+              })
+              .catch((err) => {
+                console.warn('[auto-push] Failed to play slot 0:', err);
+                handleSetPushMessage(`Error playing Slot 1: ${err.message}`);
+              })
+              .finally(() => {
+                setPushing(false);
+              });
             return;
           }
 
@@ -3046,6 +3097,7 @@ export default function App() {
 
   // Auto-pre-save the next calendar event to hardware Slot 1 (slot_id: 0) without displaying it
   const preSavingSlot1Ref = useRef(false);
+  const preSaveSlot1FailedRef = useRef({ text: '', time: 0 });
   useEffect(() => {
     if (!status?.connected || !dbLoaded || isSignUpdating || pushingRef.current || initializingConnectionRef.current ||
         !initializedConnectionMacsRef.current.has(status.address?.toUpperCase())) return;
@@ -3075,9 +3127,16 @@ export default function App() {
       return;
     }
 
+    // Cooldown on failure: do not hammer the sign; wait 60s before retrying the same event
+    if (preSaveSlot1FailedRef.current.text === nextCleanText && Date.now() - preSaveSlot1FailedRef.current.time < 60000) {
+      return;
+    }
+
     const preSave = async () => {
-      if (preSavingSlot1Ref.current || pushingRef.current || isSignUpdating) return;
+      if (preSavingSlot1Ref.current || pushingRef.current || isSignUpdatingRef.current || !statusRef.current?.connected) return;
       preSavingSlot1Ref.current = true;
+      setPushing(true);
+      handleSetPushMessage('Saving event to Slot 1...');
       try {
         const isShowingSlot1 = (lastPushedId === 'hw-slot-0') ||
           String(lastPushedId || '').startsWith('event-');
@@ -3121,6 +3180,8 @@ export default function App() {
 
         localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         localStorage.setItem('loy_hw_cal_text_' + targetMac, nextCleanText);
+        preSaveSlot1FailedRef.current = { text: '', time: 0 };
+        handleSetPushMessage('Saved to Slot 1!');
 
         if (isShowingSlot1) {
           console.log("[auto-pre-save] Was showing slot 1; blanking screen to black");
@@ -3129,13 +3190,17 @@ export default function App() {
         }
       } catch (err) {
         console.warn('[auto-pre-save] Failed to pre-save next event to Slot 1:', err);
+        const detail = err.response?.data?.detail || err.message || 'Failed to save to Slot 1';
+        handleSetPushMessage(`Error saving to Slot 1: ${detail}`);
+        preSaveSlot1FailedRef.current = { text: nextCleanText, time: Date.now() };
       } finally {
+        setPushing(false);
         preSavingSlot1Ref.current = false;
       }
     };
 
     preSave();
-  }, [events, now, status?.connected, status?.address, dbLoaded, isSignUpdating]);
+  }, [events, now, status?.connected, status?.address, dbLoaded]);
 
   // Sync on connection
   useEffect(() => {
@@ -3149,7 +3214,31 @@ export default function App() {
       const priorManualOverride = isManualOverrideRef.current;
 
       const pushDefaultOrActive = async () => {
-        // 1. Check if hardware slot 1 (Default Preset, slot 2 in UI) is synced to this sign's hardware
+        // 1. Calendar Slot (hardware slot 0, slot 1 in UI) - check first so active event shows immediately
+        let evs = events;
+        if (!evs || evs.length === 0) {
+          try {
+            evs = await fetchEvents();
+          } catch (e) {}
+        }
+
+        const active = selectCalendarEvent(evs || [], new Date());
+        if (active) {
+          lastActiveEventIdRef.current = `${active.id}-${active.start_iso}`;
+          setIsManualOverride(false);
+          const activeStr = getEventDisplayString(active);
+          const targetEventId = `event-${active.id}-${activeStr}`;
+          if (isEventAlreadyLastPushed(activeStr, targetMac, priorLastPushedId, targetEventId)) {
+            console.log("[connect] Active event was already the last preset pushed; skipping re-send:", active.summary);
+            setLastPushedId(targetEventId);
+          } else {
+            console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
+            await handlePush(activeStr, false, false, targetEventId);
+            localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
+          }
+        }
+
+        // 2. Check if hardware slot 1 (Default Preset, slot 2 in UI) is synced to this sign's hardware
         const def = presets.find(p => p.isDefault);
         const isDefaultSynced = localStorage.getItem('loy_hw_default_synced_' + targetMac);
         let defaultJustSavedToSign = false;
@@ -3191,32 +3280,7 @@ export default function App() {
           await syncHardwareSlots();
         }
 
-        // 2. Calendar Slot (hardware slot 0, slot 1 in UI)
-        let evs = events;
-        if (!evs || evs.length === 0) {
-          try {
-            evs = await fetchEvents();
-          } catch (e) {}
-        }
-
-        const active = selectCalendarEvent(evs || [], new Date());
-        if (active) {
-          lastActiveEventIdRef.current = `${active.id}-${active.start_iso}`;
-        }
-
-        if (active && !priorManualOverride) {
-          setIsManualOverride(false);
-          const activeStr = getEventDisplayString(active);
-          const targetEventId = `event-${active.id}-${activeStr}`;
-          if (!defaultJustSavedToSign && isEventAlreadyLastPushed(activeStr, targetMac, priorLastPushedId, targetEventId)) {
-            console.log("[connect] Active event was already the last preset pushed; skipping re-send:", active.summary);
-            setLastPushedId(targetEventId);
-          } else {
-            console.log("[connect] Pushing active event on connect to slot 0:", active.summary);
-            await handlePush(activeStr, false, false, targetEventId);
-            localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
-          }
-        } else {
+        if (!active) {
           // Calendar slot 0 is sign-specific. Without an active event, never
           // seed it from another sign's cached calendar preset.
           const savedLastPushedId = priorLastPushedId;
@@ -3352,19 +3416,17 @@ export default function App() {
     }
 
     if (!skipMessages) {
-      if (manual) {
-        if (isEvent) {
-          const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
-          const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
-          const targetEventText = (data.text || data.name || pushName || '').trim();
-          if (currentSlot1Text && currentSlot1Text === targetEventText) {
-            handleSetPushMessage('Playing from Slot 1...');
-          } else {
-            handleSetPushMessage('Saving event to Slot 1...');
-          }
+      if (isEvent) {
+        const currentSlot1Preset = savedPresetsRef.current?.[0]?.preset || savedPresets[0]?.preset;
+        const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
+        const targetEventText = (data.text || data.name || pushName || '').trim();
+        if (currentSlot1Text && currentSlot1Text === targetEventText) {
+          handleSetPushMessage('Playing from Slot 1...');
         } else {
-          handleSetLocalPushMessage(`Pushing "${pushName}" to sign...`);
+          handleSetPushMessage('Saving event to Slot 1...');
         }
+      } else if (manual) {
+        handleSetLocalPushMessage(`Pushing "${pushName}" to sign...`);
       } else {
         handleSetLocalPushMessage('');
       }
@@ -3432,13 +3494,13 @@ export default function App() {
           if (isCalSynced && currentSlot1Text && currentSlot1Text === targetEventText) {
             try {
               console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
-              if (manual && !skipMessages) {
+              if (!skipMessages) {
                 handleSetPushMessage('Playing from Slot 1...');
               }
               await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
               setLastPushedId(autoTargetId || 'hw-slot-0');
               await fetchStatus();
-              if (manual && !skipMessages) {
+              if (!skipMessages) {
                 handleSetPushMessage('Pushed Slot 1 to sign!');
               }
               return;
@@ -3641,6 +3703,7 @@ export default function App() {
             presetView={presetView}
             setPresetView={setPresetView}
             isConnecting={isSignConnecting}
+            isSignUpdating={isSignUpdating}
           />
         </div>
         <div className="right-column">
@@ -4198,8 +4261,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       });
     }
     setPushing(true);
+    const isSlot1 = (globalIdx === 0 || hwSlotId === 0);
     const displayName = preset.name || (preset.mode === 'clock' ? 'Clock' : `slot ${globalIdx + 1}`);
-    setPushMessage(`Pushing "${displayName}" to sign...`);
+    setPushMessage(isSlot1 ? 'Playing from Slot 1...' : `Pushing "${displayName}" to sign...`);
     setIsManualOverride(true);
 
     try {
@@ -4207,11 +4271,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         // Notify server to switch active hardware preset slot and update live preview
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof fetchStatus === 'function') await fetchStatus();
-        setPushMessage(`Pushed "${displayName}" to sign!`);
+        setPushMessage(isSlot1 ? 'Pushed Slot 1 to sign!' : `Pushed "${displayName}" to sign!`);
         setLastPushedId(`hw-slot-${hwSlotId}`);
       } else {
         await onPush(preset, true, true);
-        setPushMessage(`Pushed "${displayName}" to sign!`);
+        setPushMessage(isSlot1 ? 'Pushed Slot 1 to sign!' : `Pushed "${displayName}" to sign!`);
         setLastPushedId(preset.id || `hw-slot-${hwSlotId}`);
       }
     } catch (err) {
@@ -4899,7 +4963,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   role="status"
                   className="text-xs font-bold"
                   style={{
-                    color: isAssignmentReminder || pushMessage.startsWith('Error') || pushMessage.toLowerCase().includes('cancel') ? '#f87171' : (/^(Saved|Pushed|Assigned|Deleted)\b/.test(pushMessage) ? '#34d399' : '#38bdf8'),
+                    color: isAssignmentReminder || pushMessage.startsWith('Error') || pushMessage.toLowerCase().includes('cancel') ? '#f87171' : (/^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage) ? '#34d399' : '#38bdf8'),
                     display: 'inline-flex', alignItems: 'center', gap: 6,
                     marginLeft: 16, flex: '0 0 auto', whiteSpace: 'nowrap'
                   }}
@@ -4907,8 +4971,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     e.stopPropagation();
                   }}
                 >
-                  {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && !/^(Saved|Pushed|Assigned|Deleted|Cleared)\b/.test(pushMessage) && <RefreshCw size={12} className="animate-spin" aria-label="Saving" />}
-                  {(!pushing || /^(Saved|Pushed|Assigned|Deleted|Cleared)\b/.test(pushMessage)) && /^(Saved|Pushed|Assigned|Deleted|Cleared)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400" />}
+                  {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && !/^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage) && <RefreshCw size={12} className="animate-spin" aria-label="Saving" />}
+                  {(!pushing || /^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage)) && /^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400" />}
                   {!pushing && pushMessage.toLowerCase().includes('cancel') && <X size={12} className="text-red-400" />}
                   <span>{pushMessage}</span>
                   {pushing && slotSaveProgress !== null && (
@@ -4965,13 +5029,13 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             </div>
             <div role="tablist" aria-label="Preset source" onPointerDown={(e) => e.stopPropagation()} style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 12, background: 'rgba(255,255,255,0.05)' }}>
               <div
-                title={isConnecting ? "Sign is connecting..." : (!status.connected ? 'Connect to a sign to view saved presets' : (isSignUpdating && presetView !== 'saved' ? 'Sign is updating...' : 'View saved sign presets'))}
-                style={{ display: 'inline-flex', cursor: (status.connected && !isConnecting && (presetView === 'saved' || !isSignUpdating)) ? 'default' : 'not-allowed' }}
+                title={isConnecting ? "Sign is connecting..." : (!status.connected ? 'Connect to a sign to view saved presets' : (isSignUpdating ? 'Sign is updating...' : 'View saved sign presets'))}
+                style={{ display: 'inline-flex', cursor: (status.connected && !isConnecting && !isSignUpdating) ? 'default' : 'not-allowed' }}
               >
                 <button
                   role="tab"
                   aria-selected={presetView === 'saved'}
-                  disabled={!status.connected || isConnecting || (isSignUpdating && presetView !== 'saved')}
+                  disabled={!status.connected || isConnecting || isSignUpdating}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => status.connected && !isSignUpdating && !isConnecting && setPresetView('saved')}
                   className={`btn-styled ${presetView === 'saved' && status.connected ? '' : 'inactive'}`}
@@ -4979,12 +5043,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                     height: 34, 
                     padding: '0 14px', 
                     fontSize: 14, 
-                    opacity: (status.connected && !isConnecting && (presetView === 'saved' || !isSignUpdating)) ? 1 : 0.4, 
-                    cursor: (status.connected && !isConnecting && (presetView === 'saved' || !isSignUpdating)) ? 'pointer' : 'not-allowed', 
+                    opacity: (status.connected && !isConnecting && !isSignUpdating) ? 1 : 0.4, 
+                    cursor: (status.connected && !isConnecting && !isSignUpdating) ? 'pointer' : 'not-allowed', 
                     display: 'inline-flex', 
                     alignItems: 'center', 
                     gap: 6,
-                    pointerEvents: (!status.connected || isConnecting || (isSignUpdating && presetView !== 'saved')) ? 'none' : 'auto'
+                    pointerEvents: (!status.connected || isConnecting || isSignUpdating) ? 'none' : 'auto'
                   }}
                 >
                   <Save size={14} />
@@ -5024,6 +5088,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               totalPages={totalSavedPages}
               onPage={setSavedPage}
               keyboard={assigningSlotIndex === null && !isModalOpen && !scanOpen && !passcodeTarget}
+              disabled={isSignUpdating}
             />
             <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100 }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '24px', width: '100%' }}>
@@ -5104,14 +5169,20 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                           ) : (
                             <div className="preset-card-overlay flex gap-2">
                               <button
+                                disabled={isSignUpdating}
                                 onPointerDown={(e) => e.stopPropagation()}
                                 onPointerUp={(e) => e.stopPropagation()}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setAssigningSlotIndex(globalIdx);
+                                  if (!isSignUpdating) setAssigningSlotIndex(globalIdx);
                                 }}
                                 className="btn-styled preset-card-edit-btn"
-                                title="Assign Preset"
+                                title={isSignUpdating ? "Sign is updating..." : "Assign Preset"}
+                                style={{
+                                  opacity: isSignUpdating ? 0.4 : 1,
+                                  cursor: isSignUpdating ? 'not-allowed' : 'pointer',
+                                  pointerEvents: isSignUpdating ? 'none' : 'auto'
+                                }}
                               >
                                 <Plus size={14} className="mr-2" /> Assign
                               </button>
@@ -5210,14 +5281,20 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         >
                           {!isReserved && (
                             <button
+                              disabled={isSignUpdating}
                               onPointerDown={(e) => e.stopPropagation()}
                               onPointerUp={(e) => e.stopPropagation()}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setAssigningSlotIndex(globalIdx);
+                                if (!isSignUpdating) setAssigningSlotIndex(globalIdx);
                               }}
                               className="btn-styled preset-card-edit-btn"
-                              title="Update Preset"
+                              title={isSignUpdating ? "Sign is updating..." : "Update Preset"}
+                              style={{
+                                opacity: isSignUpdating ? 0.4 : 1,
+                                cursor: isSignUpdating ? 'not-allowed' : 'pointer',
+                                pointerEvents: isSignUpdating ? 'none' : 'auto'
+                              }}
                             >
                               <RefreshCw size={14} className="mr-2" /> Update
                             </button>
@@ -6491,7 +6568,7 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, setSlotSaveProgress, setSlotSavePhase }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, setSlotSaveProgress, setSlotSavePhase, isSignUpdating }) {
   const fontReady = useFontReady();
   const [localPage, setLocalPage] = useState(0);
   // A card dragged to another page unmounts, so its own dragend never fires.
@@ -7837,6 +7914,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   };
 
   const startEdit = (p, e) => {
+    if (isSignUpdating) return;
     setSaveError('');
     if (e) e.stopPropagation();
     editingModeRef.current = p.mode;
@@ -8014,6 +8092,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           totalPages={totalLocalPages}
           onPage={setLocalPage}
           keyboard={!isModalOpen}
+          disabled={isSignUpdating}
         />
         <div className="glass-panel p-10 w-full" style={{ maxWidth: 1100, marginTop: 0 }}>
           <div style={{ 
@@ -8027,9 +8106,13 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               draggable={false}
               onDragStart={(e) => e.preventDefault()}
               style={{
-                cursor: 'pointer'
+                cursor: isSignUpdating ? 'not-allowed' : 'pointer',
+                opacity: isSignUpdating ? 0.4 : 1,
+                pointerEvents: isSignUpdating ? 'none' : 'auto'
               }}
+              title={isSignUpdating ? "Sign is updating..." : "Create Preset"}
               onClick={() => {
+                if (isSignUpdating) return;
                 editingModeRef.current = 'text'; setEditingId(null);
                 imageObjRef.current = null;
                 const initialForm = {
@@ -8063,15 +8146,15 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
               <div 
                 key={p.id} 
                 className={`preset-card relative group overflow-hidden transition-all ${p.isDefault ? 'preset-card-reserved' : ''} ${p.id === dragOverId ? 'preset-card-drag-target' : ''}`}
-                draggable={!p.isDefault}
+                draggable={!p.isDefault && !isSignUpdating}
                 onDragStart={(e) => handleDragStart(e, p.id)}
                 onDragOver={(e) => handleDragOver(e, p.id)}
                 onDrop={(e) => handleDrop(e, p.id)}
                 onDragEnd={handleDragEnd}
                 style={{
                   '--reserved-color': '#facc15',
-                  cursor: isThisPresetPushing ? 'wait' : (p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'pointer')),
-                  opacity: p.id === draggedId ? 0.4 : (isConnecting ? 1 : (pushing && !isThisPresetPushing ? 0.8 : 1)),
+                  cursor: isSignUpdating ? 'not-allowed' : (isThisPresetPushing ? 'wait' : (p.isDefault ? 'default' : (canPushDirectly ? 'grab' : 'pointer'))),
+                  opacity: p.id === draggedId ? 0.4 : (isConnecting ? 1 : (isSignUpdating && !isThisPresetPushing ? 0.6 : (pushing && !isThisPresetPushing ? 0.8 : 1))),
                   transform: p.id === draggedId ? 'scale(0.98)' : 'none',
                   boxShadow: p.id === dragOverId ? 'var(--neon-shadow)' : 'none',
                   transition: 'all 0.15s ease',
@@ -8083,7 +8166,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     setLocalPushMessage('Sign is currently connecting. Please wait...');
                     return;
                   }
-                  if (pushing) {
+                  if (pushing || isSignUpdating) {
                     setLocalPushMessage('Sign is currently updating. Please wait...');
                     return;
                   }
@@ -8128,11 +8211,20 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 ) : (
                   <div className="preset-card-overlay flex gap-2">
                     <button
+                      disabled={isSignUpdating}
                       onPointerDown={(e) => e.stopPropagation()}
                       onPointerUp={(e) => e.stopPropagation()}
-                      onClick={(e) => { e.stopPropagation(); startEdit(p, e); }}
+                      onClick={(e) => { 
+                        e.stopPropagation(); 
+                        if (!isSignUpdating) startEdit(p, e); 
+                      }}
                       className="btn-styled preset-card-edit-btn"
-                      title="Edit Preset"
+                      title={isSignUpdating ? "Sign is updating..." : "Edit Preset"}
+                      style={{
+                        opacity: isSignUpdating ? 0.4 : 1,
+                        cursor: isSignUpdating ? 'not-allowed' : 'pointer',
+                        pointerEvents: isSignUpdating ? 'none' : 'auto'
+                      }}
                     >
                       <Pencil size={14} className="mr-2" /> Edit
                     </button>
