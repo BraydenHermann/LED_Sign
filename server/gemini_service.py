@@ -597,6 +597,7 @@ Return ONLY executable Python code inside a ```python ``` block.
             f"Task: Generate Python Pillow script that creates a 64x20 PNG image for: '{prompt}'.{att_guidance}{followup_guidance}\n"
             "- In PIL (Pillow), use draw.point((x, y), fill=...) or image.putpixel((x, y), color) for individual pixels.\n"
             "- Output: Save directly to OUTPUT_PATH.\n"
+            "- Do NOT import any packages other than PIL (Image, ImageDraw, ImageColor, ImageFilter, ImageFont), math, random, colorsys, itertools, and time.\n"
             "Output ONLY executable Python code inside a ```python ``` block."
         )
 
@@ -609,11 +610,13 @@ Return ONLY executable Python code inside a ```python ``` block.
         }
         res = None
         last_err = None
+        working_url = ""
         for m in models_to_try:
             gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
             try:
                 res = _call_gemini_rest(gemini_url, gen_payload, api_key=api_key, timeout=40)
                 if res and res.get("candidates"):
+                    working_url = gemini_url
                     break
             except Exception as e:
                 last_err = e
@@ -626,7 +629,9 @@ Return ONLY executable Python code inside a ```python ``` block.
             raise RuntimeError("Gemini did not return any candidates.")
 
         text_reply = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-        image_bytes = _execute_pillow_script(text_reply, output_type="png", media_info=media_info)
+        image_bytes = _execute_generated_with_repair(
+            text_reply, prompt, working_url or gemini_url, api_key, output_type="png", media_info=media_info
+        )
         generated_code = getattr(image_bytes, "script", text_reply)
 
     pil_img = Image.open(io.BytesIO(image_bytes))
@@ -804,18 +809,19 @@ def _execute_generated_with_repair(
 ) -> GeneratedBytes:
     """Give Gemini two chances to repair its own invalid Pillow script."""
     current_text = script_text
+    media_label = "image" if output_type == "png" else "animation"
     for attempt in range(3):
         try:
             return _execute_pillow_script(current_text, output_type=output_type, media_info=media_info)
         except RuntimeError as error:
             if attempt == 2:
-                raise RuntimeError("Gemini returned invalid animation code after two automatic repair attempts.") from error
+                raise RuntimeError(f"Gemini returned invalid {media_label} code after two automatic repair attempts.") from error
             repair_prompt = (
-                f"Repair this complete Python Pillow script for a 64x20 {output_type.upper()} animation. "
+                f"Repair this complete Python Pillow script for a 64x20 {output_type.upper()} {media_label}. "
                 f"The latest user request is: {prompt!r}. Corrections in that request override any "
                 "earlier image or prompt; do not add objects the user rejected. "
                 f"Execution failed with: {str(error)[:400]}. "
-                "Keep the original intended animation, use only PIL/math/random/colorsys/itertools/time, "
+                f"Keep the original intended {media_label}, use only PIL/math/random/colorsys/itertools/time, "
                 "save the result to OUTPUT_PATH, and return only a complete executable ```python code block.\n\n"
                 f"Previous response:\n{current_text}"
             )
@@ -828,8 +834,8 @@ def _execute_generated_with_repair(
             candidates = repaired.get("candidates", [])
             current_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "") if candidates else ""
             if not current_text.strip():
-                raise RuntimeError("Gemini could not repair its generated animation code.") from error
-    raise RuntimeError("Gemini did not produce an animation.")
+                raise RuntimeError(f"Gemini could not repair its generated {media_label} code.") from error
+    raise RuntimeError(f"Gemini did not produce an {media_label}.")
 
 
 def _execute_pillow_script(
@@ -929,10 +935,42 @@ def _execute_pillow_script(
 
         safe_time = _SafeTime(time)
 
+        # Safe os / os.path shim allowing read-only path resolution without system access
+        class _SafeOsPath:
+            exists = staticmethod(os.path.exists)
+            isfile = staticmethod(os.path.isfile)
+            isdir = staticmethod(os.path.isdir)
+            join = staticmethod(os.path.join)
+            basename = staticmethod(os.path.basename)
+            dirname = staticmethod(os.path.dirname)
+            splitext = staticmethod(os.path.splitext)
+            split = staticmethod(os.path.split)
+            isabs = staticmethod(os.path.isabs)
+            normpath = staticmethod(os.path.normpath)
+            abspath = staticmethod(os.path.abspath)
+
+        class _SafeOs:
+            path = _SafeOsPath()
+            sep = os.sep
+            linesep = os.linesep
+            def getenv(self, key, default=None):
+                return default
+            def __getattr__(self, name):
+                if name == "path":
+                    return self.path
+                raise AttributeError(f"Module 'os' has no permitted attribute '{name}' in this sandbox.")
+
+        safe_os = _SafeOs()
+        safe_os_path = _SafeOsPath()
+
         def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
             base_mod = name.split(".")[0]
             if base_mod == "time":
                 return safe_time
+            if base_mod == "os":
+                if name == "os.path":
+                    return safe_os_path
+                return safe_os
             if base_mod in ("math", "random", "colorsys", "PIL", "itertools"):
                 return __import__(name, globals, locals, fromlist, level)
             raise ImportError(f"Importing '{name}' is not permitted.")
@@ -974,6 +1012,7 @@ def _execute_pillow_script(
             "INPUT_GIF_PATH": input_gif_path,
             "INPUT_IMAGE_PATH": input_image_path,
             "INPUT_FRAMES": input_frames,
+            "os": safe_os,
             "math": math,
             "random": random,
             "colorsys": colorsys,
@@ -1003,7 +1042,8 @@ def _execute_pillow_script(
         try:
             exec(code, exec_globals)
         except Exception as e:
-            raise RuntimeError(f"Failed to execute generated animation code: {e}")
+            media_label = "image" if output_type == "png" else "animation"
+            raise RuntimeError(f"Failed to execute generated {media_label} code: {e}")
         finally:
             Image.Image.save = original_save
 

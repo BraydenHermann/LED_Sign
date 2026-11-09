@@ -2,11 +2,146 @@ import React, { useState, useRef, useEffect, useImperativeHandle } from 'react';
 import { 
   Paperclip, Film, Image as ImageIcon, Upload, X, 
   RefreshCw, AlertCircle, Layers, ChevronDown, KeyRound,
-  Copy, Check
+  Copy, Check, Clock, ExternalLink
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { generateAiMedia, getAiProviders } from './serverApi';
 import { SYNC_APPLIED_EVENT } from './cloudSync';
+
+
+// Formats raw API error responses into clean, human-readable explanations
+export function formatAiError(rawError) {
+  if (!rawError) return null;
+  const str = String(rawError);
+
+  // 1. Quota / Rate limit error (429)
+  if (str.includes('429') || str.toLowerCase().includes('quota exceeded') || str.toLowerCase().includes('rate limit')) {
+    let retryMsg = '';
+    const retryMatch = str.match(/retry in\s+([0-9a-zA-Z\.\s]+)/i);
+    if (retryMatch) {
+      const rawTime = retryMatch[1].trim();
+      const hMatch = rawTime.match(/(\d+)h/);
+      const mMatch = rawTime.match(/(\d+)m/);
+      const sMatch = rawTime.match(/(\d+)(?:\.\d+)?s/);
+      const parts = [];
+      if (hMatch) parts.push(`${hMatch[1]}h`);
+      if (mMatch) parts.push(`${mMatch[1]}m`);
+      if (!hMatch && !mMatch && sMatch) parts.push(`${sMatch[1]}s`);
+      retryMsg = parts.length > 0 ? parts.join(' ') : rawTime.split('.')[0];
+    }
+
+    const isFreeTier = str.toLowerCase().includes('free tier') || str.toLowerCase().includes('free_tier');
+
+    return {
+      title: 'API Quota Exceeded (429)',
+      summary: isFreeTier 
+        ? "You've exceeded Google AI Studio's Free Tier daily request limit."
+        : "You've exceeded your API rate limit / request quota.",
+      hint: isFreeTier
+        ? "Google One / Gemini Pro subscriptions for gemini.google.com do not apply to API keys. To enable unlimited requests, link billing in Google AI Studio or try again later."
+        : "Check your plan and billing details in your API provider dashboard.",
+      retryIn: retryMsg,
+      link: 'https://aistudio.google.com/',
+      linkLabel: 'Open Google AI Studio',
+      raw: str
+    };
+  }
+
+  // 2. High demand / 503 / 500 server overload
+  if (str.includes('503') || str.toLowerCase().includes('high demand') || str.toLowerCase().includes('overloaded')) {
+    return {
+      title: 'Model Temporarily Busy (503)',
+      summary: 'Google servers are currently experiencing high demand for this model.',
+      hint: 'Spikes in demand are temporary. Please try again in a few moments, or switch models.',
+      raw: str
+    };
+  }
+
+  // 3. Invalid API key / Auth (401 / 403)
+  if (str.includes('401') || str.includes('403') || str.toLowerCase().includes('api key not valid') || str.toLowerCase().includes('permission denied')) {
+    return {
+      title: 'Invalid or Unauthorized API Key',
+      summary: 'Authentication failed for the configured API key.',
+      hint: 'Please check your API key in the dropdown settings or in server/.env.',
+      raw: str
+    };
+  }
+
+  // 4. Code execution errors
+  if (str.toLowerCase().includes('failed to execute generated')) {
+    const cleanMsg = str.replace(/Failed to execute generated (?:image|animation)?\s*code:\s*/i, '');
+    return {
+      title: 'Generated Code Execution Failed',
+      summary: cleanMsg,
+      hint: 'The AI generated Python Pillow code that encountered an error. Click Generate again or rephrase your prompt.',
+      raw: str
+    };
+  }
+
+  // Fallback for generic errors
+  return {
+    title: 'Generation Failed',
+    summary: str.length > 250 ? str.slice(0, 250) + '...' : str,
+    raw: str
+  };
+}
+
+// Builds complete LED hardware context and prompt specs for pasting into web chats
+export function buildAiExportContext({ prompt, mediaType = 'gif', attachments = [] }) {
+  const isGif = mediaType === 'gif';
+  const hasAttachments = attachments && attachments.length > 0;
+
+  const header = `You are an expert digital artist and animator creating pixel assets for a physical 64x20 RGB LED matrix display sign.`;
+  
+  const specs = [
+    `HARDWARE SPECIFICATIONS & CONSTRAINTS:`,
+    `- Screen Resolution: EXACTLY 64 pixels wide by 20 pixels high (16:5 / 3.2:1 horizontal panoramic banner).`,
+    `- Background: Pure solid black (#000000). On physical LEDs, black turns off the diodes completely for maximum contrast.`,
+    `- Visual Style: Retro pixel art, 8-bit / 16-bit arcade aesthetics, high-contrast, vibrant neon colors (cyan, magenta, yellow, orange, red, white).`,
+    `- Sizing / Legibility Rules (Physical display is only 20 pixels tall!):`,
+    `  * Render ONLY ONE single horizontal line of large text (12-16px) per screen/frame.`,
+    `  * NEVER stack 2 lines of text vertically (letters would be crushed to 5-7px and unreadable).`,
+    `  * No top or bottom border bars that squeeze text height.`
+  ];
+
+  let mediaSpecs = [];
+  if (isGif) {
+    mediaSpecs = [
+      `ANIMATION / GIF SPECIFICATIONS:`,
+      `- Resolution: 64x20 pixels`,
+      `- Frame Count: 24 to 32 frames (optimal is 26 frames).`,
+      `- Frame Duration: 75ms to 90ms (recommended 80ms / ~12.5 fps).`,
+      `- Loop: Seamless infinite loop where the last frame naturally loops back to frame 0.`,
+      `- Code format: Return a complete, self-contained Python Pillow (PIL) script that saves to OUTPUT_PATH:`,
+      `  frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80, loop=0)`
+    ];
+  } else {
+    mediaSpecs = [
+      `STILL IMAGE SPECIFICATIONS:`,
+      `- Resolution: 64x20 pixels PNG image.`,
+      `- High-contrast pixel art style, horizontal composition, pure black background (#000000).`,
+      `- Code format: Return a complete Python Pillow (PIL) script that draws the 64x20 image and saves directly to OUTPUT_PATH.`
+    ];
+  }
+
+  const userReq = [
+    `USER PROMPT:`,
+    `"${prompt ? prompt.trim() : 'Pixel art graphic'}"`
+  ];
+
+  const attachmentNote = hasAttachments ? [
+    `ATTACHED REFERENCE:`,
+    `- User attached ${attachments.length} reference file(s) from the app (e.g. ${attachments.map(a => a.name || 'reference').join(', ')}).`,
+    `- (If pasting into Gemini or ChatGPT with vision, attach the reference image you copied with 'Copy Canvas' or uploaded).`
+  ] : [];
+
+  const outputFormat = [
+    `OUTPUT REQUIREMENT:`,
+    `Provide a complete, self-contained Python script using PIL (Image, ImageDraw) and math/random that renders this 64x20 ${isGif ? 'animated GIF' : 'PNG image'} and saves to OUTPUT_PATH. Wrap the code in a single \`\`\`python ... \`\`\` block.`
+  ];
+
+  return [header, '', ...specs, '', ...mediaSpecs, '', ...userReq, ...(attachmentNote.length ? ['', ...attachmentNote] : []), '', ...outputFormat].join('\n');
+}
 
 // Brand colors
 const GEMINI_GRADIENT = 'linear-gradient(to right, #4796E3 0%, #9177C7 50%, #CA6673 100%)';
@@ -125,6 +260,37 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
   const [attachments, setAttachments] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState('');
+  const [copiedContext, setCopiedContext] = useState(false);
+  const [showRawError, setShowRawError] = useState(false);
+
+  const handleCopyAiContext = async () => {
+    try {
+      const contextText = buildAiExportContext({
+        prompt: prompt.trim(),
+        mediaType,
+        attachments,
+        provider,
+        model: isGemini ? geminiModel : openaiModel
+      });
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(contextText);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = contextText;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      setCopiedContext(true);
+      setTimeout(() => setCopiedContext(false), 2500);
+      onNotify?.('Copied LED sign prompt & specs to clipboard!');
+    } catch (err) {
+      console.error('Failed to copy AI context:', err);
+    }
+  };
   const [showKeys, setShowKeys] = useState(false);
   const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('led_gemini_api_key') || '');
   const [openaiKey, setOpenaiKey] = useState(() => localStorage.getItem('led_openai_api_key') || '');
@@ -1075,8 +1241,8 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
               ))}
             </div>
 
-            {/* Action Buttons Right-Aligned: Attach File & Copy Canvas follow agent branding */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
+            {/* Action Buttons Right-Aligned: Attach File, Copy Canvas & Copy Context */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '6px', marginTop: '2px', paddingRight: '4px', boxSizing: 'border-box', flexWrap: 'wrap' }}>
               <input
                 type="file"
                 ref={fileInputRef}
@@ -1091,29 +1257,37 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="btn-styled text-[10px] px-3 py-1.5 flex items-center gap-1.5"
+                className="btn-styled text-[10px] flex items-center gap-1"
                 style={{ 
-                  borderRadius: '10px',
+                  height: '24px',
+                  padding: '0 8px',
+                  borderRadius: '8px',
                   background: activeBrandBg,
                   backgroundRepeat: 'no-repeat',
                   backgroundClip: 'padding-box',
                   border: 'none',
                   boxShadow: activeBrandShadow,
                   color: '#ffffff',
-                  overflow: 'hidden'
+                  overflow: 'hidden',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                  fontSize: '10px',
+                  lineHeight: '1'
                 }}
                 title="Attach an image or video as style/character reference"
               >
-                <Paperclip size={12} />
+                <Paperclip size={11} className="flex-shrink-0" />
                 <span>Attach File</span>
               </button>
               <button
                 type="button"
                 disabled={!hasCanvasContent}
                 onClick={handleAttachCurrentCanvas}
-                className="btn-styled text-[10px] px-3 py-1.5 flex items-center gap-1.5"
+                className="btn-styled text-[10px] flex items-center gap-1"
                 style={{ 
-                  borderRadius: '10px',
+                  height: '24px',
+                  padding: '0 8px',
+                  borderRadius: '8px',
                   background: hasCanvasContent ? activeBrandBg : 'rgba(255, 255, 255, 0.05)',
                   backgroundRepeat: 'no-repeat',
                   backgroundClip: 'padding-box',
@@ -1122,12 +1296,61 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
                   color: hasCanvasContent ? '#ffffff' : 'rgba(255, 255, 255, 0.35)',
                   opacity: !hasCanvasContent ? 0.45 : 1,
                   cursor: !hasCanvasContent ? 'not-allowed' : 'pointer',
-                  overflow: 'hidden'
+                  overflow: 'hidden',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                  fontSize: '10px',
+                  lineHeight: '1'
                 }}
                 title={hasCanvasContent ? "Copy current preset canvas as reference context" : "Current canvas is empty"}
               >
-                <Layers size={12} />
+                <Copy size={11} className="flex-shrink-0" />
                 <span>Copy Canvas</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyAiContext}
+                className="btn-styled text-[10px] flex items-center gap-1"
+                style={{ 
+                  height: '24px',
+                  padding: '0 8px',
+                  borderRadius: '8px',
+                  background: copiedContext ? 'rgba(74, 222, 128, 0.2)' : 'rgba(255, 255, 255, 0.08)',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundClip: 'padding-box',
+                  border: copiedContext ? '1px solid rgba(74, 222, 128, 0.5)' : '1px solid rgba(255, 255, 255, 0.15)',
+                  boxShadow: copiedContext 
+                    ? '0 0 0 1px rgba(74, 222, 128, 0.4), 0 2px 10px rgba(74, 222, 128, 0.35)' 
+                    : '0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 6px rgba(0, 0, 0, 0.2)',
+                  color: copiedContext ? '#4ade80' : '#ffffff',
+                  cursor: 'pointer',
+                  overflow: 'hidden',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                  fontSize: '10px',
+                  lineHeight: '1',
+                  transition: 'background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease'
+                }}
+                onMouseOver={(e) => {
+                  if (copiedContext) {
+                    e.currentTarget.style.boxShadow = '0 0 0 1px rgba(74, 222, 128, 0.5), 0 3px 12px rgba(74, 222, 128, 0.45)';
+                  } else {
+                    e.currentTarget.style.background = 'rgba(255, 255, 255, 0.14)';
+                    e.currentTarget.style.boxShadow = isGemini 
+                      ? '0 0 0 1px rgba(255, 255, 255, 0.25), 0 2px 8px rgba(71, 150, 227, 0.3)' 
+                      : '0 0 0 1px rgba(255, 255, 255, 0.25), 0 2px 8px rgba(116, 170, 156, 0.3)';
+                  }
+                }}
+                onMouseOut={(e) => {
+                  e.currentTarget.style.background = copiedContext ? 'rgba(74, 222, 128, 0.2)' : 'rgba(255, 255, 255, 0.08)';
+                  e.currentTarget.style.boxShadow = copiedContext 
+                    ? '0 0 0 1px rgba(74, 222, 128, 0.4), 0 2px 10px rgba(74, 222, 128, 0.35)' 
+                    : '0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 6px rgba(0, 0, 0, 0.2)';
+                }}
+                title={copiedContext ? "Copied LED sign prompt & specs to clipboard!" : "Copy LED matrix dimensions, specs, and prompt context to paste into Gemini or ChatGPT web chat"}
+              >
+                {copiedContext ? <Check size={11} className="flex-shrink-0" /> : <Copy size={11} className="flex-shrink-0" />}
+                <span>Copy Context</span>
               </button>
             </div>
 
@@ -1192,12 +1415,106 @@ const GeminiMediaGenerator = React.forwardRef(function GeminiMediaGenerator({
             )}
 
             {/* Error Banner */}
-            {error && (
-              <div style={{ padding: '8px 12px', borderRadius: '10px', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#fca5a5', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <AlertCircle size={14} className="flex-shrink-0" />
-                <span style={{ flex: 1 }}>{error}</span>
-              </div>
-            )}
+            {error && (() => {
+              const parsed = formatAiError(error);
+              return (
+                <div style={{
+                  padding: '10px 12px',
+                  borderRadius: '12px',
+                  background: 'rgba(239, 68, 68, 0.12)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: '#fca5a5',
+                  fontSize: '11px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                    <AlertCircle size={15} className="flex-shrink-0" style={{ marginTop: '1px', color: '#f87171' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, color: '#fecaca', fontSize: '12px', marginBottom: '2px' }}>
+                        {parsed.title}
+                      </div>
+                      <div style={{ color: '#fca5a5', lineHeight: 1.4 }}>
+                        {parsed.summary}
+                      </div>
+                      {parsed.hint && (
+                        <div style={{ color: '#fda4af', fontSize: '10px', marginTop: '4px', opacity: 0.9, lineHeight: 1.35 }}>
+                          {parsed.hint}
+                        </div>
+                      )}
+                      {parsed.retryIn && (
+                        <div style={{ marginTop: '6px', fontSize: '10px', display: 'flex', alignItems: 'center', gap: '4px', color: '#fbbf24' }}>
+                          <Clock size={11} />
+                          <span>Retry window: ~{parsed.retryIn}</span>
+                        </div>
+                      )}
+                      <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        {parsed.link && (
+                          <a
+                            href={parsed.link}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: '#60a5fa', textDecoration: 'underline', fontSize: '10px', display: 'flex', alignItems: 'center', gap: '3px' }}
+                          >
+                            <span>{parsed.linkLabel || 'Manage Account'}</span>
+                            <ExternalLink size={10} />
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleCopyAiContext}
+                          style={{
+                            background: copiedContext ? 'rgba(74, 222, 128, 0.2)' : 'rgba(255, 255, 255, 0.1)',
+                            border: copiedContext ? '1px solid rgba(74, 222, 128, 0.4)' : '1px solid rgba(255, 255, 255, 0.15)',
+                            boxShadow: copiedContext ? '0 0 10px rgba(74, 222, 128, 0.4)' : 'none',
+                            borderRadius: '6px',
+                            color: copiedContext ? '#4ade80' : '#e2e8f0',
+                            padding: '2px 7px',
+                            cursor: 'pointer',
+                            fontSize: '10px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            transition: 'all 0.15s ease'
+                          }}
+                          title="Copy prompt, dimensions, and specs to paste directly into Gemini or ChatGPT web conversation"
+                        >
+                          {copiedContext ? <Check size={10} /> : <Copy size={10} />}
+                          <span>Copy Context for Web Chat</span>
+                        </button>
+                        {parsed.raw && parsed.raw !== parsed.summary && (
+                          <button
+                            type="button"
+                            onClick={() => setShowRawError(!showRawError)}
+                            style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '10px', textDecoration: 'underline', padding: 0 }}
+                          >
+                            {showRawError ? 'Hide technical details' : 'Show technical details'}
+                          </button>
+                        )}
+                      </div>
+                      {showRawError && parsed.raw && (
+                        <div style={{
+                          marginTop: '6px',
+                          padding: '6px 8px',
+                          borderRadius: '6px',
+                          background: 'rgba(0, 0, 0, 0.4)',
+                          color: '#cbd5e1',
+                          fontFamily: 'monospace',
+                          fontSize: '9.5px',
+                          maxHeight: '80px',
+                          overflowY: 'auto',
+                          wordBreak: 'break-all',
+                          whiteSpace: 'pre-wrap'
+                        }}>
+                          {parsed.raw}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Generate Action Button - matches active AI branding */}
             <button

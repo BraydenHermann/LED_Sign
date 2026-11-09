@@ -161,6 +161,46 @@ frames[0].save(OUTPUT_PATH, save_all=True, append_images=frames[1:], duration=80
         gif_bytes = gemini_service._execute_pillow_script(script, output_type="gif")
         self.assertTrue(len(gif_bytes) > 0)
 
+    @unittest.skipUnless(HAS_PIL, "PIL required for os import test")
+    def test_execute_pillow_script_with_os_path(self):
+        # Verifies that LLM code importing os/os.path does not fail
+        script = """```python
+import os
+from PIL import Image, ImageDraw
+
+img = Image.new('RGB', (64, 20), (0, 0, 0))
+d = ImageDraw.Draw(img)
+if os.path.exists(OUTPUT_PATH) or not os.path.exists("nonexistent"):
+    d.rectangle([5, 5, 25, 15], fill=(255, 0, 0))
+
+img.save(OUTPUT_PATH)
+```"""
+        img_bytes = gemini_service._execute_pillow_script(script, output_type="png")
+        self.assertTrue(len(img_bytes) > 0)
+
+    @unittest.skipUnless(HAS_PIL, "PIL required for from os.path import test")
+    def test_execute_pillow_script_with_from_os_path_import(self):
+        script = """```python
+from os.path import exists, join
+from PIL import Image
+
+img = Image.new('RGB', (64, 20), (0, 0, 0))
+p = join("dir", "file")
+img.save(OUTPUT_PATH)
+```"""
+        img_bytes = gemini_service._execute_pillow_script(script, output_type="png")
+        self.assertTrue(len(img_bytes) > 0)
+
+    @unittest.skipUnless(HAS_PIL, "PIL required for sandbox safety test")
+    def test_execute_pillow_script_blocks_dangerous_os(self):
+        script = """```python
+import os
+os.system("echo dangerous")
+```"""
+        with self.assertRaises(RuntimeError) as ctx:
+            gemini_service._execute_pillow_script(script, output_type="png")
+        self.assertIn("has no permitted attribute 'system'", str(ctx.exception))
+
     @unittest.skipUnless(HAS_PIL, "PIL required for ImageFont test")
     def test_execute_pillow_script_with_imagefont(self):
         # Verifies that LLM code drawing text with ImageFont works properly
