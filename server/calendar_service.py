@@ -93,6 +93,8 @@ class CalendarService:
         self._schedule_lock = threading.Lock()
         self._schedule_cache = {}
         self._cache_ttl = 15
+        self._service = None
+        self._service_creds_id = None
         if os.path.exists(self.token_path):
             try:
                 self.creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
@@ -105,6 +107,7 @@ class CalendarService:
                 self.creds.refresh(Request())
                 with open(self.token_path, 'w') as f:
                     f.write(self.creds.to_json())
+                self._service = None
             except Exception as e:
                 # If refresh failed with invalid_scope, fallback to reloading directly from token.json
                 if "invalid_scope" in str(e).lower() and os.path.exists(self.token_path):
@@ -112,6 +115,7 @@ class CalendarService:
                     self.creds.refresh(Request())
                     with open(self.token_path, 'w') as f:
                         f.write(self.creds.to_json())
+                    self._service = None
                 else:
                     raise
 
@@ -257,6 +261,7 @@ class CalendarService:
                 flow.fetch_token(code=code)
 
             self.creds = flow.credentials
+            self._service = None
             
             token_dir = os.path.dirname(self.token_path)
             if token_dir and not os.path.exists(token_dir):
@@ -281,7 +286,10 @@ class CalendarService:
             self._ensure_valid()
         if not self.creds or not self.creds.valid:
             return None
-        return build('calendar', 'v3', credentials=self.creds)
+        if self._service is None or self._service_creds_id != id(self.creds):
+            self._service = build('calendar', 'v3', credentials=self.creds, cache_discovery=False)
+            self._service_creds_id = id(self.creds)
+        return self._service
 
     def get_primary_user_name(self) -> Optional[str]:
         if hasattr(self, '_cached_user_name') and self._cached_user_name:
@@ -361,24 +369,6 @@ class CalendarService:
                         return {"events": events_copy, "invites": data.get("invites", [])}
 
         with self._schedule_lock:
-            if not force_refresh:
-                cached = self._schedule_cache.get(clean_name)
-                if cached:
-                    cache_time, data = cached
-                    cached_date = datetime.datetime.fromtimestamp(cache_time).astimezone().date()
-                    if cached_date == local_today and (time.time() - cache_time < self._cache_ttl):
-                        events_copy = []
-                        for ev in data.get("events", []):
-                            ev_copy = dict(ev)
-                            try:
-                                s_dt = datetime.datetime.fromisoformat(ev["start_iso"].replace('Z', '+00:00'))
-                                e_dt = datetime.datetime.fromisoformat(ev["end_iso"].replace('Z', '+00:00'))
-                                ev_copy["is_active"] = (s_dt <= now_utc <= e_dt)
-                            except Exception:
-                                pass
-                            events_copy.append(ev_copy)
-                        return {"events": events_copy, "invites": data.get("invites", [])}
-
             service = self._get_service()
             if not service:
                 return {"events": [], "invites": []}

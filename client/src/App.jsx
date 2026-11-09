@@ -2024,6 +2024,9 @@ export default function App() {
     }
   };
 
+  const fetchStatusRef = useRef(fetchStatus);
+  fetchStatusRef.current = fetchStatus;
+
   useEffect(() => {
     fetchStatus();
     const id = setInterval(fetchStatus, 2000);
@@ -2094,6 +2097,9 @@ export default function App() {
         setConnectionError('');
         if (!choosingSignRef.current) setScanOpen(false);
         setConnectionFailed(false);
+        if (!isModalOpenRef.current) {
+          setPresetView('saved');
+        }
         if (!isAuto) setConnectionTarget(null);
         if (effectivePasscode) {
           setSessionPasscode(addr, effectivePasscode);
@@ -2217,24 +2223,21 @@ export default function App() {
   const scanOpenRef = useRef(false);
   scanOpenRef.current = scanOpen;
 
-  const wasConnectingRef = useRef(false);
+  const wasConnectedRef = useRef(false);
 
   useEffect(() => {
-    if (isSignConnecting) {
-      setPresetView('local');
-      wasConnectingRef.current = true;
-    } else if (wasConnectingRef.current) {
-      if (status.connected && !isSignUpdating && !pushing) {
-        wasConnectingRef.current = false;
-        if (!isModalOpenRef.current && !scanOpenRef.current) {
+    if (status.connected) {
+      if (!wasConnectedRef.current) {
+        wasConnectedRef.current = true;
+        if (!isModalOpenRef.current) {
           setPresetView('saved');
         }
       }
-    } else if (!status.connected) {
+    } else {
+      wasConnectedRef.current = false;
       setPresetView('local');
-      wasConnectingRef.current = false;
     }
-  }, [isSignConnecting, status.connected, isModalOpen, scanOpen, isSignUpdating, pushing]);
+  }, [status.connected]);
   const [lastPushedId, setLastPushedId] = useState(null);
   const [isManualOverride, setIsManualOverrideState] = useState(false);
   const isManualOverrideRef = useRef(false);
@@ -2284,6 +2287,7 @@ export default function App() {
     catch { return {}; }
   });
   const [events, setEvents] = useState(null);
+  const [eventsDate, setEventsDate] = useState(null);
   const [invites, setInvites] = useState([]);
   const [cleanName, setCleanName] = useState(() => localStorage.getItem('loy_clean_name') !== 'false');
   const [calLoading, setCalLoading] = useState(false);
@@ -2659,11 +2663,13 @@ export default function App() {
         summary: cleanEventTitle(ev.summary, isClean)
       }));
       setEvents(evs);
+      setEventsDate(new Date().toDateString());
       setInvites(rawInvites);
       return evs;
     } catch (e) {
       console.warn('[fetchEvents] Error fetching calendar events:', e);
       setEvents(prev => dropPastDayEvents(prev) || []);
+      setEventsDate(new Date().toDateString());
       setInvites(prev => dropPastDayEvents(prev) || []);
       // If network error or timeout occurred (e.g. machine waking from sleep), auto-retry once after 3s
       if (!force && (e.message?.includes('timeout') || e.message?.includes('Network Error') || (typeof navigator !== 'undefined' && !navigator.onLine))) {
@@ -2688,6 +2694,11 @@ export default function App() {
     if (lastCalendarDayRef.current !== todayStr) {
       console.log(`[calendar] Day transition detected: ${lastCalendarDayRef.current} -> ${todayStr}. Updating to new day immediately.`);
       lastCalendarDayRef.current = todayStr;
+      setIsManualOverride(false);
+      calendarReturnPresetRef.current = null;
+      lastActiveEventIdRef.current = null;
+      setEventsDate(null);
+      setCalLoading(true);
       // Immediately drop yesterday's events so they vanish from the display right away
       setEvents(prev => dropPastDayEvents(prev));
       setInvites(prev => dropPastDayEvents(prev));
@@ -2696,7 +2707,7 @@ export default function App() {
     }
   }, [now]);
 
-  // Handle timezone changes, window focus, or online recovery (wake from sleep)
+  // Handle timezone changes, window focus, visibility change (switching tabs), or online recovery (wake from sleep)
   useEffect(() => {
     const handleRefresh = () => {
       const currentTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -2715,23 +2726,38 @@ export default function App() {
       const todayStr = nowDate.toDateString();
       if (lastCalendarDayRef.current !== todayStr) {
         lastCalendarDayRef.current = todayStr;
+        setIsManualOverride(false);
+        calendarReturnPresetRef.current = null;
+        lastActiveEventIdRef.current = null;
+        setEventsDate(null);
+        setCalLoading(true);
         setEvents(prev => dropPastDayEvents(prev));
         setInvites(prev => dropPastDayEvents(prev));
       }
-      console.log("[app] Window focused/online, refreshing calendar events...");
+      console.log("[app] Window focused/visible/online, refreshing calendar events...");
       fetchEventsRef.current?.(true);
+      if (typeof fetchStatusRef.current === 'function') {
+        fetchStatusRef.current();
+      }
+    };
+
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      handleRefresh();
     };
 
     // Initialize TZ
     localStorage.setItem('loy_tz', Intl.DateTimeFormat().resolvedOptions().timeZone);
 
     window.addEventListener('timezonechange', handleRefresh);
-    window.addEventListener('focus', handleRefresh);
-    window.addEventListener('online', handleRefresh);
+    window.addEventListener('focus', handleVisibility);
+    window.addEventListener('online', handleVisibility);
+    document.addEventListener('visibilitychange', handleVisibility);
     return () => {
       window.removeEventListener('timezonechange', handleRefresh);
-      window.removeEventListener('focus', handleRefresh);
-      window.removeEventListener('online', handleRefresh);
+      window.removeEventListener('focus', handleVisibility);
+      window.removeEventListener('online', handleVisibility);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
 
@@ -2942,6 +2968,7 @@ export default function App() {
   };
 
   // Auto-push / Blanking / Default logic based on the local clock
+  const autoPushFailedRef = useRef({ id: '', time: 0 });
   useEffect(() => {
     if (!status?.connected || !dbLoaded || isSignUpdating || pushingRef.current || initializingConnectionRef.current ||
         !initializedConnectionMacsRef.current.has(status.address?.toUpperCase())) return;
@@ -2982,6 +3009,9 @@ export default function App() {
       if (targetId !== lastPushedId) {
         const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
         if (targetContent.type === 'event') {
+          if (autoPushFailedRef.current.id === targetId && Date.now() - autoPushFailedRef.current.time < 30000) {
+            return;
+          }
           if (isEventAlreadyLastPushed(targetContent.summary, targetMac, lastPushedId, targetId)) {
             console.log("[auto-push] Active event was already the last preset pushed; skipping re-send:", currentEvent.summary);
             setLastPushedId(targetId);
@@ -3184,15 +3214,43 @@ export default function App() {
         handleSetPushMessage('Saved to Slot 1!');
 
         if (isShowingSlot1) {
-          console.log("[auto-pre-save] Was showing slot 1; blanking screen to black");
-          setLastPushedId('blank');
-          await axios.post(`${API_BASE}/clear?mac=${encodeURIComponent(targetMac)}`).catch(() => {});
+          console.log("[auto-pre-save] Was showing slot 1; restoring default preset");
+          const defPreset = (presets || []).find(p => p.isDefault) || (presets || []).find(p => p.mode === 'clock');
+          const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + targetMac);
+          const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + targetMac)) &&
+            (!defPreset?.id || !syncedPresetId || syncedPresetId === String(defPreset.id));
+
+          if (defPreset) {
+            if (isDefaultSynced) {
+              setLastPushedId('hw-slot-1');
+              axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`).catch(() => {});
+            } else {
+              handlePush(defPreset, false, true, defPreset.id || 'hw-slot-1').catch(() => {});
+            }
+          }
         }
       } catch (err) {
         console.warn('[auto-pre-save] Failed to pre-save next event to Slot 1:', err);
         const detail = err.response?.data?.detail || err.message || 'Failed to save to Slot 1';
         handleSetPushMessage(`Error saving to Slot 1: ${detail}`);
         preSaveSlot1FailedRef.current = { text: nextCleanText, time: Date.now() };
+
+        // Ensure sign is not left black on failure if no active event is running
+        const activeEv = selectCalendarEvent(events, now);
+        if (!activeEv) {
+          const defPreset = (presets || []).find(p => p.isDefault) || (presets || []).find(p => p.mode === 'clock');
+          const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + targetMac);
+          const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + targetMac)) &&
+            (!defPreset?.id || !syncedPresetId || syncedPresetId === String(defPreset.id));
+          if (defPreset) {
+            if (isDefaultSynced) {
+              setLastPushedId('hw-slot-1');
+              axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`).catch(() => {});
+            } else {
+              handlePush(defPreset, false, true, defPreset.id || 'hw-slot-1').catch(() => {});
+            }
+          }
+        }
       } finally {
         setPushing(false);
         preSavingSlot1Ref.current = false;
@@ -3214,6 +3272,9 @@ export default function App() {
       const priorManualOverride = isManualOverrideRef.current;
 
       const pushDefaultOrActive = async () => {
+        if (!isModalOpenRef.current) {
+          setPresetView('saved');
+        }
         // 1. Calendar Slot (hardware slot 0, slot 1 in UI) - check first so active event shows immediately
         let evs = events;
         if (!evs || evs.length === 0) {
@@ -3535,6 +3596,7 @@ export default function App() {
               return next;
             });
             setLastPushedId(autoTargetId || 'hw-slot-0');
+            autoPushFailedRef.current = { id: '', time: 0 };
             localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
             if (targetEventText) {
               localStorage.setItem('loy_hw_cal_text_' + targetMac, targetEventText);
@@ -3542,6 +3604,21 @@ export default function App() {
           } catch (saveErr) {
             console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
             const saveDetail = saveErr.response?.data?.detail || saveErr.message || '';
+            if (!manual && autoTargetId) {
+              autoPushFailedRef.current = { id: autoTargetId, time: Date.now() };
+              // Restore default preset so sign doesn't stay black on failed push
+              const defPreset = (presets || []).find(p => p.isDefault) || (presets || []).find(p => p.mode === 'clock');
+              const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + targetMac);
+              const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + targetMac)) &&
+                (!defPreset?.id || !syncedPresetId || syncedPresetId === String(defPreset.id));
+              if (defPreset) {
+                if (isDefaultSynced) {
+                  axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`).catch(() => {});
+                } else {
+                  handlePush(defPreset, false, true, defPreset.id || 'hw-slot-1').catch(() => {});
+                }
+              }
+            }
             if (manual || (saveErr.response?.status !== 409 && !isConnectionStaleMessage(String(saveDetail)))) {
               handleSetPushMessage(`Error saving to Slot 1: ${saveDetail}`);
             }
@@ -3712,6 +3789,7 @@ export default function App() {
             events={events}
             invites={invites}
             loading={calLoading}
+            eventsDate={eventsDate}
             fetchEvents={fetchEvents}
             now={now}
             onPush={handlePush}
@@ -5582,7 +5660,7 @@ function GoogleCalendarLogo({ size = 16, style = {} }) {
 }
 
 /* ─── Calendar ───────────────────────────────────────────────────────── */
-function CalendarView({ status, events, invites, loading, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify, syncStatus, onSyncNow }) {
+function CalendarView({ status, events, invites, loading, eventsDate, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify, syncStatus, onSyncNow }) {
   const [calError, setCalError] = useState('');
   const [acceptingId, setAcceptingId] = useState(null);
   const [scopeModalOpen, setScopeModalOpen] = useState(false);
@@ -5668,6 +5746,8 @@ function CalendarView({ status, events, invites, loading, fetchEvents, now, onPu
   };
 
   const todayStr = (now || new Date()).toDateString();
+  const isEventsForToday = eventsDate === todayStr;
+  const isSchedulePending = loading || !isEventsForToday || events === null;
   const todayEvents = (events || []).filter(ev => !ev?.start_iso || new Date(ev.start_iso).toDateString() === todayStr);
   const todayInvites = (invites || []).filter(inv => !inv?.start_iso || new Date(inv.start_iso).toDateString() === todayStr);
 
@@ -5878,7 +5958,7 @@ function CalendarView({ status, events, invites, loading, fetchEvents, now, onPu
             </div>
           )}
 
-          {loading && (!events || todayEvents.length === 0) ? (
+          {isSchedulePending && (!events || todayEvents.length === 0) ? (
             <div className="glass-panel w-full" style={{ padding: '48px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
               <RefreshCw size={24} className="animate-spin text-blue-400" style={{ marginBottom: 12 }} />
               <p className="text-slate-400">Loading today's schedule...</p>
