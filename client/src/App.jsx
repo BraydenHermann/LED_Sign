@@ -3069,10 +3069,33 @@ export default function App() {
           if (returnPreset) {
             console.log(`[auto-push] Event window ended, restoring saved slot ${returnPreset.slotId}`);
             setLastPushedId(`hw-slot-${returnPreset.slotId}`);
+            const returnSlotId = returnPreset.slotId;
+            const returnSlotNum = returnSlotId + 1;
+            const returnSlotObj = (savedPresetsRef.current || []).find(s => s?.hwSlotId === returnSlotId || (s?.slotNumber - 1) === returnSlotId);
+            const returnDisplayName = returnSlotObj?.preset?.name || `Slot ${returnSlotNum}`;
+            setPushing(true);
+            pushingRef.current = true;
+            if (typeof setPushingPresetTarget === 'function') {
+              setPushingPresetTarget({
+                type: 'saved',
+                hwSlotId: returnSlotId,
+                id: `hw-slot-${returnSlotId}`
+              });
+            }
+            handleSetPushMessage(`Pushing "${returnDisplayName}" to sign...`);
             axios.post(`${API_BASE}/preset?id=${returnPreset.slotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
-              .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
+              .then(() => {
+                handleSetPushMessage(`Pushed "${returnDisplayName}" to sign!`);
+                if (typeof fetchStatus === 'function') fetchStatus();
+              })
               .catch(e => {
                 console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
+                handleSetPushMessage(`Error playing Slot ${returnSlotNum}: ${e.response?.data?.detail || e.message}`);
+              })
+              .finally(() => {
+                pushingRef.current = false;
+                setPushing(false);
+                if (typeof setPushingPresetTarget === 'function') setPushingPresetTarget(null);
               });
           } else {
             const defPreset = (presets || []).find(p => p.isDefault) || (presets || []).find(p => p.mode === 'clock');
@@ -3091,30 +3114,9 @@ export default function App() {
             }
 
             console.log(`[auto-push] Event window ended, restoring default preset "${defPreset.name || 'Default'}"`);
-
-            if (defPreset.mode === 'clock') {
-              handlePush(defPreset, false, true, defPreset.id || 'clock-default').catch(e => {
-                console.warn("[auto-push] Could not push default clock:", e);
-              });
-            } else if (isDefaultSynced) {
-              // Play hardware slot 1 — the verified synced default
-              console.log("[auto-push] Playing verified hardware default slot (slot 1)");
-              setLastPushedId('hw-slot-1');
-              axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`)
-                .then(() => { if (typeof fetchStatus === 'function') fetchStatus(); })
-                .catch(e => {
-                  console.warn("[auto-push] Hardware slot 1 play failed, falling back to direct push:", e);
-                  localStorage.removeItem('loy_hw_default_synced_' + targetMac);
-                  localStorage.removeItem('loy_hw_default_preset_id_' + targetMac);
-                  handlePush(defPreset, false, true, defPreset.id || 'hw-slot-1').catch(() => {});
-                });
-            } else {
-              // Not synced to hardware slot 1: push preset directly
-              console.log("[auto-push] Default preset not synced to hardware slot 1, pushing directly");
-              handlePush(defPreset, false, true, defPreset.id || 'hw-slot-1').catch(e => {
-                console.warn("[auto-push] Could not push default preset:", e);
-              });
-            }
+            handlePush(defPreset, false, false, defPreset.id || (isDefaultSynced ? 'hw-slot-1' : (defPreset.mode === 'clock' ? 'clock-default' : 'hw-slot-1'))).catch(e => {
+              console.warn("[auto-push] Could not push default preset:", e);
+            });
           }
           return;
         }
@@ -3361,29 +3363,10 @@ export default function App() {
             setLastPushedId(def?.mode === 'clock' ? (def.id || 'clock-default') : 'hw-slot-1');
           } else {
             setIsManualOverride(false);
-            const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + targetMac);
-            const isSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + targetMac)) &&
-              (!def?.id || !syncedPresetId || syncedPresetId === String(def.id));
-            if (def?.mode === 'clock') {
-              console.log("[connect] Restoring default clock preset");
-              await handlePush(def, false, true, def.id || 'clock-default');
-            } else if (isSynced) {
-              console.log("[connect] Playing hardware default slot (slot 1)");
-              setLastPushedId('hw-slot-1');
-              try {
-                await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
-              } catch (e) {
-                console.warn("[connect] Hardware default play failed, pushing directly:", e);
-                localStorage.removeItem('loy_hw_default_synced_' + targetMac);
-                localStorage.removeItem('loy_hw_default_preset_id_' + targetMac);
-                if (e.response?.status === 409) throw e;
-                if (def) {
-                  await handlePush(def, false, true, def.id || 'hw-slot-1');
-                }
-              }
-            } else if (def) {
-              console.log("[connect] Default not synced to slot 1, pushing directly");
-              await handlePush(def, false, true, def.id || 'hw-slot-1');
+            if (def) {
+              const defName = def.name || (def.mode === 'clock' ? 'Clock' : 'Default');
+              console.log(`[connect] Restoring default preset "${defName}"`);
+              await handlePush(def, false, false, def.id || 'hw-slot-1');
             }
           }
         }
@@ -3486,10 +3469,9 @@ export default function App() {
         } else {
           handleSetPushMessage('Saving event to Slot 1...');
         }
-      } else if (manual) {
-        handleSetLocalPushMessage(`Pushing "${pushName}" to sign...`);
       } else {
-        handleSetLocalPushMessage('');
+        const displayName = pushName || (data.mode === 'clock' ? 'Clock' : (data.isDefault ? 'Default' : 'Preset'));
+        handleSetLocalPushMessage(`Pushing "${displayName}" to sign...`);
       }
     }
 
@@ -3497,8 +3479,9 @@ export default function App() {
       if (data.mode === 'clock') {
         const pushColor = data.clockStyle === 'default' ? '#ffffff' : (data.textColor || '#10B981');
         await axios.post(`${API_BASE}/clock?on=true&color=${encodeURIComponent(pushColor)}&bg_color=${encodeURIComponent(data.bgColor || '#000000')}&format=${data.timeFormat || '12h'}&show_seconds=${data.showSeconds !== false}&clock_style=${data.clockStyle || 'custom'}`);
-        if (manual && !skipMessages) {
-          handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        if (!skipMessages) {
+          const displayName = pushName || 'Clock';
+          handleSetLocalPushMessage(`Pushed "${displayName}" to sign!`);
         }
         setLastPushedId(data.id || 'clock-default');
       } else if (data.isDefault && status?.connected) {
@@ -3510,8 +3493,9 @@ export default function App() {
         if (isDefaultSynced) {
           try {
             await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
-            if (manual && !skipMessages) {
-              handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+            if (!skipMessages) {
+              const displayName = pushName || 'Default';
+              handleSetLocalPushMessage(`Pushed "${displayName}" to sign!`);
             }
             setLastPushedId('hw-slot-1');
             fetchStatus();
@@ -3528,8 +3512,9 @@ export default function App() {
         const fallbackData = { ...data };
         if (fallbackData.mode === 'text') delete fallbackData.pixels;
         await axios.post(`${API_BASE}/push-text`, fallbackData);
-        if (manual && !skipMessages) {
-          handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        if (!skipMessages) {
+          const displayName = pushName || 'Default';
+          handleSetLocalPushMessage(`Pushed "${displayName}" to sign!`);
         }
         setLastPushedId(data.id || 'hw-slot-1');
       } else if (isEvent) {
@@ -3629,8 +3614,9 @@ export default function App() {
         }
       } else {
         await axios.post(`${API_BASE}/push-text`, data);
-        if (manual && !skipMessages) {
-          handleSetLocalPushMessage(`Pushed "${pushName}" to sign!`);
+        if (!skipMessages) {
+          const displayName = pushName || 'Preset';
+          handleSetLocalPushMessage(`Pushed "${displayName}" to sign!`);
         }
         setLastPushedId(data.id || null);
       }
