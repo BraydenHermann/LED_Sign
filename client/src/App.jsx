@@ -1824,6 +1824,152 @@ export default function App() {
   const autoConnectTried = useRef(false);
   const manuallyDisconnectedRef = useRef(false);
 
+  const passcodeTargetRef = useRef(null);
+  passcodeTargetRef.current = passcodeTarget;
+  const doConnectRef = useRef();
+
+  const isTabInactive = () => {
+    return Boolean(
+      document.hidden ||
+      document.visibilityState !== 'visible' ||
+      (typeof document.hasFocus === 'function' && !document.hasFocus())
+    );
+  };
+
+  const closePasscodeNotification = async () => {
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.ready;
+        if (reg?.getNotifications) {
+          const notifs = await reg.getNotifications({ tag: 'led-sign-passcode' });
+          notifs.forEach(n => n.close());
+        }
+      }
+    } catch (e) {}
+  };
+
+  const showPasscodeNotification = async (targetAddr, isInvalid = false) => {
+    if (!('Notification' in window)) return;
+    try {
+      if (Notification.permission === 'default') {
+        await Notification.requestPermission();
+      }
+    } catch (e) {}
+    if (Notification.permission !== 'granted') return;
+
+    const title = isInvalid ? 'LED Sign: Incorrect Passcode' : 'LED Sign: Passcode Required';
+    const body = isInvalid
+      ? 'The passcode entered was incorrect. Enter the 6-digit passcode to connect.'
+      : 'A passcode is required to connect to the LED sign. Enter it here or click to open.';
+
+    const options = {
+      body,
+      icon: '/favicon.png',
+      badge: '/favicon.png',
+      tag: 'led-sign-passcode',
+      renotify: true,
+      requireInteraction: true,
+      data: {
+        address: targetAddr,
+        url: window.location.href,
+      },
+      actions: [
+        {
+          action: 'submit-passcode',
+          type: 'text',
+          title: 'Submit Passcode',
+          placeholder: 'Enter 6-digit passcode',
+        },
+      ],
+    };
+
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.ready;
+        if (reg && reg.showNotification) {
+          await reg.showNotification(title, options);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('[Notification] ServiceWorker showNotification failed with actions, trying fallback:', err);
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        if (reg && reg.showNotification) {
+          const fallbackOpts = { ...options };
+          delete fallbackOpts.actions;
+          await reg.showNotification(title, fallbackOpts);
+          return;
+        }
+      } catch (e) {}
+    }
+
+    try {
+      const notif = new Notification(title, {
+        body: options.body,
+        icon: options.icon,
+        tag: options.tag,
+        requireInteraction: true,
+      });
+      notif.onclick = () => {
+        window.focus();
+        notif.close();
+      };
+    } catch (e) {
+      console.warn('[Notification] Notification fallback failed:', e);
+    }
+  };
+
+  useEffect(() => {
+    // If opened via notification click when no tab was active with ?passcodePrompt=<mac>
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const promptTarget = params.get('passcodePrompt');
+      if (promptTarget) {
+        setScanOpen(true);
+        setPasscodeTarget(promptTarget);
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    } catch (e) {}
+
+    if (!('serviceWorker' in navigator)) return;
+
+    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+      .then((reg) => {
+        console.log('[SW] Registered scope:', reg.scope);
+      })
+      .catch((err) => {
+        console.warn('[SW] Registration failed:', err);
+      });
+
+    const handleSwMessage = async (event) => {
+      if (event.data?.type === 'PASSCODE_FROM_NOTIFICATION') {
+        const { passcode, address } = event.data;
+        const target = address || passcodeTargetRef.current || localStorage.getItem('loy_last_connected_mac');
+        setScanOpen(true);
+        if (target) setPasscodeTarget(target);
+
+        if (passcode) {
+          const cleanCode = String(passcode).replace(/\D/g, '').slice(0, 6);
+          setBluetoothPasscode(cleanCode);
+          if (cleanCode.length === 6) {
+            setPasscodeError('');
+            if (target && doConnectRef.current) {
+              await doConnectRef.current(target, false, false, cleanCode);
+            }
+          } else {
+            setPasscodeError('Enter exactly six digits.');
+          }
+        }
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+    };
+  }, []);
+
   const sessionPasscodesRef = useRef({});
   const clearAllSessionPasscodes = () => {
     sessionPasscodesRef.current = {};
@@ -1837,6 +1983,7 @@ export default function App() {
     setBluetoothPasscode('');
     setPasscodeTarget(null);
     setPasscodeError('');
+    closePasscodeNotification();
   };
   const getSessionPasscode = (addr) => {
     if (!addr) return '';
@@ -2107,6 +2254,7 @@ export default function App() {
           if (res.data.address) setSessionPasscode(res.data.address, effectivePasscode);
           setPasscodeTarget(null);
           setBluetoothPasscode(effectivePasscode);
+          closePasscodeNotification();
         }
         if (!isAuto || !choosingSignRef.current) {
           localStorage.setItem('loy_last_connected_mac', res.data.address || connectedAddr);
@@ -2135,6 +2283,9 @@ export default function App() {
         setPasscodeError(e.response.data.detail.code === 'invalid_passcode'
           ? 'Incorrect Passcode. Please try again.'
           : effectivePasscode ? 'The sign still requires authentication. Please check the Passcode and try again.' : '');
+        if (isTabInactive()) {
+          showPasscodeNotification(addr, e.response.data.detail.code === 'invalid_passcode');
+        }
         return;
       }
       if (!e.response) {
@@ -2149,6 +2300,9 @@ export default function App() {
           setScanOpen(true);
           setPasscodeTarget(addr);
           setPasscodeError(message);
+          if (isTabInactive()) {
+            showPasscodeNotification(addr, true);
+          }
         }
       }
       setConnectionFailed(true);
@@ -2159,8 +2313,10 @@ export default function App() {
       }
     }
   };
+  doConnectRef.current = doConnect;
 
   const handleDisconnect = async () => {
+    closePasscodeNotification();
     manuallyDisconnectedRef.current = true;
     hadLiveConnectionRef.current = false;
     disconnectedStatusPollsRef.current = 0;
@@ -2181,7 +2337,7 @@ export default function App() {
   };
 
   const submitBluetoothPasscode = async (event) => {
-    event.preventDefault();
+    if (event?.preventDefault) event.preventDefault();
     if (!/^\d{6}$/.test(bluetoothPasscode)) {
       setPasscodeError('Enter exactly six digits.');
       return;
@@ -3718,7 +3874,7 @@ export default function App() {
               passcodeError={passcodeError}
               setPasscodeError={setPasscodeError}
               onSubmitPasscode={submitBluetoothPasscode}
-              onClosePasscode={() => { setPasscodeTarget(null); setBluetoothPasscode(''); setPasscodeError(''); }}
+              onClosePasscode={() => { setPasscodeTarget(null); setBluetoothPasscode(''); setPasscodeError(''); closePasscodeNotification(); }}
               setSessionPasscode={setSessionPasscode}
               clearSessionPasscode={clearSessionPasscode}
               syncHardwareSlots={syncHardwareSlots}
@@ -3805,6 +3961,27 @@ function NavButton({ icon, label, active, onClick }) {
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
 function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, isSignUpdating }) {
   const [isLoaded, setIsLoaded] = useState(false);
+  const passcodeInputRef = useRef(null);
+
+  useEffect(() => {
+    if (passcodeTarget) {
+      const timer = setTimeout(() => {
+        passcodeInputRef.current?.focus();
+        passcodeInputRef.current?.select?.();
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [passcodeTarget]);
+
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      if (passcodeTarget) {
+        passcodeInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, [passcodeTarget]);
 
   useEffect(() => {
     setIsLoaded(false);
@@ -4813,6 +4990,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                       Please enter the sign's password to connect.
                     </p>
                     <input
+                      ref={passcodeInputRef}
                       autoFocus
                       inputMode="numeric"
                       autoComplete="one-time-code"
