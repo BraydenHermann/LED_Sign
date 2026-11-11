@@ -1870,6 +1870,7 @@ export default function App() {
       renotify: true,
       requireInteraction: true,
       data: {
+        type: 'PASSCODE',
         address: targetAddr,
         url: window.location.href,
       },
@@ -1917,6 +1918,61 @@ export default function App() {
       };
     } catch (e) {
       console.warn('[Notification] Notification fallback failed:', e);
+    }
+  };
+
+  const showPresetNotification = async (success, presetName, errorMsg = '') => {
+    if (!isTabInactive()) return;
+    if (!('Notification' in window)) return;
+    try {
+      if (Notification.permission === 'default') {
+        await Notification.requestPermission();
+      }
+    } catch (e) {}
+    if (Notification.permission !== 'granted') return;
+
+    const title = success ? 'LED Sign: Preset Pushed' : 'LED Sign: Push Failed';
+    const cleanName = (presetName || 'Preset').trim();
+    const body = success
+      ? `"${cleanName}" has been successfully pushed to the sign.`
+      : `Failed to push "${cleanName}" to the sign.${errorMsg ? ' ' + errorMsg : ''}`;
+
+    const options = {
+      body,
+      icon: '/favicon.png',
+      badge: '/favicon.png',
+      tag: 'led-sign-preset-push',
+      renotify: true,
+      data: {
+        type: 'PRESET_PUSH',
+        url: window.location.href,
+      },
+    };
+
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.ready;
+        if (reg && reg.showNotification) {
+          await reg.showNotification(title, options);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('[Notification] SW showNotification failed, trying fallback:', e);
+    }
+
+    try {
+      const notif = new Notification(title, {
+        body: options.body,
+        icon: options.icon,
+        tag: options.tag,
+      });
+      notif.onclick = () => {
+        window.focus();
+        notif.close();
+      };
+    } catch (e) {
+      console.warn('[Notification] Fallback Notification failed:', e);
     }
   };
 
@@ -3206,10 +3262,13 @@ export default function App() {
               .then(() => {
                 handleSetPushMessage('Pushed Slot 1 to sign!');
                 if (typeof fetchStatus === 'function') fetchStatus();
+                showPresetNotification(true, currentEvent.summary || 'Slot 1');
               })
               .catch((err) => {
                 console.warn('[auto-push] Failed to play slot 0:', err);
+                const detail = err.response?.data?.detail || err.message || '';
                 handleSetPushMessage(`Error playing Slot 1: ${err.message}`);
+                showPresetNotification(false, currentEvent.summary || 'Slot 1', detail);
               })
               .finally(() => {
                 setPushing(false);
@@ -3243,10 +3302,13 @@ export default function App() {
               .then(() => {
                 handleSetPushMessage(`Pushed "${returnDisplayName}" to sign!`);
                 if (typeof fetchStatus === 'function') fetchStatus();
+                showPresetNotification(true, returnDisplayName);
               })
               .catch(e => {
                 console.warn(`[auto-push] Could not restore saved slot ${returnPreset.slotId}:`, e);
-                handleSetPushMessage(`Error playing Slot ${returnSlotNum}: ${e.response?.data?.detail || e.message}`);
+                const detail = e.response?.data?.detail || e.message;
+                handleSetPushMessage(`Error playing Slot ${returnSlotNum}: ${detail}`);
+                showPresetNotification(false, returnDisplayName, detail);
               })
               .finally(() => {
                 pushingRef.current = false;
@@ -3655,6 +3717,7 @@ export default function App() {
             }
             setLastPushedId('hw-slot-1');
             fetchStatus();
+            showPresetNotification(true, pushName || 'Default');
             return;
           } catch (defErr) {
             console.warn('[handlePush] Hardware default slot play failed, falling back to direct push:', defErr);
@@ -3705,6 +3768,7 @@ export default function App() {
               if (!skipMessages) {
                 handleSetPushMessage('Pushed Slot 1 to sign!');
               }
+              showPresetNotification(true, data.text || pushName || 'Slot 1');
               return;
             } catch (playErr) {
               if (playErr.response?.status !== 404) throw playErr;
@@ -3742,6 +3806,7 @@ export default function App() {
             if (targetEventText) {
               localStorage.setItem('loy_hw_cal_text_' + targetMac, targetEventText);
             }
+            showPresetNotification(true, data.text || pushName || 'Slot 1');
           } catch (saveErr) {
             console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
             const saveDetail = saveErr.response?.data?.detail || saveErr.message || '';
@@ -3763,10 +3828,12 @@ export default function App() {
             if (manual || (saveErr.response?.status !== 409 && !isConnectionStaleMessage(String(saveDetail)))) {
               handleSetPushMessage(`Error saving to Slot 1: ${saveDetail}`);
             }
+            showPresetNotification(false, data.text || pushName || 'Slot 1', saveDetail);
             throw saveErr;
           }
         } else {
           handleSetPushMessage('Error: Sign not connected');
+          showPresetNotification(false, pushName || 'Event', 'Sign not connected');
         }
       } else {
         await axios.post(`${API_BASE}/push-text`, data);
@@ -3777,6 +3844,10 @@ export default function App() {
         setLastPushedId(data.id || null);
       }
       fetchStatus();
+      if (!isEvent) {
+        const displayName = pushName || (data.mode === 'clock' ? 'Clock' : (data.isDefault ? 'Default' : 'Preset'));
+        showPresetNotification(true, displayName);
+      }
     } catch (e) {
       console.error('[push] Failed:', e);
       setLastPushedId(previousPushedId);
@@ -3786,6 +3857,10 @@ export default function App() {
         (errorMsg && (errorMsg.includes('-2147023673') || errorMsg.toLowerCase().includes('canceled') || errorMsg.toLowerCase().includes('cancelled') || errorMsg.toLowerCase().includes('disconnected') || errorMsg.toLowerCase().includes('not connected') || isConnectionStaleMessage(errorMsg)));
       if (!skipMessages && (manual || !isDisconnectError)) {
         (isEvent ? handleSetPushMessage : handleSetLocalPushMessage)('Error: ' + (errorMsg || e.message));
+      }
+      if (!isEvent) {
+        const displayName = pushName || (data?.mode === 'clock' ? 'Clock' : (data?.isDefault ? 'Default' : 'Preset'));
+        showPresetNotification(false, displayName, errorMsg || e.message);
       }
       throw e;
     } finally {
@@ -3889,6 +3964,7 @@ export default function App() {
               slotSaveProgressIdRef={slotSaveProgressIdRef}
               onCancelSlotSave={cancelSlotSave}
               isSignUpdating={isSignUpdating}
+              showPresetNotification={showPresetNotification}
             />
           </div>
           <MediaView 
@@ -3959,7 +4035,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, isSignUpdating }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, isSignUpdating, showPresetNotification }) {
   const [isLoaded, setIsLoaded] = useState(false);
   const passcodeInputRef = useRef(null);
 
@@ -4514,6 +4590,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         if (typeof fetchStatus === 'function') await fetchStatus();
         setPushMessage(isSlot1 ? 'Pushed Slot 1 to sign!' : `Pushed "${displayName}" to sign!`);
         setLastPushedId(`hw-slot-${hwSlotId}`);
+        if (typeof showPresetNotification === 'function') {
+          showPresetNotification(true, isSlot1 ? 'Slot 1' : displayName);
+        }
       } else {
         await onPush(preset, true, true);
         setPushMessage(isSlot1 ? 'Pushed Slot 1 to sign!' : `Pushed "${displayName}" to sign!`);
@@ -4524,6 +4603,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       const detail = err.response?.data?.detail || err.message || '';
       const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
       setPushMessage(`Error: ${detail || err.message}`);
+      if (typeof showPresetNotification === 'function') {
+        showPresetNotification(false, isSlot1 ? 'Slot 1' : displayName, detail);
+      }
     } finally {
       if (pushingRef) pushingRef.current = false;
       setPushing(false);

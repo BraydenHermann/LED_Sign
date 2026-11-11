@@ -13,7 +13,8 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
   const enteredPasscode = event.reply;
-  const targetAddress = event.notification.data?.address;
+  const notifData = event.notification.data || {};
+  const targetAddress = notifData.address;
 
   event.waitUntil(
     (async () => {
@@ -32,18 +33,20 @@ self.addEventListener('notificationclick', (event) => {
           console.warn('[SW] Could not focus client:', e);
         }
 
-        targetClient.postMessage({
-          type: 'PASSCODE_FROM_NOTIFICATION',
-          passcode: (typeof enteredPasscode === 'string' && enteredPasscode.trim()) ? enteredPasscode.trim() : null,
-          address: targetAddress,
-          action: event.action,
-        });
+        if (notifData.type === 'PASSCODE') {
+          targetClient.postMessage({
+            type: 'PASSCODE_FROM_NOTIFICATION',
+            passcode: (typeof enteredPasscode === 'string' && enteredPasscode.trim()) ? enteredPasscode.trim() : null,
+            address: targetAddress,
+            action: event.action,
+          });
+        }
       } else if (self.clients.openWindow) {
-        const urlToOpen = targetAddress
+        const urlToOpen = (notifData.type === 'PASSCODE' && targetAddress)
           ? `/?passcodePrompt=${encodeURIComponent(targetAddress)}`
           : '/';
         const newClient = await self.clients.openWindow(urlToOpen);
-        if (newClient && enteredPasscode) {
+        if (newClient && notifData.type === 'PASSCODE' && enteredPasscode) {
           setTimeout(() => {
             try {
               newClient.postMessage({
