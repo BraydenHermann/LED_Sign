@@ -1838,14 +1838,31 @@ export default function App() {
 
   const closePasscodeNotification = async () => {
     try {
-      if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.ready;
-        if (reg?.getNotifications) {
-          const notifs = await reg.getNotifications({ tag: 'led-sign-passcode' });
-          notifs.forEach(n => n.close());
-        }
+      const reg = await getSafeSwRegistration();
+      if (reg?.getNotifications) {
+        const notifs = await reg.getNotifications({ tag: 'led-sign-passcode' });
+        notifs.forEach(n => n.close());
       }
     } catch (e) {}
+  };
+
+  const getSafeSwRegistration = async () => {
+    if (!('serviceWorker' in navigator)) return null;
+    try {
+      // Race navigator.serviceWorker.ready with 400ms timeout so it never hangs indefinitely
+      const reg = await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 400))
+      ]);
+      return reg || null;
+    } catch (e) {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        return reg || null;
+      } catch (err) {
+        return null;
+      }
+    }
   };
 
   const showPasscodeNotification = async (targetAddr, isInvalid = false) => {
@@ -1885,17 +1902,15 @@ export default function App() {
     };
 
     try {
-      if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.ready;
-        if (reg && reg.showNotification) {
-          await reg.showNotification(title, options);
-          return;
-        }
+      const reg = await getSafeSwRegistration();
+      if (reg && reg.showNotification) {
+        await reg.showNotification(title, options);
+        return;
       }
     } catch (err) {
       console.warn('[Notification] ServiceWorker showNotification failed with actions, trying fallback:', err);
       try {
-        const reg = await navigator.serviceWorker.ready;
+        const reg = await getSafeSwRegistration();
         if (reg && reg.showNotification) {
           const fallbackOpts = { ...options };
           delete fallbackOpts.actions;
@@ -1922,14 +1937,24 @@ export default function App() {
   };
 
   const showPresetNotification = async (success, presetName, errorMsg = '') => {
-    if (!isTabInactive()) return;
+    const inactive = isTabInactive();
+    console.log('[Notification] showPresetNotification triggered:', {
+      success,
+      presetName,
+      isInactive: inactive,
+      permission: (typeof Notification !== 'undefined') ? Notification.permission : 'unsupported'
+    });
+    if (!inactive) return;
     if (!('Notification' in window)) return;
     try {
       if (Notification.permission === 'default') {
         await Notification.requestPermission();
       }
     } catch (e) {}
-    if (Notification.permission !== 'granted') return;
+    if (Notification.permission !== 'granted') {
+      console.warn('[Notification] Permission not granted:', Notification.permission);
+      return;
+    }
 
     const title = success ? 'LED Sign: Preset Pushed' : 'LED Sign: Push Failed';
     const cleanName = (presetName || 'Preset').trim();
@@ -1937,12 +1962,15 @@ export default function App() {
       ? `"${cleanName}" has been successfully pushed to the sign.`
       : `Failed to push "${cleanName}" to the sign.${errorMsg ? ' ' + errorMsg : ''}`;
 
+    const iconUrl = `${window.location.origin}/favicon.png`;
     const options = {
       body,
-      icon: '/favicon.png',
-      badge: '/favicon.png',
+      icon: iconUrl,
+      badge: iconUrl,
       tag: 'led-sign-preset-push',
       renotify: true,
+      requireInteraction: true,
+      silent: false,
       data: {
         type: 'PRESET_PUSH',
         url: window.location.href,
@@ -1950,12 +1978,11 @@ export default function App() {
     };
 
     try {
-      if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.ready;
-        if (reg && reg.showNotification) {
-          await reg.showNotification(title, options);
-          return;
-        }
+      const reg = await getSafeSwRegistration();
+      if (reg && reg.showNotification) {
+        await reg.showNotification(title, options);
+        console.log('[Notification] Successfully dispatched via ServiceWorker.showNotification');
+        return;
       }
     } catch (e) {
       console.warn('[Notification] SW showNotification failed, trying fallback:', e);
@@ -1966,11 +1993,13 @@ export default function App() {
         body: options.body,
         icon: options.icon,
         tag: options.tag,
+        requireInteraction: true,
       });
       notif.onclick = () => {
         window.focus();
         notif.close();
       };
+      console.log('[Notification] Successfully dispatched via new Notification fallback');
     } catch (e) {
       console.warn('[Notification] Fallback Notification failed:', e);
     }
@@ -3257,18 +3286,18 @@ export default function App() {
             console.log("[auto-push] Slot 1 already has event text, playing slot 0 directly:", targetCleanText);
             setLastPushedId(targetId);
             setPushing(true);
-            handleSetPushMessage('Playing from Slot 1...');
+            handleSetPushMessage('Playing Event...');
             axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`)
               .then(() => {
-                handleSetPushMessage('Pushed Slot 1 to sign!');
+                handleSetPushMessage('Pushed Event to sign!');
                 if (typeof fetchStatus === 'function') fetchStatus();
-                showPresetNotification(true, currentEvent.summary || 'Slot 1');
+                showPresetNotification(true, currentEvent.summary || 'Event');
               })
               .catch((err) => {
                 console.warn('[auto-push] Failed to play slot 0:', err);
                 const detail = err.response?.data?.detail || err.message || '';
-                handleSetPushMessage(`Error playing Slot 1: ${err.message}`);
-                showPresetNotification(false, currentEvent.summary || 'Slot 1', detail);
+                handleSetPushMessage(`Error playing Event: ${err.message}`);
+                showPresetNotification(false, currentEvent.summary || 'Event', detail);
               })
               .finally(() => {
                 setPushing(false);
@@ -3683,12 +3712,14 @@ export default function App() {
         const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
         const targetEventText = (data.text || data.name || pushName || '').trim();
         if (currentSlot1Text && currentSlot1Text === targetEventText) {
-          handleSetPushMessage('Playing from Slot 1...');
+          handleSetPushMessage('Playing Event...');
         } else {
           handleSetPushMessage('Saving event to Slot 1...');
         }
+      } else if (data.isDefault) {
+        handleSetLocalPushMessage('Pushing Default to sign...');
       } else {
-        const displayName = pushName || (data.mode === 'clock' ? 'Clock' : (data.isDefault ? 'Default' : 'Preset'));
+        const displayName = pushName || (data.mode === 'clock' ? 'Clock' : 'Preset');
         handleSetLocalPushMessage(`Pushing "${displayName}" to sign...`);
       }
     }
@@ -3712,12 +3743,11 @@ export default function App() {
           try {
             await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
             if (!skipMessages) {
-              const displayName = pushName || 'Default';
-              handleSetLocalPushMessage(`Pushed "${displayName}" to sign!`);
+              handleSetLocalPushMessage('Pushed Default to sign!');
             }
             setLastPushedId('hw-slot-1');
             fetchStatus();
-            showPresetNotification(true, pushName || 'Default');
+            showPresetNotification(true, 'Default');
             return;
           } catch (defErr) {
             console.warn('[handlePush] Hardware default slot play failed, falling back to direct push:', defErr);
@@ -3732,8 +3762,7 @@ export default function App() {
         if (fallbackData.mode === 'text') delete fallbackData.pixels;
         await axios.post(`${API_BASE}/push-text`, fallbackData);
         if (!skipMessages) {
-          const displayName = pushName || 'Default';
-          handleSetLocalPushMessage(`Pushed "${displayName}" to sign!`);
+          handleSetLocalPushMessage('Pushed Default to sign!');
         }
         setLastPushedId(data.id || 'hw-slot-1');
       } else if (isEvent) {
@@ -3760,15 +3789,15 @@ export default function App() {
             try {
               console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
               if (!skipMessages) {
-                handleSetPushMessage('Playing from Slot 1...');
+                handleSetPushMessage('Playing Event...');
               }
               await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
               setLastPushedId(autoTargetId || 'hw-slot-0');
               await fetchStatus();
               if (!skipMessages) {
-                handleSetPushMessage('Pushed Slot 1 to sign!');
+                handleSetPushMessage('Pushed Event to sign!');
               }
-              showPresetNotification(true, data.text || pushName || 'Slot 1');
+              showPresetNotification(true, data.text || pushName || 'Event');
               return;
             } catch (playErr) {
               if (playErr.response?.status !== 404) throw playErr;
@@ -3806,7 +3835,7 @@ export default function App() {
             if (targetEventText) {
               localStorage.setItem('loy_hw_cal_text_' + targetMac, targetEventText);
             }
-            showPresetNotification(true, data.text || pushName || 'Slot 1');
+            showPresetNotification(true, data.text || pushName || 'Event');
           } catch (saveErr) {
             console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
             const saveDetail = saveErr.response?.data?.detail || saveErr.message || '';
@@ -3828,7 +3857,7 @@ export default function App() {
             if (manual || (saveErr.response?.status !== 409 && !isConnectionStaleMessage(String(saveDetail)))) {
               handleSetPushMessage(`Error saving to Slot 1: ${saveDetail}`);
             }
-            showPresetNotification(false, data.text || pushName || 'Slot 1', saveDetail);
+            showPresetNotification(false, data.text || pushName || 'Event', saveDetail);
             throw saveErr;
           }
         } else {
@@ -3838,15 +3867,22 @@ export default function App() {
       } else {
         await axios.post(`${API_BASE}/push-text`, data);
         if (!skipMessages) {
-          const displayName = pushName || 'Preset';
-          handleSetLocalPushMessage(`Pushed "${displayName}" to sign!`);
+          const displayName = data.isDefault ? 'Default' : (pushName || 'Preset');
+          handleSetLocalPushMessage(data.isDefault ? 'Pushed Default to sign!' : `Pushed "${displayName}" to sign!`);
         }
         setLastPushedId(data.id || null);
       }
       fetchStatus();
       if (!isEvent) {
-        const displayName = pushName || (data.mode === 'clock' ? 'Clock' : (data.isDefault ? 'Default' : 'Preset'));
-        showPresetNotification(true, displayName);
+        if (data.isDefault) {
+          if (!skipMessages) {
+            handleSetLocalPushMessage('Pushed Default to sign!');
+          }
+          showPresetNotification(true, 'Default');
+        } else {
+          const displayName = pushName || data.name || data.text || (data.mode === 'clock' ? 'Clock' : 'Preset');
+          showPresetNotification(true, displayName);
+        }
       }
     } catch (e) {
       console.error('[push] Failed:', e);
@@ -3859,7 +3895,7 @@ export default function App() {
         (isEvent ? handleSetPushMessage : handleSetLocalPushMessage)('Error: ' + (errorMsg || e.message));
       }
       if (!isEvent) {
-        const displayName = pushName || (data?.mode === 'clock' ? 'Clock' : (data?.isDefault ? 'Default' : 'Preset'));
+        const displayName = data?.isDefault ? 'Default' : (pushName || data?.name || data?.text || (data?.mode === 'clock' ? 'Clock' : 'Preset'));
         showPresetNotification(false, displayName, errorMsg || e.message);
       }
       throw e;
@@ -3999,6 +4035,7 @@ export default function App() {
             setPresetView={setPresetView}
             isConnecting={isSignConnecting}
             isSignUpdating={isSignUpdating}
+            showPresetNotification={showPresetNotification}
           />
         </div>
         <div className="right-column">
@@ -4526,6 +4563,10 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       setLastPushedId(`hw-slot-${hwSlotId}`);
       if (typeof syncHardwareSlots === 'function') await syncHardwareSlots();
       if (typeof fetchStatus === 'function') await fetchStatus();
+      if (typeof showPresetNotification === 'function') {
+        const slotName = presetCopy?.name || `Slot ${globalIdx + 1}`;
+        showPresetNotification(true, slotName);
+      }
     } catch (err) {
       const isCancelled = axios.isCancel(err) ||
         err.name === 'CanceledError' ||
@@ -4539,6 +4580,10 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         const detail = err.response?.data?.detail || err.message || '';
         const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
         setPushMessage(`Error: ${detail || 'Failed to save preset'}`);
+        if (typeof showPresetNotification === 'function') {
+          const slotName = presetCopy?.name || `Slot ${globalIdx + 1}`;
+          showPresetNotification(false, slotName, detail);
+        }
       }
     } finally {
       pollActive = false;
@@ -4579,8 +4624,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
     setPushing(true);
     const isSlot1 = (globalIdx === 0 || hwSlotId === 0);
-    const displayName = preset.name || (preset.mode === 'clock' ? 'Clock' : `slot ${globalIdx + 1}`);
-    setPushMessage(isSlot1 ? 'Playing from Slot 1...' : `Pushing "${displayName}" to sign...`);
+    const isDefault = Boolean(globalIdx === 1 || hwSlotId === 1 || preset.isDefault);
+    const displayName = isDefault ? 'Default' : (preset.name || (preset.mode === 'clock' ? 'Clock' : `slot ${globalIdx + 1}`));
+    setPushMessage(isSlot1 ? 'Playing Event...' : (isDefault ? 'Pushing Default to sign...' : `Pushing "${displayName}" to sign...`));
     setIsManualOverride(true);
 
     try {
@@ -4588,14 +4634,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         // Notify server to switch active hardware preset slot and update live preview
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof fetchStatus === 'function') await fetchStatus();
-        setPushMessage(isSlot1 ? 'Pushed Slot 1 to sign!' : `Pushed "${displayName}" to sign!`);
+        setPushMessage(isSlot1 ? 'Pushed Event to sign!' : (isDefault ? 'Pushed Default to sign!' : `Pushed "${displayName}" to sign!`));
         setLastPushedId(`hw-slot-${hwSlotId}`);
         if (typeof showPresetNotification === 'function') {
-          showPresetNotification(true, isSlot1 ? 'Slot 1' : displayName);
+          showPresetNotification(true, isSlot1 ? 'Event' : (isDefault ? 'Default' : displayName));
         }
       } else {
         await onPush(preset, true, true);
-        setPushMessage(isSlot1 ? 'Pushed Slot 1 to sign!' : `Pushed "${displayName}" to sign!`);
+        setPushMessage(isSlot1 ? 'Pushed Event to sign!' : (isDefault ? 'Pushed Default to sign!' : `Pushed "${displayName}" to sign!`));
         setLastPushedId(preset.id || `hw-slot-${hwSlotId}`);
       }
     } catch (err) {
@@ -4604,7 +4650,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       const isDisconnectError = !status.connected || detail.includes('-2147023673') || detail.toLowerCase().includes('canceled') || detail.toLowerCase().includes('cancelled') || detail.toLowerCase().includes('disconnected') || detail.toLowerCase().includes('not connected');
       setPushMessage(`Error: ${detail || err.message}`);
       if (typeof showPresetNotification === 'function') {
-        showPresetNotification(false, isSlot1 ? 'Slot 1' : displayName, detail);
+        showPresetNotification(false, isSlot1 ? 'Event' : (isDefault ? 'Default' : displayName), detail);
       }
     } finally {
       if (pushingRef) pushingRef.current = false;
@@ -6894,7 +6940,7 @@ function HslColorSlider({ label, value, onChange, disabled = false }) {
 }
 
 /* ─── Media ──────────────────────────────────────────────────────────── */
-function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, setSlotSaveProgress, setSlotSavePhase, isSignUpdating }) {
+function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, onPush, onPushSuccess, now, pushMessage, setPushMessage, setLocalPushMessage, setUnifiedPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, savedPresets, setSavedPresets, syncHardwareSlots, lastPushedId, setLastPushedId, presetView, setPresetView, isConnecting, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, setSlotSaveProgress, setSlotSavePhase, isSignUpdating, showPresetNotification }) {
   const fontReady = useFontReady();
   const [localPage, setLocalPage] = useState(0);
   // A card dragged to another page unmounts, so its own dragend never fires.
@@ -7035,6 +7081,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       setLastPushedId('hw-slot-1');
       setPushMessage('Saved to Slot 2!');
       syncHardwareSlots();
+      if (typeof showPresetNotification === 'function') {
+        showPresetNotification(true, defaultPreset?.name || 'Default (Slot 2)');
+      }
     } catch (error) {
       const isCancelled = axios.isCancel(error) || 
         error.name === 'CanceledError' || 
@@ -7047,6 +7096,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       } else {
         console.warn('[preset-save] Failed to save default to hardware slot 1:', error);
         setPushMessage('Error saving default to Slot 2');
+        if (typeof showPresetNotification === 'function') {
+          showPresetNotification(false, defaultPreset?.name || 'Default (Slot 2)', error?.message);
+        }
       }
     } finally {
       pollActive = false;
@@ -8359,14 +8411,17 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         }
         if (typeof setPushing === 'function') setPushing(true);
         if (typeof setLocalPushMessage === 'function') {
-          setLocalPushMessage(`Pushing "${p.name || 'Default'}" to sign...`);
+          setLocalPushMessage('Pushing Default to sign...');
         }
         if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
         await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof setLocalPushMessage === 'function') {
-          setLocalPushMessage(`Pushed "${p.name || 'Default'}" to sign!`);
+          setLocalPushMessage('Pushed Default to sign!');
         }
         if (onPushSuccess) onPushSuccess();
+        if (typeof showPresetNotification === 'function') {
+          showPresetNotification(true, 'Default');
+        }
       } catch (err) {
         console.error('Failed to trigger default hardware preset:', err);
         if (err.response?.status === 404) {
@@ -8383,6 +8438,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           const detail = err.response?.data?.detail || err.message || '';
           if (typeof setLocalPushMessage === 'function') {
             setLocalPushMessage(`Error: ${detail}`);
+          }
+          if (typeof showPresetNotification === 'function') {
+            showPresetNotification(false, 'Default', detail);
           }
         }
       } finally {
