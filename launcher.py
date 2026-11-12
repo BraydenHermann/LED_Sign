@@ -147,7 +147,7 @@ def launcher_log(message: str):
 # Server lifecycle
 # ---------------------------------------------------------------------------
 
-def force_kill_port(port: int):
+def force_kill_port(port: int, kill_tree: bool = True):
     """Fast, reliable port killer using pure Python netstat parsing and direct taskkill."""
     try:
         output = subprocess.check_output("netstat -ano", shell=True, text=True, stderr=subprocess.DEVNULL)
@@ -159,7 +159,8 @@ def force_kill_port(port: int):
                 if len(parts) >= 5 and parts[-1].isdigit():
                     pids.add(parts[-1])
         for pid in pids:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True, **hidden_process_kwargs())
+            cmd = ["taskkill", "/F", *(["/T"] if kill_tree else []), "/PID", pid]
+            subprocess.run(cmd, capture_output=True, **hidden_process_kwargs())
             launcher_log(f"Killed PID {pid} listening on port {port}.")
     except Exception as err:
         launcher_log(f"Could not kill port {port}: {err}")
@@ -185,14 +186,14 @@ def start_backend():
                 launcher_log(f"Backend is listening on port 8000 (status check: {err}); keeping existing instance.")
                 return
 
-            force_kill_port(8000)
+            force_kill_port(8000, kill_tree=False)
             # Windows may take a moment to release the listener after taskkill
             deadline = time.monotonic() + 5
             while port_open(8000) and time.monotonic() < deadline:
                 time.sleep(0.1)
             if port_open(8000):
                 launcher_log("Port 8000 is still occupied; force killing again.")
-                force_kill_port(8000)
+                force_kill_port(8000, kill_tree=False)
                 time.sleep(0.5)
                 if port_open(8000):
                     launcher_log("Port 8000 is still occupied; refusing to start a second backend.")
@@ -265,7 +266,7 @@ def restart_backend():
             pass
     except Exception as err:
         launcher_log(f"Disconnect request before restart: {err}")
-    force_kill_port(8000)
+    force_kill_port(8000, kill_tree=False)
     deadline = time.monotonic() + 5
     while port_open(8000) and time.monotonic() < deadline:
         time.sleep(0.1)

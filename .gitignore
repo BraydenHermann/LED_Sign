@@ -25,6 +25,7 @@ server/token.json
 server/recovery_contacts.json
 server/.oauth_pending.json
 server/.loy_*.json
+server/.tunnel_*
 
 # Scratch scripts and temporary files
 scratch/
@@ -56,6 +57,8 @@ fix*.py
 server/static/preset_*
 server/static/current.*
 server/static/test_text_rendered.png
+server/static/local_presets.json
+server/static/ui_state.json
 
 # PyInstaller
 dist/

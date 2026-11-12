@@ -17,7 +17,7 @@ import {
   FileSearch, Search, RefreshCw, RotateCcw, StretchHorizontal, StretchVertical, EyeOff, ChevronRight, ChevronDown, X,
   ChevronLeft, AlertCircle, Eraser, Undo2, Redo2, Plus, Pencil, Zap, Gauge, Check,
   Trash2, Pipette, Save, Send, Star, Download, Crosshair, Grid3X3, ScanLine, Type,
-  LogOut, Laptop, Settings, Hand
+  LogOut, Laptop, Settings, Hand, Lock, Copy
 } from 'lucide-react';
 
 const API_BASE = '';
@@ -25,6 +25,53 @@ const DEFAULT_MAC = '';
 const SCAN_PAGE_SIZE = 6;
 const PANEL_W = 64;
 const PANEL_H = 20;
+
+const isRemoteHost = () => {
+  return typeof window !== 'undefined' && (
+    window.location.hostname.includes('trycloudflare.com') ||
+    (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')
+  );
+};
+
+const RemoteIcon = ({ size = 15, className = "" }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+  >
+    <rect x="7" y="2" width="10" height="20" rx="4" />
+    <circle cx="12" cy="7" r="1.5" fill="currentColor" />
+    <circle cx="10" cy="12" r="1" fill="currentColor" />
+    <circle cx="14" cy="12" r="1" fill="currentColor" />
+    <circle cx="10" cy="15" r="1" fill="currentColor" />
+    <circle cx="14" cy="15" r="1" fill="currentColor" />
+    <circle cx="12" cy="18" r="1" fill="currentColor" />
+  </svg>
+);
+
+const renderAnimatedMessage = (msg) => {
+  if (!msg || typeof msg !== 'string') return msg;
+  if (msg.endsWith('...')) {
+    const base = msg.slice(0, -3);
+    return (
+      <>
+        <span>{base}</span>
+        <span className="animated-dots">
+          <span>.</span>
+          <span>.</span>
+          <span>.</span>
+        </span>
+      </>
+    );
+  }
+  return <span>{msg}</span>;
+};
 
 // IndexedDB database storage helper functions to bypass 5MB localStorage limits
 const dbName = "LEDSignDB";
@@ -1600,6 +1647,40 @@ export const normalizeSavedPresets = (list) => {
   return normalized;
 };
 
+export const applySlotOrder = (list, order) => {
+  const normalized = normalizeSavedPresets(list);
+  if (!Array.isArray(order) || order.length === 0) return normalized;
+  const byHwId = new Map();
+  normalized.forEach(item => {
+    if (item && typeof item.hwSlotId === 'number') {
+      byHwId.set(item.hwSlotId, item);
+    }
+  });
+  const result = [];
+  const used = new Set();
+  for (const reservedId of [0, 1]) {
+    const item = byHwId.get(reservedId) || { slotNumber: reservedId + 1, hwSlotId: reservedId, preset: null, onSign: false };
+    result.push(item);
+    used.add(reservedId);
+  }
+  for (const rawId of order) {
+    const hwId = Number(rawId);
+    if (!Number.isInteger(hwId) || hwId < 2 || hwId >= HW_SLOT_COUNT || used.has(hwId)) continue;
+    const item = byHwId.get(hwId) || { slotNumber: hwId + 1, hwSlotId: hwId, preset: null, onSign: false };
+    result.push(item);
+    used.add(hwId);
+  }
+  for (let h = 2; h < HW_SLOT_COUNT; h++) {
+    if (used.has(h)) continue;
+    const item = byHwId.get(h) || { slotNumber: h + 1, hwSlotId: h, preset: null, onSign: false };
+    result.push(item);
+    used.add(h);
+  }
+  const isSameOrder = normalized.length === result.length &&
+    normalized.every((item, idx) => item?.hwSlotId === result[idx]?.hwSlotId);
+  return isSameOrder ? normalized : result;
+};
+
 // Previous/next control shared by the Saved and Local preset grids.
 // Left/Right arrow keys page while `keyboard` is on, and holding a dragged
 // preset over an arrow flips the page so it can be dropped on another page.
@@ -1746,6 +1827,8 @@ export default function App() {
     connected: false, address: null, preview_url: null,
     calendar_connected: false, uptime: '—', frames: 0
   });
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const [brightness, setBrightness] = useState(() => {
     const saved = parseInt(localStorage.getItem('loy_brightness'), 10);
     return saved >= 1 && saved <= 15 ? saved : 15;
@@ -1758,8 +1841,15 @@ export default function App() {
     if (!status.connected) { brightnessSyncedRef.current = false; return; }
     if (brightnessSyncedRef.current || pushingRef.current) return;
     brightnessSyncedRef.current = true;
+    const hasLocalSaved = !isRemoteHost() && localStorage.getItem('loy_brightness') !== null;
     if (status.brightness !== undefined && status.brightness !== brightness) {
-      axios.post(`${API_BASE}/brightness?level=${brightness}`).catch(() => { brightnessSyncedRef.current = false; });
+      if (hasLocalSaved && status.brightness_pct == null) {
+        const savedPct = parseFloat(localStorage.getItem('loy_brightness_pct'));
+        const pctParam = savedPct >= 7 && savedPct <= 100 ? `&pct=${savedPct}` : '';
+        axios.post(`${API_BASE}/brightness?level=${brightness}${pctParam}`).catch(() => { brightnessSyncedRef.current = false; });
+      } else {
+        setBrightness(status.brightness);
+      }
     }
   }, [status.connected, status.brightness]);
   const [speed, setSpeed] = useState(8);
@@ -1824,16 +1914,307 @@ export default function App() {
   const autoConnectTried = useRef(false);
   const manuallyDisconnectedRef = useRef(false);
 
+  // Cloudflare Tunnel & Remote Access State
+  const [tunnelUrl, setTunnelUrl] = useState('');
+  const [remoteCopied, setRemoteCopied] = useState(false);
+  const tunnelUrlRef = useRef('');
+  tunnelUrlRef.current = tunnelUrl;
+
+  const [remoteLocked, setRemoteLocked] = useState(() => isRemoteHost());
+  const [remoteTokenValid, setRemoteTokenValid] = useState(false);
+  const [remoteGoogleAuthed, setRemoteGoogleAuthed] = useState(false);
+  const [remoteGoogleSigningIn, setRemoteGoogleSigningIn] = useState(false);
+  const [remoteChatChallengeId, setRemoteChatChallengeId] = useState('');
+  const [remoteChatCodeInput, setRemoteChatCodeInput] = useState('');
+  const [remoteChatSending, setRemoteChatSending] = useState(false);
+  const [remoteChatVerifying, setRemoteChatVerifying] = useState(false);
+  const [remoteChatSentMsg, setRemoteChatSentMsg] = useState('');
+  const [remoteTokenInput, setRemoteTokenInput] = useState('');
+  const [remoteUnlockError, setRemoteUnlockError] = useState('');
+  const [remoteUnlocking, setRemoteUnlocking] = useState(false);
+  const remoteGooglePollRef = useRef(null);
+
+  const applyRemoteGoogleSession = async (sessionToken) => {
+    if (!sessionToken) return;
+    try {
+      localStorage.setItem('led_remote_google_session', sessionToken);
+    } catch (e) {}
+    document.cookie = `led_remote_google_session=${encodeURIComponent(sessionToken)}; path=/; max-age=604800; SameSite=Lax`;
+    axios.defaults.headers.common['X-Remote-Google-Session'] = sessionToken;
+    setRemoteUnlockError('');
+    if (remoteGooglePollRef.current) {
+      clearInterval(remoteGooglePollRef.current);
+      remoteGooglePollRef.current = null;
+    }
+
+    const tasks = [
+      axios.get(`${API_BASE}/api/local-presets`).then(r => {
+        if (Array.isArray(r.data) && r.data.length > 0) {
+          setPresets(r.data);
+          savePresetsToDB(r.data).catch(() => {});
+        }
+      }).catch(() => {}),
+      typeof fetchStatus === 'function' ? Promise.resolve(fetchStatus()).catch(() => {}) : Promise.resolve(),
+      typeof fetchEvents === 'function' ? Promise.resolve(fetchEvents(true)).catch(() => {}) : Promise.resolve(),
+      typeof syncHardwareSlots === 'function' ? Promise.resolve(syncHardwareSlots()).catch(() => {}) : Promise.resolve(),
+    ];
+    await Promise.allSettled(tasks);
+
+    setRemoteGoogleAuthed(true);
+    setRemoteLocked(false);
+    setRemoteGoogleSigningIn(false);
+  };
+
+  // Cloudflare Tunnel token handling and background pre-fetching
+  useEffect(() => {
+    // 1. Check for token in URL query
+    let token = '';
+    let clickedFreshLink = false;
+    try {
+      const searchParams = new URLSearchParams(window.location.search);
+      const urlTok = searchParams.get('token');
+      if (urlTok) {
+        token = urlTok.trim();
+        clickedFreshLink = true;
+        localStorage.setItem('led_remote_token', token);
+        document.cookie = `led_remote_token=${encodeURIComponent(token)}; path=/; max-age=604800; SameSite=Lax`;
+        // Clicking the remote link requires signing into Google after opening the link
+        localStorage.removeItem('led_remote_google_session');
+        document.cookie = 'led_remote_google_session=; path=/; max-age=0; SameSite=Lax';
+        delete axios.defaults.headers.common['X-Remote-Google-Session'];
+        searchParams.delete('token');
+        const newSearch = searchParams.toString();
+        const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+        window.history.replaceState({}, document.title, newUrl);
+      }
+    } catch (e) {}
+
+    if (!token) {
+      try {
+        token = localStorage.getItem('led_remote_token') || '';
+      } catch (e) {}
+    }
+
+    let googleSession = '';
+    if (!clickedFreshLink) {
+      try {
+        googleSession = localStorage.getItem('led_remote_google_session') || '';
+      } catch (e) {}
+    }
+
+    if (token) {
+      axios.defaults.headers.common['X-Remote-Token'] = token;
+    }
+    if (googleSession) {
+      axios.defaults.headers.common['X-Remote-Google-Session'] = googleSession;
+    }
+
+    // 2. If on a remote host (e.g. trycloudflare.com), verify token + Google authentication
+    if (isRemoteHost()) {
+      if (!token) {
+        setRemoteTokenValid(false);
+        setRemoteGoogleAuthed(false);
+        setRemoteLocked(true);
+      } else {
+        axios.post(`${API_BASE}/api/remote/verify-token`, { token, google_session: googleSession })
+          .then(res => {
+            if (res.data?.valid) {
+              setRemoteTokenValid(true);
+              if (!clickedFreshLink && res.data?.google_authenticated) {
+                setRemoteGoogleAuthed(true);
+                setRemoteLocked(false);
+              } else {
+                setRemoteGoogleAuthed(false);
+                setRemoteLocked(true);
+              }
+            } else {
+              setRemoteTokenValid(false);
+              setRemoteGoogleAuthed(false);
+              setRemoteLocked(true);
+            }
+          })
+          .catch(() => {
+            setRemoteTokenValid(false);
+            setRemoteGoogleAuthed(false);
+            setRemoteLocked(true);
+          });
+      }
+    }
+
+    // Listen for postMessage from the Google OAuth popup window
+    const onMessage = (event) => {
+      const data = event?.data;
+      if (data && data.type === 'led_remote_google_auth') {
+        if (data.status === 'authenticated' && data.session_token) {
+          applyRemoteGoogleSession(data.session_token);
+        } else if (data.status === 'error') {
+          setRemoteGoogleSigningIn(false);
+          setRemoteUnlockError(data.error || 'Google authentication failed');
+          if (remoteGooglePollRef.current) {
+            clearInterval(remoteGooglePollRef.current);
+            remoteGooglePollRef.current = null;
+          }
+        }
+      }
+    };
+    window.addEventListener('message', onMessage);
+
+    // 3. Axios 401 interceptor for remote security challenge
+    const interceptor = axios.interceptors.response.use(
+      response => response,
+      error => {
+        if (error.response?.status === 401 && isRemoteHost()) {
+          const errCode = error.response?.data?.code;
+          if (errCode === 'google_auth_required') {
+            setRemoteTokenValid(true);
+            setRemoteGoogleAuthed(false);
+          } else if (errCode === 'token_required' || errCode === 'token_expired') {
+            setRemoteTokenValid(false);
+            setRemoteGoogleAuthed(false);
+          }
+          setRemoteLocked(true);
+        }
+        return Promise.reject(error);
+      }
+    );
+
+    // 4. Background pre-fetch Cloudflare tunnel URL so copy is instant without spinner
+    const fetchTunnelUrl = async () => {
+      if (isRemoteHost() && !axios.defaults.headers.common['X-Remote-Google-Session']) return;
+      try {
+        const res = await axios.get(`${API_BASE}/api/tunnel/url`);
+        if (res.data?.url) {
+          setTunnelUrl(res.data.url);
+          tunnelUrlRef.current = res.data.url;
+        }
+      } catch (e) {}
+    };
+    fetchTunnelUrl();
+    const pollInterval = setInterval(fetchTunnelUrl, 4000);
+
+    return () => {
+      window.removeEventListener('message', onMessage);
+      axios.interceptors.response.eject(interceptor);
+      clearInterval(pollInterval);
+      if (remoteGooglePollRef.current) {
+        clearInterval(remoteGooglePollRef.current);
+        remoteGooglePollRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleCopyRemoteUrl = async () => {
+    let url = tunnelUrlRef.current || tunnelUrl;
+    if (!url) {
+      try {
+        const res = await axios.get(`${API_BASE}/api/tunnel/url`);
+        if (res.data?.url) {
+          url = res.data.url;
+          setTunnelUrl(url);
+          tunnelUrlRef.current = url;
+        }
+      } catch (e) {}
+    }
+    if (url) {
+      try {
+        await navigator.clipboard.writeText(url);
+        setRemoteCopied(true);
+        setTimeout(() => setRemoteCopied(false), 2000);
+      } catch (err) {
+        console.error('Failed to copy remote url', err);
+      }
+    }
+  };
+
+  const handleUnlockRemote = async (e) => {
+    if (e) e.preventDefault();
+    if (!remoteTokenInput.trim()) return;
+    setRemoteUnlocking(true);
+    setRemoteUnlockError('');
+    try {
+      const tok = remoteTokenInput.trim();
+      const res = await axios.post(`${API_BASE}/api/remote/verify-token`, { token: tok });
+      if (res.data?.valid) {
+        localStorage.setItem('led_remote_token', tok);
+        document.cookie = `led_remote_token=${encodeURIComponent(tok)}; path=/; max-age=604800; SameSite=Lax`;
+        axios.defaults.headers.common['X-Remote-Token'] = tok;
+        setRemoteTokenValid(true);
+        setRemoteTokenInput('');
+        if (res.data?.google_authenticated) {
+          setRemoteGoogleAuthed(true);
+          setRemoteLocked(false);
+          fetchStatus();
+        } else {
+          setRemoteGoogleAuthed(false);
+          setRemoteLocked(true);
+        }
+      } else {
+        setRemoteUnlockError('Invalid access token');
+      }
+    } catch (err) {
+      setRemoteUnlockError(err.response?.data?.detail || 'Failed to authenticate');
+    } finally {
+      setRemoteUnlocking(false);
+    }
+  };
+
+  const handleSendRemoteChatCode = async () => {
+    if (remoteChatSending) return;
+    setRemoteChatSending(true);
+    setRemoteUnlockError('');
+    setRemoteChatSentMsg('');
+    try {
+      const res = await axios.post(`${API_BASE}/api/remote/send-chat-code`);
+      if (res.data?.challenge_id) {
+        setRemoteChatChallengeId(res.data.challenge_id);
+        setRemoteChatCodeInput('');
+        setRemoteChatSentMsg('Verification code sent to Google Chat!');
+      } else {
+        throw new Error('Could not send verification code');
+      }
+    } catch (err) {
+      setRemoteUnlockError(err.response?.data?.detail || err.message || 'Failed to send verification code');
+    } finally {
+      setRemoteChatSending(false);
+    }
+  };
+
+  const handleVerifyRemoteChatCode = async (e) => {
+    if (e) e.preventDefault();
+    const cleaned = remoteChatCodeInput.replace(/\D/g, '');
+    if (cleaned.length !== 6 || !remoteChatChallengeId || remoteChatVerifying) return;
+    setRemoteChatVerifying(true);
+    setRemoteUnlockError('');
+    try {
+      const res = await axios.post(`${API_BASE}/api/remote/verify-chat-code`, {
+        challenge_id: remoteChatChallengeId,
+        code: cleaned,
+      });
+      if (res.data?.valid && res.data?.session_token) {
+        await applyRemoteGoogleSession(res.data.session_token);
+        setRemoteChatChallengeId('');
+        setRemoteChatCodeInput('');
+        setRemoteChatSentMsg('');
+      } else {
+        setRemoteUnlockError('Invalid verification code');
+      }
+    } catch (err) {
+      setRemoteUnlockError(err.response?.data?.detail || 'Invalid or expired verification code');
+    } finally {
+      setRemoteChatVerifying(false);
+    }
+  };
+
   const passcodeTargetRef = useRef(null);
   passcodeTargetRef.current = passcodeTarget;
   const doConnectRef = useRef();
 
   const isTabInactive = () => {
-    return Boolean(
-      document.hidden ||
-      document.visibilityState !== 'visible' ||
-      (typeof document.hasFocus === 'function' && !document.hasFocus())
-    );
+    // If the document is currently visible, user actively has the app open on screen
+    if (document.visibilityState === 'visible' && !document.hidden) {
+      return false;
+    }
+    return true;
   };
 
   const closePasscodeNotification = async () => {
@@ -1866,6 +2247,7 @@ export default function App() {
   };
 
   const showPasscodeNotification = async (targetAddr, isInvalid = false) => {
+    if (!isTabInactive()) return;
     if (!('Notification' in window)) return;
     try {
       if (Notification.permission === 'default') {
@@ -1873,6 +2255,15 @@ export default function App() {
       }
     } catch (e) {}
     if (Notification.permission !== 'granted') return;
+
+    try {
+      const bucketId = `passcode-${targetAddr}-${Math.floor(Date.now() / 4000)}`;
+      const claimRes = await axios.post(`${API_BASE}/api/claim-notification`, { id: bucketId });
+      if (claimRes.data && claimRes.data.claimed === false) {
+        console.log('[Notification] Suppressed passcode notification by server claim check:', claimRes.data.reason);
+        return;
+      }
+    } catch (e) {}
 
     const title = isInvalid ? 'LED Sign: Incorrect Passcode' : 'LED Sign: Passcode Required';
     const body = isInvalid
@@ -1961,6 +2352,15 @@ export default function App() {
     const body = success
       ? `"${cleanName}" has been successfully pushed to the sign.`
       : `Failed to push "${cleanName}" to the sign.${errorMsg ? ' ' + errorMsg : ''}`;
+
+    try {
+      const bucketId = `preset-${cleanName}-${Math.floor(Date.now() / 4000)}`;
+      const claimRes = await axios.post(`${API_BASE}/api/claim-notification`, { id: bucketId });
+      if (claimRes.data && claimRes.data.claimed === false) {
+        console.log('[Notification] Suppressed preset notification by server claim check:', claimRes.data.reason);
+        return;
+      }
+    } catch (claimErr) {}
 
     const iconUrl = `${window.location.origin}/favicon.png`;
     const options = {
@@ -2098,7 +2498,7 @@ export default function App() {
 
   const isSignConnecting = Boolean(
     isConnecting || 
-    (!status.connected && !manuallyDisconnectedRef.current && Boolean(localStorage.getItem('loy_last_connected_mac')) && !autoConnectTried.current && !connectionFailed)
+    (!status.connected && hasFetchedStatus && !manuallyDisconnectedRef.current && Boolean(localStorage.getItem('loy_last_connected_mac')) && !autoConnectTried.current && !connectionFailed && !apiError && !scanOpen)
   );
 
   const [presetView, setPresetView] = useState('local');
@@ -2188,6 +2588,9 @@ export default function App() {
       if (connectionError && (isConnectionStaleMessage(connectionError) || connectionError.toLowerCase().includes('not connected') || connectionError.toLowerCase().includes('failed to connect'))) {
         setConnectionError('');
       }
+    } else if (!status?.connected) {
+      setPushMessage('');
+      setLocalPushMessage('');
     }
   }, [status?.connected, pushMessage, localPushMessage, connectionError]);
 
@@ -2201,8 +2604,16 @@ export default function App() {
   const [previewStamp, setPreviewStamp] = useState(Date.now());
   const lastPreviewTs = useRef(0);
   const lastFramesRef = useRef(-1);
+  const lastLocalBrightnessChangeRef = useRef(0);
+  const lastLocalSavedOrderChangeRef = useRef(0);
+  const lastLocalPresetsModifyRef = useRef(0);
+  const lastLocalPresetsTsRef = useRef(0);
+  const lastHardwareSlotsTsRef = useRef(0);
 
-  const fetchStatus = async () => {
+  const fetchStatus = async (forceImmediate = false) => {
+    if (isRemoteHost() && !axios.defaults.headers.common['X-Remote-Google-Session']) {
+      return null;
+    }
     try {
       const res = await axios.get(`${API_BASE}/status`);
       // Do not let a late poll for the previous sign replace the selected
@@ -2226,7 +2637,8 @@ export default function App() {
         setConnectionError(prev => (prev && (isConnectionStaleMessage(prev) || prev.toLowerCase().includes('not connected') || prev.toLowerCase().includes('failed to connect'))) ? '' : prev);
       } else if (hadLiveConnectionRef.current) {
         disconnectedStatusPollsRef.current += 1;
-        if (disconnectedStatusPollsRef.current < 3) return res.data;
+        if (!forceImmediate && disconnectedStatusPollsRef.current < 3) return res.data;
+        hadLiveConnectionRef.current = false;
       }
       setStatus(res.data);
       if (res.data && res.data.connected && res.data.address) {
@@ -2242,15 +2654,86 @@ export default function App() {
       setHasFetchedStatus(true);
       if (res.data.power !== undefined) setPower(res.data.power);
       if (res.data.speed !== undefined) setSpeed(res.data.speed);
+      if (Date.now() - lastLocalBrightnessChangeRef.current > 2500) {
+        if (res.data.brightness !== undefined && (brightnessSyncedRef.current || isRemoteHost() || localStorage.getItem('loy_brightness') === null || res.data.brightness_pct != null)) {
+          setBrightness(res.data.brightness);
+        }
+      }
+      if (res.data.local_presets_ts) {
+        if (lastLocalPresetsTsRef.current === 0) {
+          lastLocalPresetsTsRef.current = res.data.local_presets_ts;
+        } else if (res.data.local_presets_ts !== lastLocalPresetsTsRef.current) {
+          lastLocalPresetsTsRef.current = res.data.local_presets_ts;
+          if (Date.now() - lastLocalPresetsModifyRef.current > 2500) {
+            axios.get(`${API_BASE}/api/local-presets`).then(r => {
+              if (Array.isArray(r.data) && r.data.length > 0) {
+                setPresets(r.data);
+                savePresetsToDB(r.data).catch(() => {});
+                try { localStorage.setItem('loy_local_presets_ts', String(res.data.local_presets_ts)); } catch (e) {}
+              }
+            }).catch(() => {});
+          }
+        }
+      }
+      if (res.data.hardware_slots_ts) {
+        if (lastHardwareSlotsTsRef.current === 0) {
+          lastHardwareSlotsTsRef.current = res.data.hardware_slots_ts;
+        } else if (res.data.hardware_slots_ts !== lastHardwareSlotsTsRef.current && !pushingRef.current) {
+          lastHardwareSlotsTsRef.current = res.data.hardware_slots_ts;
+          if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
+        }
+      }
+      if (res.data.device_names && typeof res.data.device_names === 'object') {
+        const serverNames = res.data.device_names;
+        setDeviceNames(prev => {
+          if (!isRemoteHost()) {
+            const missing = {};
+            for (const [k, v] of Object.entries(prev || {})) {
+              if (v && !(k in serverNames)) {
+                missing[k] = v;
+              }
+            }
+            if (Object.keys(missing).length > 0) {
+              axios.post(`${API_BASE}/api/ui-state`, { device_names: missing }).catch(() => {});
+            }
+          }
+          const merged = { ...prev, ...serverNames };
+          return JSON.stringify(merged) === JSON.stringify(prev) ? prev : merged;
+        });
+      }
+      if (typeof res.data.clean_name === 'boolean') {
+        setCleanName(prev => {
+          if (prev === res.data.clean_name) return prev;
+          try { localStorage.setItem('loy_clean_name', String(res.data.clean_name)); } catch (e) {}
+          return res.data.clean_name;
+        });
+      }
+      if (res.data.connected && !pushingRef.current && !initializingConnectionRef.current) {
+        if (res.data.last_pushed_id && res.data.last_pushed_id !== lastPushedIdRef.current) {
+          setLastPushedId(res.data.last_pushed_id, true);
+          if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
+          if (!presetsRef.current?.some(p => p.id === res.data.last_pushed_id)) {
+            axios.get(`${API_BASE}/api/local-presets`).then(r => {
+              if (Array.isArray(r.data) && r.data.length > 0) setPresets(r.data);
+            }).catch(() => {});
+          }
+        }
+        if (res.data.is_manual_override !== undefined && Boolean(res.data.is_manual_override) !== isManualOverrideRef.current) {
+          setIsManualOverride(Boolean(res.data.is_manual_override), true);
+        }
+      }
       // Update previewStamp only when preview timestamp changes (avoid restart on frame count updates)
       if (res.data.preview_url && res.data.preview_ts !== lastPreviewTs.current) {
         lastPreviewTs.current = res.data.preview_ts;
         setPreviewStamp(res.data.preview_ts || Date.now());
+        if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
       }
       return res.data;
     } catch (e) {
       if (!e.response) {
         setApiError(true);
+        hadLiveConnectionRef.current = false;
+        disconnectedStatusPollsRef.current = 0;
       }
       return null;
     }
@@ -2266,12 +2749,23 @@ export default function App() {
   }, []);
 
   // Tell the launcher that an LED Sign page already exists, even when it is in
-  // a different browser window.
+  // a different browser window. Reports active visibility to suppress double/background notifications.
   useEffect(() => {
-    const heartbeat = () => axios.post(`${API_BASE}/ui-heartbeat`).catch(() => {});
-    heartbeat();
-    const id = setInterval(heartbeat, 5000);
-    return () => clearInterval(id);
+    const sendHeartbeat = () => {
+      if (isRemoteHost() && !axios.defaults.headers.common['X-Remote-Google-Session']) return;
+      const isVisible = document.visibilityState === 'visible' && !document.hidden;
+      axios.post(`${API_BASE}/ui-heartbeat`, { active: isVisible }).catch(() => {});
+    };
+    sendHeartbeat();
+    const id = setInterval(sendHeartbeat, 3000);
+    const onVisOrFocus = () => sendHeartbeat();
+    window.addEventListener('visibilitychange', onVisOrFocus);
+    window.addEventListener('focus', onVisOrFocus);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('visibilitychange', onVisOrFocus);
+      window.removeEventListener('focus', onVisOrFocus);
+    };
   }, []);
 
   // Give the user time to choose another sign before trying the last one.
@@ -2479,14 +2973,42 @@ export default function App() {
       setPresetView('local');
     }
   }, [status.connected]);
-  const [lastPushedId, setLastPushedId] = useState(null);
+  const [lastPushedId, setLastPushedIdState] = useState(null);
+  const lastPushedIdRef = useRef(null);
   const [isManualOverride, setIsManualOverrideState] = useState(false);
   const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
+  const hasInitializedEventIdRef = useRef(false);
   // Retain the manually selected saved slot while a calendar event temporarily
   // uses its dedicated calendar slot, so it can be restored when the event ends.
   const calendarReturnPresetRef = useRef(null);
   const playbackSignRef = useRef(null);
+
+  const syncUiStateToServer = (nextLastPushedId, nextManualOverride) => {
+    axios.post(`${API_BASE}/api/ui-state`, {
+      last_pushed_id: nextLastPushedId,
+      is_manual_override: nextManualOverride
+    }).catch(() => {});
+  };
+
+  const setLastPushedId = (val, fromServer = false) => {
+    const resolved = typeof val === 'function' ? val(lastPushedIdRef.current) : val;
+    lastPushedIdRef.current = resolved;
+    setLastPushedIdState(resolved);
+    if (!fromServer && statusRef.current?.connected) {
+      syncUiStateToServer(resolved, isManualOverrideRef.current);
+    }
+  };
+
+  const setIsManualOverride = (val, fromServer = false) => {
+    const resolved = typeof val === 'function' ? val(isManualOverrideRef.current) : val;
+    isManualOverrideRef.current = resolved;
+    setIsManualOverrideState(resolved);
+    if (!fromServer && statusRef.current?.connected) {
+      syncUiStateToServer(lastPushedIdRef.current, resolved);
+    }
+  };
+
   useEffect(() => {
     if (!status.connected || !status.address) return;
     const signMac = status.address.toUpperCase();
@@ -2495,6 +3017,7 @@ export default function App() {
       setLastPushedId(null);
       calendarReturnPresetRef.current = null;
       lastActiveEventIdRef.current = null;
+      hasInitializedEventIdRef.current = false;
       setIsManualOverrideState(false);
       isManualOverrideRef.current = false;
     }
@@ -2508,7 +3031,15 @@ export default function App() {
         localStorage.setItem(`loy_last_pushed_id_${signMac}`, lastPushedId);
       }
     }
-  }, [lastPushedId, status?.address]);
+    if (status?.connected && lastPushedId && !status.last_pushed_id && !isRemoteHost()) {
+      const savedPct = parseFloat(localStorage.getItem('loy_brightness_pct'));
+      axios.post(`${API_BASE}/api/ui-state`, {
+        last_pushed_id: lastPushedId,
+        is_manual_override: isManualOverrideRef.current,
+        ...(status.brightness_pct == null && savedPct >= 7 && savedPct <= 100 ? { brightness_pct: savedPct } : {})
+      }).catch(() => {});
+    }
+  }, [lastPushedId, status?.address, status?.connected, status?.last_pushed_id]);
 
   const getSavedLastPushedId = (mac) => {
     if (!mac) return null;
@@ -2519,10 +3050,6 @@ export default function App() {
   // replay the default and overwrite the preset the user deliberately chose.
   const initializedConnectionMacsRef = useRef(new Set());
   const initializingConnectionRef = useRef(false);
-  const setIsManualOverride = (val) => {
-    isManualOverrideRef.current = val;
-    setIsManualOverrideState(val);
-  };
   const [deviceNames, setDeviceNames] = useState(() => {
     try { return JSON.parse(localStorage.getItem('loy_device_names_v2') || '{}'); }
     catch { return {}; }
@@ -2621,9 +3148,32 @@ export default function App() {
           setAllSavedPresets(dbSavedPresets);
         }
 
-        // Initialize default presets if empty
+        // Check server for synced local presets (from localhost or other sessions)
+        let loadedFromServer = false;
+        try {
+          const srvRes = await axios.get(`${API_BASE}/api/local-presets`);
+          const srvTs = parseFloat(srvRes.headers?.['x-local-presets-ts'] || '0') || 0;
+          const localKnownTs = parseFloat(localStorage.getItem('loy_local_presets_ts') || '0') || 0;
+          const serverIsNewer = localKnownTs > 0 && srvTs > localKnownTs + 0.001;
+          if (Array.isArray(srvRes.data) && srvRes.data.length > 0) {
+            if (!dbPresets || dbPresets.length === 0 || isRemoteHost() || serverIsNewer) {
+              dbPresets = srvRes.data;
+              loadedFromServer = true;
+              if (srvTs > 0) {
+                lastLocalPresetsTsRef.current = srvTs;
+                try { localStorage.setItem('loy_local_presets_ts', String(srvTs)); } catch (e) {}
+              }
+              await savePresetsToDB(dbPresets);
+              localStorage.setItem('loy_presets_initialized', 'true');
+            }
+          }
+        } catch (e) {
+          console.warn('[presets] Failed to load server local presets:', e);
+        }
+
+        // Initialize default presets if empty and server had none
         const initialized = localStorage.getItem('loy_presets_initialized');
-        if (!initialized || !dbPresets || dbPresets.length === 0) {
+        if (!initialized && (!dbPresets || dbPresets.length === 0)) {
           localStorage.setItem('loy_presets_initialized', 'true');
           const clockPreset = {
             id: 'clock-default',
@@ -2680,6 +3230,14 @@ export default function App() {
         }
 
         setPresets(dbPresets);
+        if (!isRemoteHost() && !loadedFromServer && Array.isArray(dbPresets) && dbPresets.length > 0) {
+          axios.post(`${API_BASE}/api/local-presets`, dbPresets).then(r => {
+            if (r.data?.local_presets_ts) {
+              lastLocalPresetsTsRef.current = r.data.local_presets_ts;
+              try { localStorage.setItem('loy_local_presets_ts', String(r.data.local_presets_ts)); } catch (e) {}
+            }
+          }).catch(() => {});
+        }
       } catch (err) {
         console.error("Failed to load presets from DB:", err);
       } finally {
@@ -2689,6 +3247,23 @@ export default function App() {
     loadFromDB();
   }, []);
 
+  const updateLocalPresets = (nextOrUpdater) => {
+    lastLocalPresetsModifyRef.current = Date.now();
+    setPresets(prev => {
+      const resolved = typeof nextOrUpdater === 'function' ? nextOrUpdater(prev) : nextOrUpdater;
+      if (Array.isArray(resolved) && resolved.length > 0) {
+        savePresetsToDB(resolved).catch(err => console.error("Failed to save presets to IndexedDB:", err));
+        axios.post(`${API_BASE}/api/local-presets`, resolved).then(r => {
+          if (r.data?.local_presets_ts) {
+            lastLocalPresetsTsRef.current = r.data.local_presets_ts;
+            try { localStorage.setItem('loy_local_presets_ts', String(r.data.local_presets_ts)); } catch (e) {}
+          }
+        }).catch(() => {});
+      }
+      return resolved;
+    });
+  };
+
   // Save presets to IndexedDB whenever presets change (after db is loaded)
   useEffect(() => {
     if (dbLoaded) {
@@ -2697,8 +3272,6 @@ export default function App() {
   }, [presets, dbLoaded]);
 
   // Sync presets, settings and AI keys with the signed-in Google account.
-  const statusRef = useRef(status);
-  statusRef.current = status;
   const [syncStatus, setSyncStatus] = useState({ state: 'idle' });
   const syncStatusRef = useRef(syncStatus);
   syncStatusRef.current = syncStatus;
@@ -2706,13 +3279,14 @@ export default function App() {
   presetsRef.current = presets;
   const cloudSyncingRef = useRef(false);
   const runCloudSync = async (isRetry = false) => {
+    if (isRemoteHost()) return;
     if (!statusRef.current?.calendar_connected || !dbLoaded || cloudSyncingRef.current) return;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     cloudSyncingRef.current = true;
     setSyncStatus(prev => ({ ...prev, state: 'syncing' }));
     try {
       const { presetsChanged, plan, downloaded } = await runSync(presetsRef.current, API_BASE);
-      if (presetsChanged) setPresets(prev => applyPresetChanges(prev, plan, downloaded));
+      if (presetsChanged) updateLocalPresets(prev => applyPresetChanges(prev, plan, downloaded));
       setSyncStatus({ state: 'ok', lastSync: Date.now() });
     } catch (e) {
       console.warn('[sync] Failed:', e);
@@ -2774,7 +3348,13 @@ export default function App() {
       const values = e.detail || {};
       if ('loy_clean_name' in values) setCleanName(values.loy_clean_name !== 'false');
       if ('loy_device_names_v2' in values) {
-        try { setDeviceNames(JSON.parse(values.loy_device_names_v2 || '{}')); } catch { /* ignore */ }
+        try {
+          const parsedNames = JSON.parse(values.loy_device_names_v2 || '{}');
+          setDeviceNames(parsedNames);
+          if (!isRemoteHost() && parsedNames && Object.keys(parsedNames).length > 0) {
+            axios.post(`${API_BASE}/api/ui-state`, { device_names: parsedNames }).catch(() => {});
+          }
+        } catch { /* ignore */ }
       }
     };
     window.addEventListener(SYNC_APPLIED_EVENT, onApplied);
@@ -2814,12 +3394,47 @@ export default function App() {
     }
   }, [allSavedPresets, dbLoaded]);
 
+  const syncSavedSlotOrderToServer = (mac, slotList) => {
+    if (!mac || mac === 'DEFAULT' || !Array.isArray(slotList)) return;
+    lastLocalSavedOrderChangeRef.current = Date.now();
+    const order = slotList.map((s, idx) => s?.hwSlotId ?? s?.preset?.hwSlotId ?? idx);
+    axios.post(`${API_BASE}/api/ui-state`, {
+      saved_slot_orders: { [mac.toUpperCase()]: order }
+    }).catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!dbLoaded || !activeMac || activeMac === 'DEFAULT') return;
+    const macKey = activeMac.toUpperCase();
+    const serverOrder = status?.saved_slot_orders?.[macKey];
+    if (Array.isArray(serverOrder) && serverOrder.length > 0) {
+      if (Date.now() - lastLocalSavedOrderChangeRef.current > 2500) {
+        setAllSavedPresets(prev => {
+          const cur = normalizeSavedPresets(prev[macKey]);
+          const reordered = applySlotOrder(cur, serverOrder);
+          return reordered === cur ? prev : { ...prev, [macKey]: reordered };
+        });
+      }
+    } else if (!isRemoteHost() && status?.connected) {
+      const cur = normalizeSavedPresets(allSavedPresets[macKey]);
+      const curOrder = cur.map((s, idx) => s?.hwSlotId ?? idx);
+      axios.post(`${API_BASE}/api/ui-state`, {
+        saved_slot_orders: { [macKey]: curOrder }
+      }).catch(() => {});
+    }
+  }, [status?.saved_slot_orders, status?.connected, activeMac, dbLoaded]);
+
   useEffect(() => {
     localStorage.setItem('loy_device_names_v2', JSON.stringify(deviceNames));
   }, [deviceNames]);
 
   const setDeviceName = (addr, name) => {
-    setDeviceNames(prev => ({ ...prev, [addr.toUpperCase()]: name }));
+    const key = addr.toUpperCase();
+    setDeviceNames(prev => {
+      const next = { ...prev, [key]: name };
+      axios.post(`${API_BASE}/api/ui-state`, { device_names: { [key]: name } }).catch(() => {});
+      return next;
+    });
   };
 
   // Update clock every 10s for live "Now" badges and auto-push
@@ -3012,8 +3627,12 @@ export default function App() {
       if (Array.isArray(hwSlots) && hwSlots.length > 0) {
         setAllSavedPresets(prev => {
           const rawList = prev[activeMac];
-          const currentList = normalizeSavedPresets(rawList);
-          let updated = false;
+          const serverOrder = statusRef.current?.saved_slot_orders?.[activeMac?.toUpperCase()];
+          const baseList = (Array.isArray(serverOrder) && Date.now() - lastLocalSavedOrderChangeRef.current > 2500)
+            ? applySlotOrder(rawList, serverOrder)
+            : normalizeSavedPresets(rawList);
+          const currentList = [...baseList];
+          let updated = baseList !== rawList;
           hwSlots.forEach(s => {
             const idx = s.slot_id;
             if (idx >= 0 && idx < HW_SLOT_COUNT) {
@@ -3021,6 +3640,12 @@ export default function App() {
                 // Slot 2 is reserved for the Default Preset. Never clear it to null!
                 const defPreset = (presets || []).find(p => p.isDefault);
                 const currentMac = (status?.address || (activeMac && activeMac !== 'DEFAULT' ? activeMac : DEFAULT_MAC)).toUpperCase();
+                if (s.occupied || s.preset_data || s.preview_url) {
+                  localStorage.setItem('loy_hw_default_synced_' + currentMac, 'true');
+                  if (s.preset_data?.id || defPreset?.id) {
+                    localStorage.setItem('loy_hw_default_preset_id_' + currentMac, String(s.preset_data?.id || defPreset?.id));
+                  }
+                }
                 const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + currentMac);
                 const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + currentMac)) &&
                   (!defPreset?.id || !syncedPresetId || syncedPresetId === String(defPreset.id));
@@ -3198,13 +3823,10 @@ export default function App() {
     const mac = (targetMac || status?.address || DEFAULT_MAC).toUpperCase();
     const lastId = effectiveLastId || lastPushedId || getSavedLastPushedId(mac);
     if (!lastId) return false;
+    if (lastId === 'hw-slot-1' || lastId === 'preset-1') return true;
     if (defPreset?.mode === 'clock') {
       return lastId === 'clock-default' || lastId === 'clock' || Boolean(defPreset.id && lastId === defPreset.id);
     }
-    const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + mac);
-    const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + mac)) &&
-      (!defPreset?.id || !syncedPresetId || syncedPresetId === String(defPreset.id));
-    if (isDefaultSynced && lastId === 'hw-slot-1') return true;
     return Boolean(defPreset?.id && lastId === defPreset.id);
   };
 
@@ -3219,7 +3841,10 @@ export default function App() {
       if (events) {
         const nextEvent = selectCalendarEvent(events, now);
         const nextEventId = nextEvent ? `${nextEvent.id}-${nextEvent.start_iso}` : null;
-        if (nextEventId !== lastActiveEventIdRef.current) {
+        if (!hasInitializedEventIdRef.current) {
+          hasInitializedEventIdRef.current = true;
+          lastActiveEventIdRef.current = nextEventId;
+        } else if (nextEventId !== lastActiveEventIdRef.current) {
           console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current || 'none'} -> ${nextEventId || 'none'}. Clearing manual override.`);
           setIsManualOverride(false);
           lastActiveEventIdRef.current = nextEventId;
@@ -3286,17 +3911,17 @@ export default function App() {
             console.log("[auto-push] Slot 1 already has event text, playing slot 0 directly:", targetCleanText);
             setLastPushedId(targetId);
             setPushing(true);
-            handleSetPushMessage('Playing Event...');
+            handleSetPushMessage('Playing event...');
             axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`)
               .then(() => {
-                handleSetPushMessage('Pushed Event to sign!');
+                handleSetPushMessage('Pushed event sign!');
                 if (typeof fetchStatus === 'function') fetchStatus();
                 showPresetNotification(true, currentEvent.summary || 'Event');
               })
               .catch((err) => {
                 console.warn('[auto-push] Failed to play slot 0:', err);
                 const detail = err.response?.data?.detail || err.message || '';
-                handleSetPushMessage(`Error playing Event: ${err.message}`);
+                handleSetPushMessage(`Error playing event: ${err.message}`);
                 showPresetNotification(false, currentEvent.summary || 'Event', detail);
               })
               .finally(() => {
@@ -3308,6 +3933,12 @@ export default function App() {
           console.log(`[auto-push] Auto-applying event 5m before start: "${currentEvent.summary}"`);
           handlePush(targetContent.summary, false, false, targetId).catch(() => {});
         } else {
+          const wasShowingEvent = String(lastPushedId || '').startsWith('event-') ||
+            lastPushedId === 'hw-slot-0' ||
+            Boolean(calendarReturnPresetRef.current);
+          if (!wasShowingEvent) {
+            return;
+          }
           const returnPreset = calendarReturnPresetRef.current;
           calendarReturnPresetRef.current = null;
           if (returnPreset) {
@@ -3326,10 +3957,10 @@ export default function App() {
                 id: `hw-slot-${returnSlotId}`
               });
             }
-            handleSetPushMessage(`Pushing "${returnDisplayName}" to sign...`);
+            handleSetPushMessage(`Pushing "${returnDisplayName}" sign...`);
             axios.post(`${API_BASE}/preset?id=${returnPreset.slotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`)
               .then(() => {
-                handleSetPushMessage(`Pushed "${returnDisplayName}" to sign!`);
+                handleSetPushMessage(`Pushed "${returnDisplayName}" sign!`);
                 if (typeof fetchStatus === 'function') fetchStatus();
                 showPresetNotification(true, returnDisplayName);
               })
@@ -3415,7 +4046,7 @@ export default function App() {
       if (preSavingSlot1Ref.current || pushingRef.current || isSignUpdatingRef.current || !statusRef.current?.connected) return;
       preSavingSlot1Ref.current = true;
       setPushing(true);
-      handleSetPushMessage('Saving event to Slot 1...');
+      handleSetPushMessage('Saving event...');
       try {
         const isShowingSlot1 = (lastPushedId === 'hw-slot-0') ||
           String(lastPushedId || '').startsWith('event-');
@@ -3460,7 +4091,7 @@ export default function App() {
         localStorage.setItem('loy_hw_cal_synced_' + targetMac, 'true');
         localStorage.setItem('loy_hw_cal_text_' + targetMac, nextCleanText);
         preSaveSlot1FailedRef.current = { text: '', time: 0 };
-        handleSetPushMessage('Saved to Slot 1!');
+        handleSetPushMessage('Saved event!');
 
         if (isShowingSlot1) {
           console.log("[auto-pre-save] Was showing slot 1; restoring default preset");
@@ -3480,8 +4111,8 @@ export default function App() {
         }
       } catch (err) {
         console.warn('[auto-pre-save] Failed to pre-save next event to Slot 1:', err);
-        const detail = err.response?.data?.detail || err.message || 'Failed to save to Slot 1';
-        handleSetPushMessage(`Error saving to Slot 1: ${detail}`);
+        const detail = err.response?.data?.detail || err.message || 'Failed to save event';
+        handleSetPushMessage(`Error saving event: ${detail}`);
         preSaveSlot1FailedRef.current = { text: nextCleanText, time: Date.now() };
 
         // Ensure sign is not left black on failure if no active event is running
@@ -3523,6 +4154,29 @@ export default function App() {
       const pushDefaultOrActive = async () => {
         if (!isModalOpenRef.current) {
           setPresetView('saved');
+        }
+        if (typeof syncHardwareSlots === 'function') {
+          await syncHardwareSlots();
+        }
+        const serverLastPushedId = status.last_pushed_id;
+        const hasActiveDisplay = Boolean(
+          serverLastPushedId ||
+          (status.display_mode && status.display_mode !== 'none' && status.display_mode !== 'static')
+        );
+        if (isRemoteHost() || hasActiveDisplay) {
+          const effectiveId = serverLastPushedId ||
+            priorLastPushedId ||
+            (status.display_mode && status.display_mode.startsWith('preset-')
+              ? `hw-slot-${status.display_mode.split('-')[1]}`
+              : (status.display_mode === 'clock' ? 'clock-default' : 'hw-slot-1'));
+          console.log("[connect] Sign is already running/remote session connected; preserving active display:", effectiveId);
+          if (status.is_manual_override !== undefined && serverLastPushedId) {
+            setIsManualOverride(Boolean(status.is_manual_override), true);
+          } else if (priorManualOverride) {
+            setIsManualOverride(true, Boolean(serverLastPushedId));
+          }
+          setLastPushedId(effectiveId, Boolean(serverLastPushedId));
+          return;
         }
         // 1. Calendar Slot (hardware slot 0, slot 1 in UI) - check first so active event shows immediately
         let evs = events;
@@ -3591,6 +4245,11 @@ export default function App() {
         }
 
         if (!active) {
+          if (isRemoteHost() || (status.display_mode && status.display_mode !== 'none' && status.display_mode !== 'static')) {
+            console.log("[connect] Sign is already running/remote session connected; preserving active display:", status.display_mode);
+            setLastPushedId(status.display_mode || 'hw-slot-1');
+            return;
+          }
           // Calendar slot 0 is sign-specific. Without an active event, never
           // seed it from another sign's cached calendar preset.
           const savedLastPushedId = priorLastPushedId;
@@ -3712,15 +4371,15 @@ export default function App() {
         const currentSlot1Text = (currentSlot1Preset?.text || currentSlot1Preset?.name || '').trim();
         const targetEventText = (data.text || data.name || pushName || '').trim();
         if (currentSlot1Text && currentSlot1Text === targetEventText) {
-          handleSetPushMessage('Playing Event...');
+          handleSetPushMessage('Playing event...');
         } else {
-          handleSetPushMessage('Saving event to Slot 1...');
+          handleSetPushMessage('Saving event...');
         }
       } else if (data.isDefault) {
-        handleSetLocalPushMessage('Pushing Default to sign...');
+        handleSetLocalPushMessage('Pushing default sign...');
       } else {
         const displayName = pushName || (data.mode === 'clock' ? 'Clock' : 'Preset');
-        handleSetLocalPushMessage(`Pushing "${displayName}" to sign...`);
+        handleSetLocalPushMessage(`Pushing "${displayName}" sign...`);
       }
     }
 
@@ -3730,7 +4389,7 @@ export default function App() {
         await axios.post(`${API_BASE}/clock?on=true&color=${encodeURIComponent(pushColor)}&bg_color=${encodeURIComponent(data.bgColor || '#000000')}&format=${data.timeFormat || '12h'}&show_seconds=${data.showSeconds !== false}&clock_style=${data.clockStyle || 'custom'}`);
         if (!skipMessages) {
           const displayName = pushName || 'Clock';
-          handleSetLocalPushMessage(`Pushed "${displayName}" to sign!`);
+          handleSetLocalPushMessage(`Pushed "${displayName}" sign!`);
         }
         setLastPushedId(data.id || 'clock-default');
       } else if (data.isDefault && status?.connected) {
@@ -3743,7 +4402,7 @@ export default function App() {
           try {
             await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(targetMac)}`);
             if (!skipMessages) {
-              handleSetLocalPushMessage('Pushed Default to sign!');
+              handleSetLocalPushMessage('Pushed default sign!');
             }
             setLastPushedId('hw-slot-1');
             fetchStatus();
@@ -3762,7 +4421,7 @@ export default function App() {
         if (fallbackData.mode === 'text') delete fallbackData.pixels;
         await axios.post(`${API_BASE}/push-text`, fallbackData);
         if (!skipMessages) {
-          handleSetLocalPushMessage('Pushed Default to sign!');
+          handleSetLocalPushMessage('Pushed default sign!');
         }
         setLastPushedId(data.id || 'hw-slot-1');
       } else if (isEvent) {
@@ -3789,13 +4448,13 @@ export default function App() {
             try {
               console.log('[push-event] Slot 1 already has this text, playing slot 0 directly from hardware');
               if (!skipMessages) {
-                handleSetPushMessage('Playing Event...');
+                handleSetPushMessage('Playing event...');
               }
               await axios.post(`${API_BASE}/preset?id=0&mac=${encodeURIComponent(targetMac)}`);
               setLastPushedId(autoTargetId || 'hw-slot-0');
               await fetchStatus();
               if (!skipMessages) {
-                handleSetPushMessage('Pushed Event to sign!');
+                handleSetPushMessage('Pushed event sign!');
               }
               showPresetNotification(true, data.text || pushName || 'Event');
               return;
@@ -3806,7 +4465,7 @@ export default function App() {
             }
           }
 
-          handleSetPushMessage('Saving event to Slot 1...');
+          handleSetPushMessage('Saving event...');
 
           try {
             const isCurrentlyPlaying = (lastPushedId === 'hw-slot-0') || String(lastPushedId || '').startsWith('event-') || (status?.display_mode === 'preset-0');
@@ -3820,7 +4479,7 @@ export default function App() {
               ? `${API_BASE}${saveRes.data.preview_url}?t=${Date.now()}`
               : null;
             // Show confirmation first before updating UI previews
-            handleSetPushMessage('Saved to Slot 1!');
+            handleSetPushMessage('Saved event!');
             setSavedPresets(prev => {
               const next = [...prev];
               next[0] = {
@@ -3855,7 +4514,7 @@ export default function App() {
               }
             }
             if (manual || (saveErr.response?.status !== 409 && !isConnectionStaleMessage(String(saveDetail)))) {
-              handleSetPushMessage(`Error saving to Slot 1: ${saveDetail}`);
+              handleSetPushMessage(`Error saving event: ${saveDetail}`);
             }
             showPresetNotification(false, data.text || pushName || 'Event', saveDetail);
             throw saveErr;
@@ -3868,7 +4527,7 @@ export default function App() {
         await axios.post(`${API_BASE}/push-text`, data);
         if (!skipMessages) {
           const displayName = data.isDefault ? 'Default' : (pushName || 'Preset');
-          handleSetLocalPushMessage(data.isDefault ? 'Pushed Default to sign!' : `Pushed "${displayName}" to sign!`);
+          handleSetLocalPushMessage(data.isDefault ? 'Pushed default sign!' : `Pushed "${displayName}" sign!`);
         }
         setLastPushedId(data.id || null);
       }
@@ -3876,7 +4535,7 @@ export default function App() {
       if (!isEvent) {
         if (data.isDefault) {
           if (!skipMessages) {
-            handleSetLocalPushMessage('Pushed Default to sign!');
+            handleSetLocalPushMessage('Pushed default sign!');
           }
           showPresetNotification(true, 'Default');
         } else {
@@ -3891,6 +4550,9 @@ export default function App() {
       const errorMsg = typeof detail === 'string' ? detail : (Array.isArray(detail) ? detail[0]?.msg : (detail?.message || JSON.stringify(detail)));
       const isDisconnectError = !status.connected || e.response?.status === 409 ||
         (errorMsg && (errorMsg.includes('-2147023673') || errorMsg.toLowerCase().includes('canceled') || errorMsg.toLowerCase().includes('cancelled') || errorMsg.toLowerCase().includes('disconnected') || errorMsg.toLowerCase().includes('not connected') || isConnectionStaleMessage(errorMsg)));
+      if (isDisconnectError) {
+        fetchStatus(true);
+      }
       if (!skipMessages && (manual || !isDisconnectError)) {
         (isEvent ? handleSetPushMessage : handleSetLocalPushMessage)('Error: ' + (errorMsg || e.message));
       }
@@ -4001,6 +4663,15 @@ export default function App() {
               onCancelSlotSave={cancelSlotSave}
               isSignUpdating={isSignUpdating}
               showPresetNotification={showPresetNotification}
+              tunnelUrl={tunnelUrl}
+              onTunnelUrlUpdated={(url) => {
+                setTunnelUrl(url);
+                tunnelUrlRef.current = url;
+              }}
+              handleCopyRemoteUrl={handleCopyRemoteUrl}
+              remoteCopied={remoteCopied}
+              lastLocalBrightnessChangeRef={lastLocalBrightnessChangeRef}
+              onReorderSavedPresets={(nextSaved) => syncSavedSlotOrderToServer(activeMac, nextSaved)}
             />
           </div>
           <MediaView 
@@ -4008,7 +4679,7 @@ export default function App() {
             isModalOpen={isModalOpen}
             setIsModalOpen={setIsModalOpen}
             presets={presets}
-            setPresets={setPresets}
+            setPresets={updateLocalPresets}
             onPush={handlePush}
             onPushSuccess={fetchStatus}
             now={now}
@@ -4052,13 +4723,138 @@ export default function App() {
             pushing={pushing}
             isSignUpdating={isSignUpdating}
             cleanName={cleanName}
-            setCleanName={setCleanName}
+            setCleanName={(val) => {
+              const next = typeof val === 'function' ? val(cleanName) : Boolean(val);
+              setCleanName(next);
+              axios.post(`${API_BASE}/api/ui-state`, { clean_name: next }).catch(() => {});
+            }}
             onNotify={setUnifiedPushMessage}
             syncStatus={syncStatus}
             onSyncNow={() => runCloudSyncRef.current()}
           />
         </div>
       </div>
+
+      {remoteLocked && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 99999,
+          background: 'rgba(10, 10, 15, 0.94)',
+          backdropFilter: 'blur(16px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
+        }}>
+          <div style={{
+            background: 'rgba(26, 26, 36, 0.98)',
+            border: '1px solid rgba(255, 255, 255, 0.1)',
+            borderRadius: 20,
+            padding: 32,
+            maxWidth: 420,
+            width: '100%',
+            boxShadow: '0 20px 50px rgba(0,0,0,0.6)',
+            textAlign: 'center'
+          }}>
+            <div style={{
+              width: 54, height: 54, borderRadius: 16,
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid var(--glass-border)',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--text-muted)', marginBottom: 16
+            }}>
+              <Lock size={26} />
+            </div>
+            <h2 style={{ fontSize: 20, fontWeight: 800, margin: '0 0 8px 0', color: '#fff' }}>
+              LED Sign Remote Access
+            </h2>
+            {remoteTokenValid && !remoteGoogleAuthed ? (
+              <>
+                <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 22px 0', lineHeight: 1.5 }}>
+                  Verify your identity with a one-time 6-digit code sent to your Google Chat.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center' }}>
+                  {remoteChatSentMsg && !remoteUnlockError && (
+                    <div style={{ color: '#34d399', fontSize: 12, fontWeight: 600 }}>
+                      {remoteChatSentMsg}
+                    </div>
+                  )}
+                  {remoteUnlockError && (
+                    <p role="alert" className="scan-passcode-error">
+                      {remoteUnlockError}
+                    </p>
+                  )}
+                  {!remoteChatChallengeId ? (
+                    <button
+                      type="button"
+                      onClick={handleSendRemoteChatCode}
+                      disabled={remoteChatSending}
+                      className="btn-styled"
+                      style={{
+                        width: '100%',
+                        padding: '12px 0',
+                        borderRadius: 12,
+                        fontSize: 14,
+                        fontWeight: 700,
+                        cursor: remoteChatSending ? 'not-allowed' : 'pointer',
+                        opacity: remoteChatSending ? 0.7 : 1,
+                      }}
+                    >
+                      {remoteChatSending ? renderAnimatedMessage('Sending code...') : 'Send Code to Google Chat'}
+                    </button>
+                  ) : (
+                    <form onSubmit={handleVerifyRemoteChatCode} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 14 }}>
+                      <input
+                        autoFocus
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        value={remoteChatCodeInput}
+                        onChange={(e) => { setRemoteChatCodeInput(e.target.value.replace(/\D/g, '').slice(0, 6)); setRemoteUnlockError(''); }}
+                        aria-label="Six-digit Verification Code"
+                        className="scan-passcode-input"
+                      />
+                      <button
+                        type="submit"
+                        disabled={remoteChatVerifying || remoteChatCodeInput.length !== 6}
+                        className="btn-styled"
+                        style={{
+                          width: '100%',
+                          padding: '12px 0',
+                          borderRadius: 12,
+                          fontSize: 14,
+                          fontWeight: 700,
+                          cursor: remoteChatVerifying || remoteChatCodeInput.length !== 6 ? 'not-allowed' : 'pointer',
+                          opacity: remoteChatVerifying || remoteChatCodeInput.length !== 6 ? 0.5 : 1,
+                        }}
+                      >
+                        {remoteChatVerifying ? renderAnimatedMessage('Verifying...') : 'Verify & Unlock'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSendRemoteChatCode}
+                        disabled={remoteChatSending}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: '#94a3b8',
+                          fontSize: 12,
+                          cursor: remoteChatSending ? 'not-allowed' : 'pointer',
+                          marginTop: 2,
+                        }}
+                      >
+                        {remoteChatSending ? 'Sending...' : 'Resend code'}
+                      </button>
+                    </form>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <p style={{ fontSize: 13, color: '#94a3b8', margin: '0', lineHeight: 1.5 }}>
+                  This remote access link is no longer valid or has expired. Request a new link from the LED Sign host.
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -4072,7 +4868,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, isSignUpdating, showPresetNotification }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, isSignUpdating, showPresetNotification, tunnelUrl, onTunnelUrlUpdated, handleCopyRemoteUrl, remoteCopied, lastLocalBrightnessChangeRef, onReorderSavedPresets }) {
   const [isLoaded, setIsLoaded] = useState(false);
   const passcodeInputRef = useRef(null);
 
@@ -4124,6 +4920,146 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [recoveryContact, setRecoveryContact] = useState('');
   const [passwordSettingsError, setPasswordSettingsError] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
+
+  useEffect(() => {
+    if (!status?.connected && typeof setPushMessage === 'function') {
+      setPushMessage('');
+    }
+  }, [status?.connected, setPushMessage]);
+
+  // Remote Access & Webhook Settings
+  const [remoteSettingsOpen, setRemoteSettingsOpen] = useState(false);
+  const [gchatWebhookUrl, setGchatWebhookUrl] = useState('');
+  const [hasSavedWebhook, setHasSavedWebhook] = useState(false);
+  const [autoSendGchat, setAutoSendGchat] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [isSendingWebhook, setIsSendingWebhook] = useState(false);
+  const [webhookNotice, setWebhookNotice] = useState(null);
+
+  const loadWebhookConfig = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/api/tunnel/webhook-config`);
+      const data = res.data || {};
+      setHasSavedWebhook(Boolean(data.has_webhook));
+      setGchatWebhookUrl(data.has_webhook ? (data.masked_webhook_url || '') : '');
+      setAutoSendGchat(Boolean(data.auto_send));
+    } catch (err) {
+      console.error('Failed to fetch webhook config:', err);
+    }
+  };
+
+  useEffect(() => {
+    loadWebhookConfig();
+  }, []);
+
+  const openRemoteSettings = async (e) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    setRemoteSettingsOpen(true);
+    setWebhookNotice(null);
+    await loadWebhookConfig();
+  };
+
+  const handleSaveWebhookConfig = async (newUrl, newAutoSend) => {
+    try {
+      const payload = {
+        auto_send: newAutoSend !== undefined ? newAutoSend : autoSendGchat
+      };
+      if (newUrl !== undefined && !String(newUrl).startsWith('•')) {
+        payload.webhook_url = newUrl;
+        setHasSavedWebhook(Boolean(String(newUrl).trim()));
+      }
+      await axios.post(`${API_BASE}/api/tunnel/webhook-config`, payload);
+    } catch (err) {
+      console.error('Failed to save webhook config:', err);
+    }
+  };
+
+  const handleRegenerateTunnel = async () => {
+    if (isRegenerating) return;
+    setIsRegenerating(true);
+    setWebhookNotice({ type: 'info', text: 'Generating new link...' });
+    try {
+      const res = await fetch('/api/tunnel/regenerate', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && (data.status === 'ready' || data.status === 'ok') && data.url) {
+        if (onTunnelUrlUpdated) onTunnelUrlUpdated(data.url);
+        let noticeText = 'New remote access link generated!';
+        if (data.webhook_status === 'sent') {
+          noticeText = 'New link sent to Google Chat!';
+        } else if (data.webhook_status === 'error') {
+          noticeText += ' (Webhook delivery failed)';
+        }
+        setWebhookNotice({ type: 'success', text: noticeText });
+      } else {
+        setWebhookNotice({ type: 'error', text: data.detail || 'Failed to regenerate link.' });
+      }
+    } catch (err) {
+      setWebhookNotice({ type: 'error', text: 'Network error while regenerating link.' });
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
+
+  const handleSendGchatWebhook = async () => {
+    if (isSendingWebhook) return;
+    const trimmed = gchatWebhookUrl.trim();
+    const isMasked = trimmed.startsWith('•');
+    if (!trimmed && !hasSavedWebhook) {
+      setWebhookNotice({ type: 'error', text: 'Please enter a Google Chat webhook URL first.' });
+      return;
+    }
+    setIsSendingWebhook(true);
+    setWebhookNotice(null);
+    try {
+      if (!isMasked && trimmed) {
+        await handleSaveWebhookConfig(trimmed, autoSendGchat);
+      }
+      const res = await fetch('/api/tunnel/send-webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(isMasked ? {} : { webhook_url: trimmed })
+      });
+      const data = await res.json();
+      if (res.ok && (data.status === 'ok' || data.success)) {
+        setWebhookNotice({ type: 'success', text: 'Link successfully sent to Google Chat!' });
+      } else {
+        setWebhookNotice({ type: 'error', text: data.detail || data.error || 'Failed to send to Google Chat.' });
+      }
+    } catch (err) {
+      setWebhookNotice({ type: 'error', text: 'Failed to send webhook request.' });
+    } finally {
+      setIsSendingWebhook(false);
+    }
+  };
+
+  const renderRemoteButton = () => (
+    <button
+      type="button"
+      title="Remote access settings"
+      aria-label="Remote access settings"
+      onClick={openRemoteSettings}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: '42px',
+        height: '42px',
+        borderRadius: '16px',
+        background: 'rgba(255, 255, 255, 0.03)',
+        border: '1px solid var(--glass-border)',
+        color: 'var(--text-muted)',
+        boxSizing: 'border-box',
+        outline: 'none',
+        cursor: 'pointer',
+        flexShrink: 0
+      }}
+    >
+      <RemoteIcon size={16} />
+    </button>
+  );
 
   let currentSn = '';
   const connectedRecent = recents.find(r => r.address === status.address);
@@ -4207,6 +5143,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [brightnessDragging, setBrightnessDragging] = useState(false);
   // The slider works in percent (7–100; the sign's 15 levels map to ~7–100%).
   const [brightnessRaw, setBrightnessRaw] = useState(() => {
+    if (status?.brightness_pct !== undefined && status?.brightness_pct !== null) {
+      return Math.max(7, Math.min(100, Number(status.brightness_pct)));
+    }
     const savedPct = parseFloat(localStorage.getItem('loy_brightness_pct'));
     if (savedPct >= 7 && savedPct <= 100 && Math.max(1, Math.min(15, Math.round(savedPct * 15 / 100))) === brightness) return savedPct;
     return Math.max(7, Math.min(100, Math.round(brightness * 100 / 15)));
@@ -4214,10 +5153,30 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   useEffect(() => {
     try { localStorage.setItem('loy_brightness_pct', String(brightnessRaw)); } catch (e) {}
   }, [brightnessRaw]);
+  useEffect(() => {
+    if (brightnessDragging) return;
+    if (lastLocalBrightnessChangeRef?.current && Date.now() - lastLocalBrightnessChangeRef.current < 2500) return;
+    if (status?.brightness_pct !== undefined && status?.brightness_pct !== null) {
+      const serverPct = Math.max(7, Math.min(100, Number(status.brightness_pct)));
+      if (Math.abs(serverPct - brightnessRaw) >= 0.2) {
+        setBrightnessRaw(serverPct);
+      }
+      return;
+    }
+    if (brightness >= 1 && brightness <= 15) {
+      const impliedLevel = Math.max(1, Math.min(15, Math.round(brightnessRaw * 15 / 100)));
+      if (impliedLevel !== brightness) {
+        setBrightnessRaw(Math.max(7, Math.min(100, Math.round(brightness * 100 / 15))));
+      }
+    }
+  }, [status?.brightness_pct, status?.brightness, brightness, brightnessDragging]);
 
   useEffect(() => {
     if (!brightnessDragging) return;
-    const stop = () => setBrightnessDragging(false);
+    const stop = () => {
+      if (lastLocalBrightnessChangeRef) lastLocalBrightnessChangeRef.current = Date.now();
+      setBrightnessDragging(false);
+    };
     window.addEventListener('pointerup', stop);
     window.addEventListener('pointercancel', stop);
     return () => {
@@ -4239,8 +5198,18 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     return () => rail.removeEventListener('wheel', preventPageScroll);
   }, [status?.connected, pushing, isConnecting]);
 
-  const onBrightnessChange = async (rawPct) => {
+  const brightnessSendTimerRef = useRef(null);
+  const lastBrightnessSentAtRef = useRef(0);
+  const latestBrightnessPayloadRef = useRef(null);
+
+  const flushBrightnessToServer = (level, pct) => {
+    lastBrightnessSentAtRef.current = Date.now();
+    axios.post(`${API_BASE}/brightness?level=${level}&pct=${pct}`).catch(() => {});
+  };
+
+  const onBrightnessChange = (rawPct) => {
     if (pushingRef?.current || pushing) return;
+    if (lastLocalBrightnessChangeRef) lastLocalBrightnessChangeRef.current = Date.now();
     // Magnetic snap to 25% / 50% / 75% inside a small window; the lowest and
     // highest values are the slider's own ends. Everything between stays selectable.
     const snapPoints = [25, 50, 75];
@@ -4248,9 +5217,23 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     const shown = Math.max(7, Math.min(100, near !== undefined ? near : rawPct));
     setBrightnessRaw(shown);
     const finalVal = Math.max(1, Math.min(15, Math.round(shown * 15 / 100)));
-    if (finalVal === brightness) return;
     setBrightness(finalVal);
-    try { await axios.post(`${API_BASE}/brightness?level=${finalVal}`); } catch (e) {}
+    latestBrightnessPayloadRef.current = { level: finalVal, pct: shown };
+    const elapsed = Date.now() - lastBrightnessSentAtRef.current;
+    if (elapsed >= 80) {
+      if (brightnessSendTimerRef.current) {
+        clearTimeout(brightnessSendTimerRef.current);
+        brightnessSendTimerRef.current = null;
+      }
+      flushBrightnessToServer(finalVal, shown);
+    } else if (!brightnessSendTimerRef.current) {
+      brightnessSendTimerRef.current = setTimeout(() => {
+        brightnessSendTimerRef.current = null;
+        if (latestBrightnessPayloadRef.current) {
+          flushBrightnessToServer(latestBrightnessPayloadRef.current.level, latestBrightnessPayloadRef.current.pct);
+        }
+      }, 80 - elapsed);
+    }
   };
 
   const onSpeedChange = async (val) => {
@@ -4298,6 +5281,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         if (assigningSlotIndex !== null) {
           e.preventDefault();
           setAssigningSlotIndex(null);
+        } else if (remoteSettingsOpen) {
+          e.preventDefault();
+          setRemoteSettingsOpen(false);
         } else if (passwordSettingsOpen) {
           e.preventDefault();
           setPasswordSettingsOpen(false);
@@ -4309,7 +5295,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       }
 
       if (e.key === 'Tab') {
-        if (scanOpen || passwordSettingsOpen || assigningSlotIndex !== null || isModalOpen) {
+        if (scanOpen || passwordSettingsOpen || remoteSettingsOpen || assigningSlotIndex !== null || isModalOpen) {
           return;
         }
 
@@ -4333,7 +5319,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [scanOpen, passwordSettingsOpen, assigningSlotIndex, isModalOpen, isSignUpdating, presetView, status?.connected, setPresetView, onClosePasscode]);
+  }, [scanOpen, passwordSettingsOpen, remoteSettingsOpen, assigningSlotIndex, isModalOpen, isSignUpdating, presetView, status?.connected, setPresetView, onClosePasscode]);
 
   // Helper: detect if a string looks like a raw MAC address
   const isMacAddress = (s) => /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/.test(s);
@@ -4437,7 +5423,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         });
       }
       setPushing(true);
-      setPushMessage(`Saving to App Slot ${globalIdx + 1}...`);
+      setPushMessage(`Saving App Slot ${globalIdx + 1}...`);
       
       const nextSaved = [...savedPresets];
       nextSaved[globalIdx] = {
@@ -4454,12 +5440,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
              mac: status.address || DEFAULT_MAC
            });
         }
-        setPushMessage(`Assigned to App Slot ${globalIdx + 1}!`);
+        setPushMessage(`Assigned App Slot ${globalIdx + 1}!`);
         setSavedPresets(nextSaved);
         setIsManualOverride(true);
         setLastPushedId(`saved-${Date.now()}-${globalIdx}`);
       } catch (err) {
-        setPushMessage(`Assigned to App Slot ${globalIdx + 1}, but failed to preview on sign.`);
+        setPushMessage(`Assigned App Slot ${globalIdx + 1}, but failed to preview on sign.`);
       } finally {
         if (pushingRef) pushingRef.current = false;
         setPushing(false);
@@ -4483,7 +5469,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
     setPushing(true);
     setIsManualOverride(true);
-    setPushMessage(`Saving to slot ${globalIdx + 1}...`);
+    setPushMessage(`Saving slot ${globalIdx + 1}...`);
     setSlotSaveProgress(0);
     setSlotSavePhase('Uploading preset');
     const progressId = `slot-save-${Date.now()}-${globalIdx}`;
@@ -4557,7 +5543,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           thumbnail: savedThumbnail
         }
       };
-      setPushMessage(`Saved to slot ${globalIdx + 1}!`);
+      setPushMessage(`Saved slot ${globalIdx + 1}!`);
       setSavedPresets(nextSaved);
       setIsManualOverride(true);
       setLastPushedId(`hw-slot-${hwSlotId}`);
@@ -4626,7 +5612,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     const isSlot1 = (globalIdx === 0 || hwSlotId === 0);
     const isDefault = Boolean(globalIdx === 1 || hwSlotId === 1 || preset.isDefault);
     const displayName = isDefault ? 'Default' : (preset.name || (preset.mode === 'clock' ? 'Clock' : `slot ${globalIdx + 1}`));
-    setPushMessage(isSlot1 ? 'Playing Event...' : (isDefault ? 'Pushing Default to sign...' : `Pushing "${displayName}" to sign...`));
+    setPushMessage(isSlot1 ? 'Playing event...' : (isDefault ? 'Pushing default sign...' : `Pushing "${displayName}" sign...`));
     setIsManualOverride(true);
 
     try {
@@ -4634,14 +5620,14 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
         // Notify server to switch active hardware preset slot and update live preview
         await axios.post(`${API_BASE}/preset?id=${hwSlotId}&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof fetchStatus === 'function') await fetchStatus();
-        setPushMessage(isSlot1 ? 'Pushed Event to sign!' : (isDefault ? 'Pushed Default to sign!' : `Pushed "${displayName}" to sign!`));
+        setPushMessage(isSlot1 ? 'Pushed event sign!' : (isDefault ? 'Pushed default sign!' : `Pushed "${displayName}" sign!`));
         setLastPushedId(`hw-slot-${hwSlotId}`);
         if (typeof showPresetNotification === 'function') {
           showPresetNotification(true, isSlot1 ? 'Event' : (isDefault ? 'Default' : displayName));
         }
       } else {
         await onPush(preset, true, true);
-        setPushMessage(isSlot1 ? 'Pushed Event to sign!' : (isDefault ? 'Pushed Default to sign!' : `Pushed "${displayName}" to sign!`));
+        setPushMessage(isSlot1 ? 'Pushed event sign!' : (isDefault ? 'Pushed default sign!' : `Pushed "${displayName}" sign!`));
         setLastPushedId(preset.id || `hw-slot-${hwSlotId}`);
       }
     } catch (err) {
@@ -4680,6 +5666,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       nextSaved.splice(slotGlobalIndex, 0, draggedItem);
 
       setSavedPresets(nextSaved);
+      if (typeof onReorderSavedPresets === 'function') {
+        onReorderSavedPresets(nextSaved);
+      }
       return;
     } else {
       if (presets) {
@@ -4744,6 +5733,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const activePreset = (() => {
     // 1. If we have a manual override from a recent click
     if (lastPushedId) {
+      if (lastPushedId === 'hw-slot-1') {
+        const slot1Preset = savedPresets.find(s => s?.preset?.hwSlotId === 1 || s?.hwSlotId === 1 || s?.preset?.id === 'hw-slot-1')?.preset;
+        if (slot1Preset) return slot1Preset;
+        const defP = presets.find(p => p.isDefault);
+        if (defP) return defP;
+      }
       const p = presets.find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId) || 
                 savedPresets.map(s => s.preset).filter(Boolean).find(p => p.id === lastPushedId || `preset-${p.id}` === lastPushedId);
       if (p) return p;
@@ -5012,6 +6007,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               <span style={{ display: 'inline-flex', alignItems: 'center', lineHeight: 1 }}>{deviceNames[status.address?.toUpperCase()] || defaultDisplayName}</span>
               <Settings size={14} className="text-slate-400 group-hover:text-white transition-colors" style={{ display: 'block', flexShrink: 0 }} />
             </div>
+            {renderRemoteButton()}
           </>
         ) : (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -5079,6 +6075,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 <span>{apiError ? 'Server Offline' : 'Connection failed — power cycle the sign and retry'}</span>
               </div>
             )}
+            {renderRemoteButton()}
           </div>
         )}
 
@@ -5325,26 +6322,29 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
           <div
             style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%', maxWidth: 1100, marginBottom: 4 }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0, flex: '1 1 auto', marginRight: 16 }}>
               <ImageIcon className="text-emerald-400 shrink-0" size={24} />
-              <h3 className="text-2xl font-black" style={{ margin: 0 }}>Presets</h3>
-              {pushMessage && (
+              <h3 className="text-2xl font-black shrink-0" style={{ margin: 0 }}>Presets</h3>
+              {status.connected && pushMessage && (
                 <div
                   role="status"
                   className="text-xs font-bold"
                   style={{
                     color: isAssignmentReminder || pushMessage.startsWith('Error') || pushMessage.toLowerCase().includes('cancel') ? '#f87171' : (/^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage) ? '#34d399' : '#38bdf8'),
                     display: 'inline-flex', alignItems: 'center', gap: 6,
-                    marginLeft: 16, flex: '0 0 auto', whiteSpace: 'nowrap'
+                    marginLeft: 16, flex: '0 1 auto', minWidth: 0, overflow: 'hidden'
                   }}
+                  title={pushMessage}
                   onPointerDown={(e) => {
                     e.stopPropagation();
                   }}
                 >
-                  {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && !/^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage) && <RefreshCw size={12} className="animate-spin" aria-label="Saving" />}
-                  {(!pushing || /^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage)) && /^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400" />}
-                  {!pushing && pushMessage.toLowerCase().includes('cancel') && <X size={12} className="text-red-400" />}
-                  <span>{pushMessage}</span>
+                  {pushing && !isAssignmentReminder && !pushMessage.startsWith('Error') && !/^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage) && <RefreshCw size={12} className="animate-spin shrink-0" aria-label="Saving" />}
+                  {(!pushing || /^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage)) && /^(Saved|Pushed|Assigned|Deleted|Cleared|Played)\b/.test(pushMessage) && <Check size={12} className="text-emerald-400 shrink-0" />}
+                  {!pushing && pushMessage.toLowerCase().includes('cancel') && <X size={12} className="text-red-400 shrink-0" />}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {renderAnimatedMessage(pushMessage)}
+                  </span>
                   {pushing && slotSaveProgress !== null && (
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flex: '0 0 auto' }}>
                       <div
@@ -5380,6 +6380,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         cursor: 'pointer',
                         padding: 0,
                         marginLeft: 4,
+                        flexShrink: 0,
                         transition: 'all 0.15s ease'
                       }}
                       onMouseEnter={(e) => {
@@ -5397,56 +6398,59 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 </div>
               )}
             </div>
-            <div role="tablist" aria-label="Preset source" onPointerDown={(e) => e.stopPropagation()} style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 12, background: 'rgba(255,255,255,0.05)' }}>
-              <div
-                title={isConnecting ? "Sign is connecting..." : (!status.connected ? 'Connect to a sign to view saved presets' : (isSignUpdating ? 'Sign is updating...' : 'View saved sign presets'))}
-                style={{ display: 'inline-flex', cursor: (status.connected && !isConnecting && !isSignUpdating) ? 'default' : 'not-allowed' }}
-              >
+
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+              <div role="tablist" aria-label="Preset source" onPointerDown={(e) => e.stopPropagation()} style={{ display: 'inline-flex', gap: 4, padding: 3, borderRadius: 12, background: 'rgba(255,255,255,0.05)' }}>
+                <div
+                  title={isConnecting ? "Sign is connecting..." : (!status.connected ? 'Connect to a sign to view saved presets' : (isSignUpdating ? 'Sign is updating...' : 'View saved sign presets'))}
+                  style={{ display: 'inline-flex', cursor: (status.connected && !isConnecting && !isSignUpdating) ? 'default' : 'not-allowed' }}
+                >
+                  <button
+                    role="tab"
+                    aria-selected={presetView === 'saved'}
+                    disabled={!status.connected || isConnecting || isSignUpdating}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={() => status.connected && !isSignUpdating && !isConnecting && setPresetView('saved')}
+                    className={`btn-styled ${presetView === 'saved' && status.connected ? '' : 'inactive'}`}
+                    style={{ 
+                      height: 34, 
+                      padding: '0 14px', 
+                      fontSize: 14, 
+                      opacity: (status.connected && !isConnecting && !isSignUpdating) ? 1 : 0.4, 
+                      cursor: (status.connected && !isConnecting && !isSignUpdating) ? 'pointer' : 'not-allowed', 
+                      display: 'inline-flex', 
+                      alignItems: 'center', 
+                      gap: 6,
+                      pointerEvents: (!status.connected || isConnecting || isSignUpdating) ? 'none' : 'auto'
+                    }}
+                  >
+                    <Save size={14} />
+                    <span>Saved</span>
+                  </button>
+                </div>
                 <button
                   role="tab"
-                  aria-selected={presetView === 'saved'}
-                  disabled={!status.connected || isConnecting || isSignUpdating}
+                  aria-selected={presetView === 'local'}
+                  disabled={isSignUpdating}
                   onPointerDown={(e) => e.stopPropagation()}
-                  onClick={() => status.connected && !isSignUpdating && !isConnecting && setPresetView('saved')}
-                  className={`btn-styled ${presetView === 'saved' && status.connected ? '' : 'inactive'}`}
-                  style={{ 
-                    height: 34, 
-                    padding: '0 14px', 
-                    fontSize: 14, 
-                    opacity: (status.connected && !isConnecting && !isSignUpdating) ? 1 : 0.4, 
-                    cursor: (status.connected && !isConnecting && !isSignUpdating) ? 'pointer' : 'not-allowed', 
-                    display: 'inline-flex', 
-                    alignItems: 'center', 
-                    gap: 6,
-                    pointerEvents: (!status.connected || isConnecting || isSignUpdating) ? 'none' : 'auto'
+                  onClick={() => !isSignUpdating && setPresetView('local')}
+                  className={`btn-styled ${presetView === 'local' ? '' : 'inactive'}`}
+                  style={{
+                    height: 34,
+                    padding: '0 14px',
+                    fontSize: 14,
+                    opacity: (isSignUpdating && presetView !== 'local') ? 0.4 : 1,
+                    cursor: isSignUpdating ? 'not-allowed' : 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6
                   }}
+                  title={isSignUpdating ? "Sign is updating..." : "View local presets"}
                 >
-                  <Save size={14} />
-                  <span>Saved</span>
+                  <Laptop size={14} />
+                  <span>Local</span>
                 </button>
               </div>
-              <button
-                role="tab"
-                aria-selected={presetView === 'local'}
-                disabled={isSignUpdating}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={() => !isSignUpdating && setPresetView('local')}
-                className={`btn-styled ${presetView === 'local' ? '' : 'inactive'}`}
-                style={{
-                  height: 34,
-                  padding: '0 14px',
-                  fontSize: 14,
-                  opacity: (isSignUpdating && presetView !== 'local') ? 0.4 : 1,
-                  cursor: isSignUpdating ? 'not-allowed' : 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6
-                }}
-                title={isSignUpdating ? "Sign is updating..." : "View local presets"}
-              >
-                <Laptop size={14} />
-                <span>Local</span>
-              </button>
             </div>
           </div>
           
@@ -5923,6 +6927,236 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
             </div>
           </form>
         </div>, document.body
+      )}
+      {remoteSettingsOpen && createPortal(
+        <div 
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10000,
+            display: 'grid',
+            placeItems: 'center',
+            padding: 20,
+            background: 'rgba(0,0,0,0.8)',
+            backdropFilter: 'blur(8px)'
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setRemoteSettingsOpen(false);
+          }}
+        >
+          <div 
+            className="glass-panel" 
+            style={{ width: 'min(100%, 480px)', padding: 26 }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{
+                  width: 34, height: 34, borderRadius: 10,
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid var(--glass-border)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: 'var(--text-muted)'
+                }}>
+                  <RemoteIcon size={18} />
+                </div>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Remote Access Settings</h3>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setRemoteSettingsOpen(false)} 
+                style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 0 }} 
+                onMouseOver={e => e.currentTarget.style.color='#fff'} 
+                onMouseOut={e => e.currentTarget.style.color='#64748b'}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {webhookNotice && (
+              <div style={{
+                marginBottom: 16,
+                padding: '9px 12px',
+                borderRadius: 10,
+                fontSize: 12,
+                fontWeight: 600,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                background: webhookNotice.type === 'error' ? 'rgba(239, 68, 68, 0.12)' : webhookNotice.type === 'success' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(56, 189, 248, 0.12)',
+                color: webhookNotice.type === 'error' ? '#f87171' : webhookNotice.type === 'success' ? '#34d399' : '#38bdf8',
+                border: `1px solid ${webhookNotice.type === 'error' ? 'rgba(239,68,68,0.25)' : webhookNotice.type === 'success' ? 'rgba(16,185,129,0.25)' : 'rgba(56,189,248,0.25)'}`
+              }}>
+                {webhookNotice.type === 'info' && <RefreshCw size={13} className="animate-spin flex-shrink-0" />}
+                {webhookNotice.type === 'success' && <Check size={13} className="flex-shrink-0" />}
+                {webhookNotice.type === 'error' && <AlertCircle size={13} className="flex-shrink-0" />}
+                <span>{renderAnimatedMessage(webhookNotice.text)}</span>
+              </div>
+            )}
+
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                Current Remote Link
+              </label>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  type="text"
+                  readOnly
+                  value={tunnelUrl || 'Initializing remote tunnel...'}
+                  className="input-field font-mono"
+                  style={{ flex: 1, fontSize: 12, padding: '8px 12px' }}
+                  onClick={(e) => e.target.select()}
+                />
+                <button
+                  type="button"
+                  onClick={handleCopyRemoteUrl}
+                  className="btn-styled"
+                  aria-label="Copy remote access link"
+                  style={{
+                    width: 38,
+                    minWidth: 38,
+                    height: 38,
+                    padding: 0,
+                    borderRadius: 10,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                    background: remoteCopied ? 'rgba(74, 222, 128, 0.2)' : undefined,
+                    border: remoteCopied ? '1px solid rgba(74, 222, 128, 0.5)' : undefined,
+                    boxShadow: remoteCopied ? '0 0 0 1px rgba(74, 222, 128, 0.4), 0 2px 10px rgba(74, 222, 128, 0.35)' : undefined,
+                    color: remoteCopied ? '#4ade80' : undefined,
+                    transition: 'background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease'
+                  }}
+                  title={remoteCopied ? "Copied remote access link!" : "Copy remote access link"}
+                >
+                  {remoteCopied ? <Check size={14} className="flex-shrink-0" /> : <Copy size={14} className="flex-shrink-0" />}
+                </button>
+                <button
+                  type="button"
+                  disabled={isRegenerating}
+                  onClick={handleRegenerateTunnel}
+                  className="btn-styled"
+                  title="Generate new link"
+                  aria-label="Generate new link"
+                  style={{
+                    width: 38,
+                    minWidth: 38,
+                    height: 38,
+                    padding: 0,
+                    borderRadius: 10,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                    cursor: isRegenerating ? 'not-allowed' : 'pointer',
+                    opacity: isRegenerating ? 0.6 : 1
+                  }}
+                >
+                  <RefreshCw size={14} className={isRegenerating ? 'animate-spin' : ''} />
+                </button>
+              </div>
+              <p style={{ fontSize: 11, color: '#64748b', marginTop: 6, lineHeight: 1.4 }}>
+                This link allows secure access to this web app from any device. It includes an encrypted authentication key to keep it private.
+              </p>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                Google Chat Webhook
+              </label>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
+                <input
+                  type="text"
+                  placeholder="https://chat.googleapis.com/v1/spaces/.../messages?key=..."
+                  value={gchatWebhookUrl}
+                  onFocus={(e) => {
+                    if (gchatWebhookUrl.startsWith('•')) e.target.select();
+                  }}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setGchatWebhookUrl(val);
+                    const trimmed = val.trim();
+                    if (trimmed.startsWith('https://chat.googleapis.com/')) {
+                      handleSaveWebhookConfig(trimmed, autoSendGchat);
+                    }
+                  }}
+                  className="input-field"
+                  style={{ flex: 1, fontSize: 12, padding: '8px 12px' }}
+                />
+                <button
+                  type="button"
+                  disabled={isSendingWebhook || (!gchatWebhookUrl.trim() && !hasSavedWebhook)}
+                  onClick={handleSendGchatWebhook}
+                  className="btn-styled"
+                  title="Send link to Google Chat"
+                  aria-label="Send link to Google Chat"
+                  style={{
+                    width: 38,
+                    minWidth: 38,
+                    height: 38,
+                    padding: 0,
+                    borderRadius: 10,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                    cursor: isSendingWebhook || (!gchatWebhookUrl.trim() && !hasSavedWebhook) ? 'not-allowed' : 'pointer',
+                    opacity: isSendingWebhook || (!gchatWebhookUrl.trim() && !hasSavedWebhook) ? 0.5 : 1
+                  }}
+                >
+                  <Send size={14} className={isSendingWebhook ? 'animate-pulse' : ''} />
+                </button>
+              </div>
+              <div
+                role="checkbox"
+                aria-checked={autoSendGchat && Boolean(gchatWebhookUrl.trim())}
+                aria-disabled={!gchatWebhookUrl.trim()}
+                onClick={() => {
+                  if (!gchatWebhookUrl.trim()) return;
+                  const next = !autoSendGchat;
+                  setAutoSendGchat(next);
+                  handleSaveWebhookConfig(gchatWebhookUrl, next);
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                  color: autoSendGchat && gchatWebhookUrl.trim() ? '#e2e8f0' : '#94a3b8',
+                  cursor: !gchatWebhookUrl.trim() ? 'not-allowed' : 'pointer',
+                  opacity: !gchatWebhookUrl.trim() ? 0.45 : 1,
+                  userSelect: 'none'
+                }}
+              >
+                <div
+                  style={{
+                    width: '18px',
+                    height: '18px',
+                    borderRadius: '6px',
+                    background: autoSendGchat
+                      ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))'
+                      : 'rgba(255, 255, 255, 0.08)',
+                    border: autoSendGchat
+                      ? 'none'
+                      : '1px solid rgba(255, 255, 255, 0.2)',
+                    boxShadow: autoSendGchat ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'all 0.2s ease',
+                    color: '#ffffff',
+                    flexShrink: 0
+                  }}
+                >
+                  {autoSendGchat && <Check size={13} strokeWidth={3.5} />}
+                </div>
+                <span>Automatically send link to Google Chat whenever a new link is generated</span>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -6596,7 +7830,7 @@ function EventCard({ ev, now, onPush, cleanName, isSignUpdating }) {
     <div
       className="glass-panel transition-all"
       onClick={handleCardClick}
-      title={isSignUpdating ? 'Sign is updating...' : 'Click to push event to sign (Saved Slot 1)'}
+      title={isSignUpdating ? 'Sign is updating...' : 'Click to push event to sign'}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -7023,7 +8257,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
 
     setPresetView('saved');
     setPushing(true, { type: 'local', id: defaultPreset.id, isDefault: true });
-    setPushMessage('Saving default to Slot 2...');
+    setPushMessage('Saving default...');
     const progressId = `slot-save-default-${Date.now()}`;
     const abortController = new AbortController();
     if (slotSaveAbortControllerRef) slotSaveAbortControllerRef.current = abortController;
@@ -7079,10 +8313,10 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         localStorage.setItem('loy_hw_default_preset_id_' + status.address.toUpperCase(), String(defaultPreset.id));
       }
       setLastPushedId('hw-slot-1');
-      setPushMessage('Saved to Slot 2!');
+      setPushMessage('Saved default!');
       syncHardwareSlots();
       if (typeof showPresetNotification === 'function') {
-        showPresetNotification(true, defaultPreset?.name || 'Default (Slot 2)');
+        showPresetNotification(true, defaultPreset?.name || 'Default');
       }
     } catch (error) {
       const isCancelled = axios.isCancel(error) || 
@@ -7095,9 +8329,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         setPushMessage('Save cancelled');
       } else {
         console.warn('[preset-save] Failed to save default to hardware slot 1:', error);
-        setPushMessage('Error saving default to Slot 2');
+        setPushMessage('Error saving default');
         if (typeof showPresetNotification === 'function') {
-          showPresetNotification(false, defaultPreset?.name || 'Default (Slot 2)', error?.message);
+          showPresetNotification(false, defaultPreset?.name || 'Default', error?.message);
         }
       }
     } finally {
@@ -8411,12 +9645,12 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
         }
         if (typeof setPushing === 'function') setPushing(true);
         if (typeof setLocalPushMessage === 'function') {
-          setLocalPushMessage('Pushing Default to sign...');
+          setLocalPushMessage('Pushing default sign...');
         }
         if (typeof setLastPushedId === 'function') setLastPushedId('hw-slot-1');
         await axios.post(`${API_BASE}/preset?id=1&mac=${encodeURIComponent(status.address || DEFAULT_MAC)}`);
         if (typeof setLocalPushMessage === 'function') {
-          setLocalPushMessage('Pushed Default to sign!');
+          setLocalPushMessage('Pushed default sign!');
         }
         if (onPushSuccess) onPushSuccess();
         if (typeof showPresetNotification === 'function') {
@@ -8436,6 +9670,9 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
           }
         } else {
           const detail = err.response?.data?.detail || err.message || '';
+          if (err.response?.status === 409 || String(detail).toLowerCase().includes('not connected')) {
+            if (onPushSuccess) onPushSuccess(true);
+          }
           if (typeof setLocalPushMessage === 'function') {
             setLocalPushMessage(`Error: ${detail}`);
           }
