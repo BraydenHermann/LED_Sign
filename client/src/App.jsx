@@ -2217,14 +2217,37 @@ export default function App() {
     return true;
   };
 
-  const closePasscodeNotification = async () => {
+  const notificationAutoCloseTimersRef = useRef(new Map());
+
+  const closeNotificationsByTag = async (tag) => {
     try {
       const reg = await getSafeSwRegistration();
       if (reg?.getNotifications) {
-        const notifs = await reg.getNotifications({ tag: 'led-sign-passcode' });
+        const notifs = await reg.getNotifications({ tag });
         notifs.forEach(n => n.close());
       }
     } catch (e) {}
+  };
+
+  const scheduleNotificationClose = (tag, delayMs = 6000) => {
+    const timers = notificationAutoCloseTimersRef.current;
+    if (timers.has(tag)) {
+      clearTimeout(timers.get(tag));
+    }
+    const timer = setTimeout(() => {
+      timers.delete(tag);
+      closeNotificationsByTag(tag);
+    }, delayMs);
+    timers.set(tag, timer);
+  };
+
+  const closePasscodeNotification = async () => {
+    const timers = notificationAutoCloseTimersRef.current;
+    if (timers.has('led-sign-passcode')) {
+      clearTimeout(timers.get('led-sign-passcode'));
+      timers.delete('led-sign-passcode');
+    }
+    await closeNotificationsByTag('led-sign-passcode');
   };
 
   const getSafeSwRegistration = async () => {
@@ -2276,7 +2299,7 @@ export default function App() {
       badge: '/favicon.png',
       tag: 'led-sign-passcode',
       renotify: true,
-      requireInteraction: true,
+      requireInteraction: false,
       data: {
         type: 'PASSCODE',
         address: targetAddr,
@@ -2296,6 +2319,7 @@ export default function App() {
       const reg = await getSafeSwRegistration();
       if (reg && reg.showNotification) {
         await reg.showNotification(title, options);
+        scheduleNotificationClose(options.tag, 10000);
         return;
       }
     } catch (err) {
@@ -2306,6 +2330,7 @@ export default function App() {
           const fallbackOpts = { ...options };
           delete fallbackOpts.actions;
           await reg.showNotification(title, fallbackOpts);
+          scheduleNotificationClose(options.tag, 10000);
           return;
         }
       } catch (e) {}
@@ -2316,8 +2341,9 @@ export default function App() {
         body: options.body,
         icon: options.icon,
         tag: options.tag,
-        requireInteraction: true,
+        requireInteraction: false,
       });
+      setTimeout(() => notif.close(), 10000);
       notif.onclick = () => {
         window.focus();
         notif.close();
@@ -2369,7 +2395,7 @@ export default function App() {
       badge: iconUrl,
       tag: 'led-sign-preset-push',
       renotify: true,
-      requireInteraction: true,
+      requireInteraction: false,
       silent: false,
       data: {
         type: 'PRESET_PUSH',
@@ -2381,6 +2407,7 @@ export default function App() {
       const reg = await getSafeSwRegistration();
       if (reg && reg.showNotification) {
         await reg.showNotification(title, options);
+        scheduleNotificationClose(options.tag, 6000);
         console.log('[Notification] Successfully dispatched via ServiceWorker.showNotification');
         return;
       }
@@ -2393,8 +2420,9 @@ export default function App() {
         body: options.body,
         icon: options.icon,
         tag: options.tag,
-        requireInteraction: true,
+        requireInteraction: false,
       });
+      setTimeout(() => notif.close(), 6000);
       notif.onclick = () => {
         window.focus();
         notif.close();
@@ -3477,11 +3505,13 @@ export default function App() {
       } catch { /* storage unavailable: the tag below still collapses repeats */ }
       const minutesUntilStart = Math.max(0, Math.round((start - nowMs) / 60000));
       const timeLabel = minutesUntilStart <= 1 ? 'now' : `in ${minutesUntilStart} min`;
-      new Notification('Upcoming Meeting', {
+      const meetingNotif = new Notification('Upcoming Meeting', {
         body: `${cleanEventTitle(ev.summary, true)} starts ${timeLabel}`,
         icon: '/favicon.png',
         tag: `meeting-${ev.id}-${ev.start_iso}`,
+        requireInteraction: false,
       });
+      setTimeout(() => meetingNotif.close(), 6000);
     }
   }, [events, now]);
 
