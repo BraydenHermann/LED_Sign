@@ -1921,6 +1921,8 @@ export default function App() {
   tunnelUrlRef.current = tunnelUrl;
 
   const [remoteLocked, setRemoteLocked] = useState(() => isRemoteHost());
+  const [remoteCheckingToken, setRemoteCheckingToken] = useState(() => isRemoteHost());
+  const [remoteVerifyNetworkError, setRemoteVerifyNetworkError] = useState(false);
   const [remoteTokenValid, setRemoteTokenValid] = useState(false);
   const [remoteGoogleAuthed, setRemoteGoogleAuthed] = useState(false);
   const [remoteGoogleSigningIn, setRemoteGoogleSigningIn] = useState(false);
@@ -2009,15 +2011,25 @@ export default function App() {
       axios.defaults.headers.common['X-Remote-Google-Session'] = googleSession;
     }
 
+    let cancelled = false;
+
     // 2. If on a remote host (e.g. trycloudflare.com), verify token + Google authentication
     if (isRemoteHost()) {
       if (!token) {
+        setRemoteCheckingToken(false);
+        setRemoteVerifyNetworkError(false);
         setRemoteTokenValid(false);
         setRemoteGoogleAuthed(false);
         setRemoteLocked(true);
       } else {
-        axios.post(`${API_BASE}/api/remote/verify-token`, { token, google_session: googleSession })
-          .then(res => {
+        setRemoteCheckingToken(true);
+        setRemoteVerifyNetworkError(false);
+        const verifyWithRetry = async (attempt = 0) => {
+          try {
+            const res = await axios.post(`${API_BASE}/api/remote/verify-token`, { token, google_session: googleSession });
+            if (cancelled) return;
+            setRemoteCheckingToken(false);
+            setRemoteVerifyNetworkError(false);
             if (res.data?.valid) {
               setRemoteTokenValid(true);
               if (!clickedFreshLink && res.data?.google_authenticated) {
@@ -2032,12 +2044,25 @@ export default function App() {
               setRemoteGoogleAuthed(false);
               setRemoteLocked(true);
             }
-          })
-          .catch(() => {
+          } catch (err) {
+            if (cancelled) return;
+            const status = err?.response?.status;
+            // Only treat explicit 401/403 from the server as an invalid/expired token.
+            // Transient network/5xx errors (e.g. tunnel or server still warming up) are retried.
+            if (status !== 401 && status !== 403 && attempt < 5) {
+              setTimeout(() => {
+                if (!cancelled) verifyWithRetry(attempt + 1);
+              }, 1500);
+              return;
+            }
+            setRemoteCheckingToken(false);
+            setRemoteVerifyNetworkError(status !== 401 && status !== 403);
             setRemoteTokenValid(false);
             setRemoteGoogleAuthed(false);
             setRemoteLocked(true);
-          });
+          }
+        };
+        verifyWithRetry();
       }
     }
 
@@ -2072,6 +2097,8 @@ export default function App() {
             setRemoteTokenValid(false);
             setRemoteGoogleAuthed(false);
           }
+          setRemoteCheckingToken(false);
+          setRemoteVerifyNetworkError(false);
           setRemoteLocked(true);
         }
         return Promise.reject(error);
@@ -2086,6 +2113,9 @@ export default function App() {
         if (res.data?.url) {
           setTunnelUrl(res.data.url);
           tunnelUrlRef.current = res.data.url;
+        } else if (res.data?.status === 'starting' || res.data?.status === 'downloading') {
+          setTunnelUrl('');
+          tunnelUrlRef.current = '';
         }
       } catch (e) {}
     };
@@ -2093,6 +2123,7 @@ export default function App() {
     const pollInterval = setInterval(fetchTunnelUrl, 4000);
 
     return () => {
+      cancelled = true;
       window.removeEventListener('message', onMessage);
       axios.interceptors.response.eject(interceptor);
       clearInterval(pollInterval);
@@ -4794,7 +4825,12 @@ export default function App() {
             <h2 style={{ fontSize: 20, fontWeight: 800, margin: '0 0 8px 0', color: '#fff' }}>
               LED Sign Remote Access
             </h2>
-            {remoteTokenValid && !remoteGoogleAuthed ? (
+            {remoteCheckingToken ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, padding: '8px 0', color: '#94a3b8', fontSize: 13 }}>
+                <RefreshCw size={15} className="animate-spin" />
+                <span>{renderAnimatedMessage('Verifying remote access link...')}</span>
+              </div>
+            ) : remoteTokenValid && !remoteGoogleAuthed ? (
               <>
                 <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 22px 0', lineHeight: 1.5 }}>
                   Verify your identity with a one-time 6-digit code sent to your Google Chat.
@@ -4874,6 +4910,12 @@ export default function App() {
                     </form>
                   )}
                 </div>
+              </>
+            ) : remoteVerifyNetworkError ? (
+              <>
+                <p style={{ fontSize: 13, color: '#94a3b8', margin: '0', lineHeight: 1.5 }}>
+                  Unable to reach the LED Sign host right now. The server or tunnel may still be starting up — please refresh in a moment.
+                </p>
               </>
             ) : (
               <>
@@ -4962,6 +5004,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
   const [gchatWebhookUrl, setGchatWebhookUrl] = useState('');
   const [hasSavedWebhook, setHasSavedWebhook] = useState(false);
   const [autoSendGchat, setAutoSendGchat] = useState(false);
+  const [webhookConfigLoaded, setWebhookConfigLoaded] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [isSendingWebhook, setIsSendingWebhook] = useState(false);
   const [webhookNotice, setWebhookNotice] = useState(null);
@@ -4973,13 +5016,28 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       setHasSavedWebhook(Boolean(data.has_webhook));
       setGchatWebhookUrl(data.has_webhook ? (data.masked_webhook_url || '') : '');
       setAutoSendGchat(Boolean(data.auto_send));
+      setWebhookConfigLoaded(true);
+      return true;
     } catch (err) {
       console.error('Failed to fetch webhook config:', err);
+      return false;
     }
   };
 
   useEffect(() => {
-    loadWebhookConfig();
+    let cancelled = false;
+    let retryTimer = null;
+    const initLoad = async () => {
+      const ok = await loadWebhookConfig();
+      if (!ok && !cancelled) {
+        retryTimer = setTimeout(initLoad, 2000);
+      }
+    };
+    initLoad();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, []);
 
   const openRemoteSettings = async (e) => {
@@ -7097,7 +7155,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
                 <input
                   type="text"
-                  placeholder="https://chat.googleapis.com/v1/spaces/.../messages?key=..."
+                  placeholder={webhookConfigLoaded ? "https://chat.googleapis.com/v1/spaces/.../messages?key=..." : "Loading saved webhook..."}
                   value={gchatWebhookUrl}
                   onFocus={(e) => {
                     if (gchatWebhookUrl.startsWith('•')) e.target.select();

@@ -215,12 +215,29 @@ class TunnelService:
                 self._error_message = f"Failed to start tunnel: {e}"
                 print(f"[tunnel] Error starting tunnel: {e}")
 
+    def _is_tunnel_registered(self) -> bool:
+        if not os.path.exists(TUNNEL_LOG):
+            return False
+        try:
+            with open(TUNNEL_LOG, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            return "Registered tunnel connection" in content
+        except Exception:
+            return False
+
     def _auto_send_when_ready(self):
-        """Wait for a newly started tunnel to report its URL and auto-send to Google Chat if enabled."""
-        for _ in range(30):
+        """Wait for a newly started tunnel to register its connection and auto-send to Google Chat if enabled."""
+        url_seen_at: Optional[float] = None
+        for _ in range(40):
             time.sleep(0.5)
             url = self._extract_url_from_log()
             if url:
+                if url_seen_at is None:
+                    url_seen_at = time.monotonic()
+                # Wait for cloudflared to finish registering the tunnel connection before sending the link
+                # (with a 10s fallback after URL appears in case the log format changes).
+                if not self._is_tunnel_registered() and (time.monotonic() - url_seen_at) < 10.0:
+                    continue
                 with self._webhook_send_lock:
                     token = self.get_token()
                     secure_url = f"{url}/?token={token}"
