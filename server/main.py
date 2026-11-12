@@ -2259,6 +2259,7 @@ async def get_hardware_slots(mac: str = ""):
         if gif_path and os.path.exists(gif_path):
             rel_name = os.path.basename(gif_path)
             slot_info["preview_url"] = f"/static/{rel_name}"
+            slot_info["preview_ts"] = int(os.path.getmtime(gif_path) * 1000)
             slot_info["occupied"] = True
 
         if not json_path and not gif_path:

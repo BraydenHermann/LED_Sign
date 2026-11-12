@@ -746,7 +746,7 @@ const AnimatedPresetCardPreview = ({ preset }) => {
     return () => {
       clearTimeout(animId);
     };
-  }, [preset]);
+  }, [preset?.pixels, preset?.bgColor, preset?.textColor, preset?.speed, preset?.frameDurationMs, preset?.frameDurationsMs]);
 
   return (
     <canvas 
@@ -3674,7 +3674,7 @@ export default function App() {
 
               if (idx === 0) {
                 const pData = s.preset_data;
-                const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
+                const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${s.preview_ts || 0}` : null;
                 if (!pData && !previewUrl) {
                   localStorage.removeItem('loy_hw_cal_synced_' + activeMac);
                   localStorage.removeItem('loy_hw_cal_text_' + activeMac);
@@ -3726,7 +3726,7 @@ export default function App() {
                 // The sign is write-only — hardware slot state cannot be reliably read back.
                 // Only show a preset card if we have locally cached data (preset_data / preview_url).
                 const pData = s.preset_data;
-                const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${Date.now()}` : null;
+                const previewUrl = s.preview_url ? `${API_BASE}${s.preview_url}?t=${s.preview_ts || 0}` : null;
 
                 if (!pData && !previewUrl) {
                   // Only clear stale generic placeholder (e.g. old "Sign Slot X")
