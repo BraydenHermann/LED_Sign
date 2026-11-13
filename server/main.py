@@ -778,6 +778,7 @@ async def remote_security_middleware(request: Request, call_next):
             "/api/remote/google-auth-status",
             "/api/remote/send-chat-code",
             "/api/remote/verify-chat-code",
+            "/api/remote/logout",
         ):
             response = await call_next(request)
             response.set_cookie(
@@ -1368,6 +1369,20 @@ async def verify_remote_chat_code(req: VerifyChatCodeRequest, response: Response
         "session_token": session_token,
         "email": res.get("email"),
     }
+
+
+@app.post("/api/remote/logout")
+async def remote_logout(request: Request, response: Response):
+    """Sign out only the remote browser session without disconnecting the host's Google account."""
+    gsess = (
+        request.headers.get("x-remote-google-session")
+        or request.cookies.get("led_remote_google_session")
+        or ""
+    ).strip()
+    if gsess:
+        tunnel_service.revoke_google_session(gsess)
+    response.delete_cookie("led_remote_google_session", path="/")
+    return {"status": "ok"}
 
 
 @app.get("/api/gemini/status")
@@ -4327,6 +4342,7 @@ class SavePresetRequest(BaseModel):
     progress_id: Optional[str] = None
     is_currently_playing: Optional[bool] = None
     activate_on_save: Optional[bool] = True
+    async_mode: Optional[bool] = False
 
 @app.get("/save-progress/{progress_id}")
 async def get_save_progress(progress_id: str):
@@ -4359,11 +4375,73 @@ def encode_var_len(val: int) -> bytes:
         return bytes([val])
     elif val < 256:
         return bytes([129, val])
+async def _run_save_preset_async(req: SavePresetRequest):
+    global hardware_saving, active_save_cancellation
+    progress_id = req.progress_id
+    async with preset_switch_lock:
+        hardware_saving = True
+        active_save_cancellation = False
+        if progress_id:
+            save_cancellations.discard(progress_id)
+        try:
+            result = await _save_preset(req, request=None)
+            if progress_id:
+                save_progress[progress_id] = {
+                    "progress": 100,
+                    "phase": "Complete",
+                    "done": True,
+                    "result": result,
+                }
+        except SaveCancelledException as ce:
+            if progress_id:
+                save_progress[progress_id] = {
+                    "progress": 0,
+                    "phase": "Cancelled",
+                    "done": True,
+                    "cancelled": True,
+                    "error": str(ce),
+                }
+        except HTTPException as he:
+            if progress_id:
+                save_progress[progress_id] = {
+                    "progress": 0,
+                    "phase": "Error",
+                    "done": True,
+                    "error": str(he.detail),
+                    "status_code": he.status_code,
+                }
+        except Exception as e:
+            if progress_id:
+                save_progress[progress_id] = {
+                    "progress": 0,
+                    "phase": "Error",
+                    "done": True,
+                    "error": str(e),
+                    "status_code": 500,
+                }
+        finally:
+            hardware_saving = False
+            active_save_cancellation = False
+            if progress_id:
+                save_cancellations.discard(progress_id)
+
+
 @app.post("/save-preset")
 async def save_preset(req: SavePresetRequest, request: Request = None):
     # A complete file transfer is one transaction. Calendar saves and manual
     # slot selections must not interleave session, chunk and play packets.
     global hardware_saving, active_save_cancellation
+    if req.async_mode:
+        progress_id = req.progress_id or f"save-{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+        req.progress_id = progress_id
+        save_cancellations.discard(progress_id)
+        save_progress[progress_id] = {"progress": 15, "phase": "Queued", "done": False}
+        asyncio.create_task(_run_save_preset_async(req))
+        return JSONResponse(
+            status_code=202,
+            content={"status": "accepted", "async": True, "progress_id": progress_id},
+        )
+
     async with preset_switch_lock:
         hardware_saving = True
         active_save_cancellation = False

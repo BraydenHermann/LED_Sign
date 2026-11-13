@@ -362,6 +362,12 @@ class TunnelService:
         except Exception:
             pass
 
+    def revoke_google_session(self, session_tok: Optional[str]):
+        if not session_tok:
+            return
+        if self._google_sessions.pop(session_tok.strip(), None) is not None:
+            self._save_google_sessions()
+
     def clear_google_sessions(self):
         self._google_sessions = {}
         self._google_challenges = {}

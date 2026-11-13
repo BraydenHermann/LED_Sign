@@ -35,10 +35,74 @@ async function postToCurrentServer(path, payload, options = {}) {
 }
 
 export async function savePresetToSign(payload, options = {}) {
-  options.timeout = 300000;
-  const response = await postToCurrentServer('/save-preset', payload, options);
-  requireCompletedWrite(response.data);
-  return response;
+  const overallTimeoutMs = options.timeout || 300000;
+  const progressId = payload?.progress_id || `save-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const requestPayload = { ...payload, progress_id: progressId, async_mode: true };
+  const requestOptions = { ...options, timeout: Math.min(overallTimeoutMs, 60000) };
+
+  const response = await postToCurrentServer('/save-preset', requestPayload, requestOptions);
+  if (!response?.data?.async) {
+    requireCompletedWrite(response.data);
+    return response;
+  }
+
+  const startMs = Date.now();
+  let consecutiveErrors = 0;
+
+  while (Date.now() - startMs < overallTimeoutMs) {
+    if (options.signal?.aborted) {
+      await cancelSavePreset(progressId);
+      const cancelErr = new Error('Save cancelled');
+      cancelErr.name = 'CanceledError';
+      throw cancelErr;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 750));
+
+    if (options.signal?.aborted) {
+      await cancelSavePreset(progressId);
+      const cancelErr = new Error('Save cancelled');
+      cancelErr.name = 'CanceledError';
+      throw cancelErr;
+    }
+
+    let prog;
+    try {
+      const res = await axios.get(`/save-progress/${encodeURIComponent(progressId)}`, {
+        timeout: 15000,
+        signal: options.signal,
+      });
+      prog = res.data;
+      consecutiveErrors = 0;
+    } catch (pollErr) {
+      if (axios.isCancel(pollErr) || pollErr.name === 'CanceledError' || pollErr.name === 'AbortError') {
+        await cancelSavePreset(progressId);
+        throw pollErr;
+      }
+      consecutiveErrors += 1;
+      if (consecutiveErrors >= 10) {
+        throw pollErr;
+      }
+      continue;
+    }
+
+    if (prog?.done) {
+      if (prog.cancelled) {
+        const err = new Error(prog.error || 'Save cancelled');
+        err.response = { status: 499, data: { detail: prog.error || 'Save cancelled' } };
+        throw err;
+      }
+      if (prog.error) {
+        const err = new Error(prog.error);
+        err.response = { status: prog.status_code || 500, data: { detail: prog.error } };
+        throw err;
+      }
+      requireCompletedWrite(prog.result);
+      return { data: prog.result };
+    }
+  }
+
+  throw new Error('Timed out waiting for the sign to finish saving the preset.');
 }
 
 export async function cancelSavePreset(progressId) {

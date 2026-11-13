@@ -1967,6 +1967,26 @@ export default function App() {
     setRemoteGoogleSigningIn(false);
   };
 
+  const handleRemoteSignOut = async () => {
+    try {
+      await axios.post(`${API_BASE}/api/remote/logout`);
+    } catch (e) {}
+    try {
+      localStorage.removeItem('led_remote_google_session');
+    } catch (e) {}
+    document.cookie = 'led_remote_google_session=; path=/; max-age=0; SameSite=Lax';
+    delete axios.defaults.headers.common['X-Remote-Google-Session'];
+    setRemoteChatChallengeId('');
+    setRemoteChatCodeInput('');
+    setRemoteChatSentMsg('');
+    setRemoteUnlockError('');
+    setRemoteCheckingToken(false);
+    setRemoteVerifyNetworkError(false);
+    setRemoteTokenValid(true);
+    setRemoteGoogleAuthed(false);
+    setRemoteLocked(true);
+  };
+
   // Cloudflare Tunnel token handling and background pre-fetching
   useEffect(() => {
     // 1. Check for token in URL query
@@ -4792,6 +4812,7 @@ export default function App() {
             onNotify={setUnifiedPushMessage}
             syncStatus={syncStatus}
             onSyncNow={() => runCloudSyncRef.current()}
+            onRemoteSignOut={handleRemoteSignOut}
           />
         </div>
       </div>
@@ -7274,7 +7295,7 @@ function GoogleCalendarLogo({ size = 16, style = {} }) {
 }
 
 /* ─── Calendar ───────────────────────────────────────────────────────── */
-function CalendarView({ status, events, invites, loading, eventsDate, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify, syncStatus, onSyncNow }) {
+function CalendarView({ status, events, invites, loading, eventsDate, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify, syncStatus, onSyncNow, onRemoteSignOut }) {
   const [calError, setCalError] = useState('');
   const [acceptingId, setAcceptingId] = useState(null);
   const [scopeModalOpen, setScopeModalOpen] = useState(false);
@@ -7378,7 +7399,14 @@ function CalendarView({ status, events, invites, loading, eventsDate, fetchEvent
                 <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
               </button>
               <button 
-                onClick={async () => { await axios.post(`${API_BASE}/auth/logout`); window.location.reload(); }} 
+                onClick={async () => {
+                  if (isRemoteHost() && onRemoteSignOut) {
+                    await onRemoteSignOut();
+                  } else {
+                    await axios.post(`${API_BASE}/auth/logout`);
+                    window.location.reload();
+                  }
+                }} 
                 className="btn-styled inactive" 
                 style={{ padding: '6px 12px', fontSize: 12, marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}
               >
