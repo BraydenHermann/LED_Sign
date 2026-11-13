@@ -26,11 +26,22 @@ const SCAN_PAGE_SIZE = 6;
 const PANEL_W = 64;
 const PANEL_H = 20;
 
+const PRITUNL_INSTALL_URL = 'https://client.pritunl.com/#install';
+
+// An IPv4 address (10.0.0.5) or range (10.0.0.0/24), as the allowlist accepts.
+const isValidAllowEntry = (value) => {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/.exec(String(value || '').trim());
+  if (!match) return false;
+  if (match.slice(1, 5).some(part => Number(part) > 255)) return false;
+  return match[5] === undefined || Number(match[5]) <= 32;
+};
+
+// True when this page is opened from another device (e.g. a laptop over the work VPN)
+// rather than on the LED Sign host itself.
 const isRemoteHost = () => {
-  return typeof window !== 'undefined' && (
-    window.location.hostname.includes('trycloudflare.com') ||
-    (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')
-  );
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname;
+  return host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]';
 };
 
 const RemoteIcon = ({ size = 15, className = "" }) => (
@@ -1914,348 +1925,6 @@ export default function App() {
   const autoConnectTried = useRef(false);
   const manuallyDisconnectedRef = useRef(false);
 
-  // Cloudflare Tunnel & Remote Access State
-  const [tunnelUrl, setTunnelUrl] = useState('');
-  const [remoteCopied, setRemoteCopied] = useState(false);
-  const tunnelUrlRef = useRef('');
-  tunnelUrlRef.current = tunnelUrl;
-
-  const [remoteLocked, setRemoteLocked] = useState(() => isRemoteHost());
-  const [remoteCheckingToken, setRemoteCheckingToken] = useState(() => isRemoteHost());
-  const [remoteVerifyNetworkError, setRemoteVerifyNetworkError] = useState(false);
-  const [remoteTokenValid, setRemoteTokenValid] = useState(false);
-  const [remoteGoogleAuthed, setRemoteGoogleAuthed] = useState(false);
-  const [remoteGoogleSigningIn, setRemoteGoogleSigningIn] = useState(false);
-  const [remoteChatChallengeId, setRemoteChatChallengeId] = useState('');
-  const [remoteChatCodeInput, setRemoteChatCodeInput] = useState('');
-  const [remoteChatSending, setRemoteChatSending] = useState(false);
-  const [remoteChatVerifying, setRemoteChatVerifying] = useState(false);
-  const [remoteChatSentMsg, setRemoteChatSentMsg] = useState('');
-  const [remoteTokenInput, setRemoteTokenInput] = useState('');
-  const [remoteUnlockError, setRemoteUnlockError] = useState('');
-  const [remoteUnlocking, setRemoteUnlocking] = useState(false);
-  const remoteGooglePollRef = useRef(null);
-
-  const applyRemoteGoogleSession = async (sessionToken) => {
-    if (!sessionToken) return;
-    try {
-      localStorage.setItem('led_remote_google_session', sessionToken);
-    } catch (e) {}
-    document.cookie = `led_remote_google_session=${encodeURIComponent(sessionToken)}; path=/; max-age=604800; SameSite=Lax`;
-    axios.defaults.headers.common['X-Remote-Google-Session'] = sessionToken;
-    setRemoteUnlockError('');
-    if (remoteGooglePollRef.current) {
-      clearInterval(remoteGooglePollRef.current);
-      remoteGooglePollRef.current = null;
-    }
-
-    const tasks = [
-      axios.get(`${API_BASE}/api/local-presets`).then(r => {
-        if (Array.isArray(r.data) && r.data.length > 0) {
-          setPresets(r.data);
-          savePresetsToDB(r.data).catch(() => {});
-        }
-      }).catch(() => {}),
-      typeof fetchStatus === 'function' ? Promise.resolve(fetchStatus()).catch(() => {}) : Promise.resolve(),
-      typeof fetchEvents === 'function' ? Promise.resolve(fetchEvents(true)).catch(() => {}) : Promise.resolve(),
-      typeof syncHardwareSlots === 'function' ? Promise.resolve(syncHardwareSlots()).catch(() => {}) : Promise.resolve(),
-    ];
-    await Promise.allSettled(tasks);
-
-    setRemoteGoogleAuthed(true);
-    setRemoteLocked(false);
-    setRemoteGoogleSigningIn(false);
-  };
-
-  const handleRemoteSignOut = async () => {
-    try {
-      await axios.post(`${API_BASE}/api/remote/logout`);
-    } catch (e) {}
-    try {
-      localStorage.removeItem('led_remote_google_session');
-    } catch (e) {}
-    document.cookie = 'led_remote_google_session=; path=/; max-age=0; SameSite=Lax';
-    delete axios.defaults.headers.common['X-Remote-Google-Session'];
-    setRemoteChatChallengeId('');
-    setRemoteChatCodeInput('');
-    setRemoteChatSentMsg('');
-    setRemoteUnlockError('');
-    setRemoteCheckingToken(false);
-    setRemoteVerifyNetworkError(false);
-    setRemoteTokenValid(true);
-    setRemoteGoogleAuthed(false);
-    setRemoteLocked(true);
-  };
-
-  // Cloudflare Tunnel token handling and background pre-fetching
-  useEffect(() => {
-    // 1. Check for token in URL query
-    let token = '';
-    let clickedFreshLink = false;
-    try {
-      const searchParams = new URLSearchParams(window.location.search);
-      const urlTok = searchParams.get('token');
-      if (urlTok) {
-        token = urlTok.trim();
-        clickedFreshLink = true;
-        localStorage.setItem('led_remote_token', token);
-        document.cookie = `led_remote_token=${encodeURIComponent(token)}; path=/; max-age=604800; SameSite=Lax`;
-        // Clicking the remote link requires signing into Google after opening the link
-        localStorage.removeItem('led_remote_google_session');
-        document.cookie = 'led_remote_google_session=; path=/; max-age=0; SameSite=Lax';
-        delete axios.defaults.headers.common['X-Remote-Google-Session'];
-        searchParams.delete('token');
-        const newSearch = searchParams.toString();
-        const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
-        window.history.replaceState({}, document.title, newUrl);
-      }
-    } catch (e) {}
-
-    if (!token) {
-      try {
-        token = localStorage.getItem('led_remote_token') || '';
-      } catch (e) {}
-    }
-
-    let googleSession = '';
-    if (!clickedFreshLink) {
-      try {
-        googleSession = localStorage.getItem('led_remote_google_session') || '';
-      } catch (e) {}
-    }
-
-    if (token) {
-      axios.defaults.headers.common['X-Remote-Token'] = token;
-    }
-    if (googleSession) {
-      axios.defaults.headers.common['X-Remote-Google-Session'] = googleSession;
-    }
-
-    let cancelled = false;
-
-    // 2. If on a remote host (e.g. trycloudflare.com), verify token + Google authentication
-    if (isRemoteHost()) {
-      if (!token) {
-        setRemoteCheckingToken(false);
-        setRemoteVerifyNetworkError(false);
-        setRemoteTokenValid(false);
-        setRemoteGoogleAuthed(false);
-        setRemoteLocked(true);
-      } else {
-        setRemoteCheckingToken(true);
-        setRemoteVerifyNetworkError(false);
-        const verifyWithRetry = async (attempt = 0) => {
-          try {
-            const res = await axios.post(`${API_BASE}/api/remote/verify-token`, { token, google_session: googleSession });
-            if (cancelled) return;
-            setRemoteCheckingToken(false);
-            setRemoteVerifyNetworkError(false);
-            if (res.data?.valid) {
-              setRemoteTokenValid(true);
-              if (!clickedFreshLink && res.data?.google_authenticated) {
-                setRemoteGoogleAuthed(true);
-                setRemoteLocked(false);
-              } else {
-                setRemoteGoogleAuthed(false);
-                setRemoteLocked(true);
-              }
-            } else {
-              setRemoteTokenValid(false);
-              setRemoteGoogleAuthed(false);
-              setRemoteLocked(true);
-            }
-          } catch (err) {
-            if (cancelled) return;
-            const status = err?.response?.status;
-            // Only treat explicit 401/403 from the server as an invalid/expired token.
-            // Transient network/5xx errors (e.g. tunnel or server still warming up) are retried.
-            if (status !== 401 && status !== 403 && attempt < 5) {
-              setTimeout(() => {
-                if (!cancelled) verifyWithRetry(attempt + 1);
-              }, 1500);
-              return;
-            }
-            setRemoteCheckingToken(false);
-            setRemoteVerifyNetworkError(status !== 401 && status !== 403);
-            setRemoteTokenValid(false);
-            setRemoteGoogleAuthed(false);
-            setRemoteLocked(true);
-          }
-        };
-        verifyWithRetry();
-      }
-    }
-
-    // Listen for postMessage from the Google OAuth popup window
-    const onMessage = (event) => {
-      const data = event?.data;
-      if (data && data.type === 'led_remote_google_auth') {
-        if (data.status === 'authenticated' && data.session_token) {
-          applyRemoteGoogleSession(data.session_token);
-        } else if (data.status === 'error') {
-          setRemoteGoogleSigningIn(false);
-          setRemoteUnlockError(data.error || 'Google authentication failed');
-          if (remoteGooglePollRef.current) {
-            clearInterval(remoteGooglePollRef.current);
-            remoteGooglePollRef.current = null;
-          }
-        }
-      }
-    };
-    window.addEventListener('message', onMessage);
-
-    // 3. Axios 401 interceptor for remote security challenge
-    const interceptor = axios.interceptors.response.use(
-      response => response,
-      error => {
-        if (error.response?.status === 401 && isRemoteHost()) {
-          const errCode = error.response?.data?.code;
-          if (errCode === 'google_auth_required') {
-            setRemoteTokenValid(true);
-            setRemoteGoogleAuthed(false);
-          } else if (errCode === 'token_required' || errCode === 'token_expired') {
-            setRemoteTokenValid(false);
-            setRemoteGoogleAuthed(false);
-          }
-          setRemoteCheckingToken(false);
-          setRemoteVerifyNetworkError(false);
-          setRemoteLocked(true);
-        }
-        return Promise.reject(error);
-      }
-    );
-
-    // 4. Background pre-fetch Cloudflare tunnel URL so copy is instant without spinner
-    const fetchTunnelUrl = async () => {
-      if (isRemoteHost() && !axios.defaults.headers.common['X-Remote-Google-Session']) return;
-      try {
-        const res = await axios.get(`${API_BASE}/api/tunnel/url`);
-        if (res.data?.url) {
-          setTunnelUrl(res.data.url);
-          tunnelUrlRef.current = res.data.url;
-        } else if (res.data?.status === 'starting' || res.data?.status === 'downloading') {
-          setTunnelUrl('');
-          tunnelUrlRef.current = '';
-        }
-      } catch (e) {}
-    };
-    fetchTunnelUrl();
-    const pollInterval = setInterval(fetchTunnelUrl, 4000);
-
-    return () => {
-      cancelled = true;
-      window.removeEventListener('message', onMessage);
-      axios.interceptors.response.eject(interceptor);
-      clearInterval(pollInterval);
-      if (remoteGooglePollRef.current) {
-        clearInterval(remoteGooglePollRef.current);
-        remoteGooglePollRef.current = null;
-      }
-    };
-  }, []);
-
-  const handleCopyRemoteUrl = async () => {
-    let url = tunnelUrlRef.current || tunnelUrl;
-    if (!url) {
-      try {
-        const res = await axios.get(`${API_BASE}/api/tunnel/url`);
-        if (res.data?.url) {
-          url = res.data.url;
-          setTunnelUrl(url);
-          tunnelUrlRef.current = url;
-        }
-      } catch (e) {}
-    }
-    if (url) {
-      try {
-        await navigator.clipboard.writeText(url);
-        setRemoteCopied(true);
-        setTimeout(() => setRemoteCopied(false), 2000);
-      } catch (err) {
-        console.error('Failed to copy remote url', err);
-      }
-    }
-  };
-
-  const handleUnlockRemote = async (e) => {
-    if (e) e.preventDefault();
-    if (!remoteTokenInput.trim()) return;
-    setRemoteUnlocking(true);
-    setRemoteUnlockError('');
-    try {
-      const tok = remoteTokenInput.trim();
-      const res = await axios.post(`${API_BASE}/api/remote/verify-token`, { token: tok });
-      if (res.data?.valid) {
-        localStorage.setItem('led_remote_token', tok);
-        document.cookie = `led_remote_token=${encodeURIComponent(tok)}; path=/; max-age=604800; SameSite=Lax`;
-        axios.defaults.headers.common['X-Remote-Token'] = tok;
-        setRemoteTokenValid(true);
-        setRemoteTokenInput('');
-        if (res.data?.google_authenticated) {
-          setRemoteGoogleAuthed(true);
-          setRemoteLocked(false);
-          fetchStatus();
-        } else {
-          setRemoteGoogleAuthed(false);
-          setRemoteLocked(true);
-        }
-      } else {
-        setRemoteUnlockError('Invalid access token');
-      }
-    } catch (err) {
-      setRemoteUnlockError(err.response?.data?.detail || 'Failed to authenticate');
-    } finally {
-      setRemoteUnlocking(false);
-    }
-  };
-
-  const handleSendRemoteChatCode = async () => {
-    if (remoteChatSending) return;
-    setRemoteChatSending(true);
-    setRemoteUnlockError('');
-    setRemoteChatSentMsg('');
-    try {
-      const res = await axios.post(`${API_BASE}/api/remote/send-chat-code`);
-      if (res.data?.challenge_id) {
-        setRemoteChatChallengeId(res.data.challenge_id);
-        setRemoteChatCodeInput('');
-        setRemoteChatSentMsg('Verification code sent to Google Chat!');
-      } else {
-        throw new Error('Could not send verification code');
-      }
-    } catch (err) {
-      setRemoteUnlockError(err.response?.data?.detail || err.message || 'Failed to send verification code');
-    } finally {
-      setRemoteChatSending(false);
-    }
-  };
-
-  const handleVerifyRemoteChatCode = async (e) => {
-    if (e) e.preventDefault();
-    const cleaned = remoteChatCodeInput.replace(/\D/g, '');
-    if (cleaned.length !== 6 || !remoteChatChallengeId || remoteChatVerifying) return;
-    setRemoteChatVerifying(true);
-    setRemoteUnlockError('');
-    try {
-      const res = await axios.post(`${API_BASE}/api/remote/verify-chat-code`, {
-        challenge_id: remoteChatChallengeId,
-        code: cleaned,
-      });
-      if (res.data?.valid && res.data?.session_token) {
-        await applyRemoteGoogleSession(res.data.session_token);
-        setRemoteChatChallengeId('');
-        setRemoteChatCodeInput('');
-        setRemoteChatSentMsg('');
-      } else {
-        setRemoteUnlockError('Invalid verification code');
-      }
-    } catch (err) {
-      setRemoteUnlockError(err.response?.data?.detail || 'Invalid or expired verification code');
-    } finally {
-      setRemoteChatVerifying(false);
-    }
-  };
-
   const passcodeTargetRef = useRef(null);
   passcodeTargetRef.current = passcodeTarget;
   const doConnectRef = useRef();
@@ -2690,9 +2359,6 @@ export default function App() {
   const lastHardwareSlotsTsRef = useRef(0);
 
   const fetchStatus = async (forceImmediate = false) => {
-    if (isRemoteHost() && !axios.defaults.headers.common['X-Remote-Google-Session']) {
-      return null;
-    }
     try {
       const res = await axios.get(`${API_BASE}/status`);
       // Do not let a late poll for the previous sign replace the selected
@@ -2788,7 +2454,8 @@ export default function App() {
         });
       }
       if (res.data.connected && !pushingRef.current && !initializingConnectionRef.current) {
-        if (res.data.last_pushed_id && res.data.last_pushed_id !== lastPushedIdRef.current) {
+        const recentlyPushedHere = Date.now() - lastLocalPushedAtRef.current < 4000;
+        if (res.data.last_pushed_id && res.data.last_pushed_id !== lastPushedIdRef.current && !recentlyPushedHere) {
           setLastPushedId(res.data.last_pushed_id, true);
           if (typeof syncHardwareSlots === 'function') syncHardwareSlots();
           if (!presetsRef.current?.some(p => p.id === res.data.last_pushed_id)) {
@@ -2831,7 +2498,6 @@ export default function App() {
   // a different browser window. Reports active visibility to suppress double/background notifications.
   useEffect(() => {
     const sendHeartbeat = () => {
-      if (isRemoteHost() && !axios.defaults.headers.common['X-Remote-Google-Session']) return;
       const isVisible = document.visibilityState === 'visible' && !document.hidden;
       axios.post(`${API_BASE}/ui-heartbeat`, { active: isVisible }).catch(() => {});
     };
@@ -3054,6 +2720,9 @@ export default function App() {
   }, [status.connected]);
   const [lastPushedId, setLastPushedIdState] = useState(null);
   const lastPushedIdRef = useRef(null);
+  // When this page last chose what's showing. A status reply that was already in
+  // flight, or another tab's older choice, must not override it right afterwards.
+  const lastLocalPushedAtRef = useRef(0);
   const [isManualOverride, setIsManualOverrideState] = useState(false);
   const isManualOverrideRef = useRef(false);
   const lastActiveEventIdRef = useRef(null);
@@ -3074,6 +2743,7 @@ export default function App() {
     const resolved = typeof val === 'function' ? val(lastPushedIdRef.current) : val;
     lastPushedIdRef.current = resolved;
     setLastPushedIdState(resolved);
+    if (!fromServer) lastLocalPushedAtRef.current = Date.now();
     if (!fromServer && statusRef.current?.connected) {
       syncUiStateToServer(resolved, isManualOverrideRef.current);
     }
@@ -4089,10 +3759,16 @@ export default function App() {
   // Auto-pre-save the next calendar event to hardware Slot 1 (slot_id: 0) without displaying it
   const preSavingSlot1Ref = useRef(false);
   const preSaveSlot1FailedRef = useRef({ text: '', time: 0 });
+  // Set when the sign refuses slot uploads (error 14). Retrying only blanks the
+  // sign every minute, so wait until it reconnects (a power cycle drops the link).
+  const slotUploadsBlockedRef = useRef(false);
+  useEffect(() => {
+    if (!status?.connected) slotUploadsBlockedRef.current = false;
+  }, [status?.connected]);
   useEffect(() => {
     if (!status?.connected || !dbLoaded || isSignUpdating || pushingRef.current || initializingConnectionRef.current ||
         !initializedConnectionMacsRef.current.has(status.address?.toUpperCase())) return;
-    if (preSavingSlot1Ref.current) return;
+    if (preSavingSlot1Ref.current || slotUploadsBlockedRef.current) return;
 
     // Check if an event is currently active in its 5-minute pre-window or in session
     const currentActiveEvent = selectCalendarEvent(events, now);
@@ -4126,6 +3802,7 @@ export default function App() {
     const preSave = async () => {
       if (preSavingSlot1Ref.current || pushingRef.current || isSignUpdatingRef.current || !statusRef.current?.connected) return;
       preSavingSlot1Ref.current = true;
+      const prevShowingId = lastPushedIdRef.current;
       setPushing(true);
       handleSetPushMessage('Saving event...');
       try {
@@ -4193,12 +3870,30 @@ export default function App() {
       } catch (err) {
         console.warn('[auto-pre-save] Failed to pre-save next event to Slot 1:', err);
         const detail = err.response?.data?.detail || err.message || 'Failed to save event';
-        handleSetPushMessage(`Error saving event: ${detail}`);
+        if (String(detail).includes('(error 14)')) {
+          slotUploadsBlockedRef.current = true;
+          handleSetPushMessage('The sign is refusing saves. Power cycle the sign to save events to slot 1.');
+        } else {
+          handleSetPushMessage(`Error saving event: ${detail}`);
+        }
         preSaveSlot1FailedRef.current = { text: nextCleanText, time: Date.now() };
 
-        // Ensure sign is not left black on failure if no active event is running
+        // Ensure sign is not left black on failure if no active event is running.
+        // Put back what was showing (e.g. a custom image the user pushed) rather
+        // than replacing it with the default; fall back to the default otherwise.
         const activeEv = selectCalendarEvent(events, now);
-        if (!activeEv) {
+        const prevShowing = prevShowingId
+          ? (presets || []).find(p => p.id === prevShowingId || `preset-${p.id}` === prevShowingId)
+          : null;
+        const prevHwSlot = typeof prevShowingId === 'string' && /^hw-slot-\d+$/.test(prevShowingId)
+          ? parseInt(prevShowingId.split('-')[2], 10)
+          : null;
+        if (!activeEv && prevShowing) {
+          await handlePush(prevShowing, false, true, prevShowing.id).catch(() => {});
+        } else if (!activeEv && prevHwSlot !== null && prevHwSlot > 1) {
+          setLastPushedId(prevShowingId);
+          await axios.post(`${API_BASE}/preset?id=${prevHwSlot}&mac=${encodeURIComponent(targetMac)}`).catch(() => {});
+        } else if (!activeEv) {
           const defPreset = (presets || []).find(p => p.isDefault) || (presets || []).find(p => p.mode === 'clock');
           const syncedPresetId = localStorage.getItem('loy_hw_default_preset_id_' + targetMac);
           const isDefaultSynced = Boolean(localStorage.getItem('loy_hw_default_synced_' + targetMac)) &&
@@ -4434,11 +4129,9 @@ export default function App() {
           isDefault: Boolean(data.isDefault)
         });
       }
-      if (data.id) {
-        setLastPushedId(data.id);
-      } else {
-        setLastPushedId(null);
-      }
+      // Don't mark the new preset as showing until the sign confirms it: the live
+      // preview keeps its spinner until then instead of jumping ahead (and then
+      // flashing back if a status update lands mid-push).
       if (data.mode === 'text') {
         delete data.pixels;
         if (data.text) data.text = normalizeForSign(data.text);
@@ -4744,13 +4437,6 @@ export default function App() {
               onCancelSlotSave={cancelSlotSave}
               isSignUpdating={isSignUpdating}
               showPresetNotification={showPresetNotification}
-              tunnelUrl={tunnelUrl}
-              onTunnelUrlUpdated={(url) => {
-                setTunnelUrl(url);
-                tunnelUrlRef.current = url;
-              }}
-              handleCopyRemoteUrl={handleCopyRemoteUrl}
-              remoteCopied={remoteCopied}
               lastLocalBrightnessChangeRef={lastLocalBrightnessChangeRef}
               onReorderSavedPresets={(nextSaved) => syncSavedSlotOrderToServer(activeMac, nextSaved)}
             />
@@ -4812,142 +4498,10 @@ export default function App() {
             onNotify={setUnifiedPushMessage}
             syncStatus={syncStatus}
             onSyncNow={() => runCloudSyncRef.current()}
-            onRemoteSignOut={handleRemoteSignOut}
           />
         </div>
       </div>
 
-      {remoteLocked && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 99999,
-          background: 'rgba(10, 10, 15, 0.94)',
-          backdropFilter: 'blur(16px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
-        }}>
-          <div style={{
-            background: 'rgba(26, 26, 36, 0.98)',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            borderRadius: 20,
-            padding: 32,
-            maxWidth: 420,
-            width: '100%',
-            boxShadow: '0 20px 50px rgba(0,0,0,0.6)',
-            textAlign: 'center'
-          }}>
-            <div style={{
-              width: 54, height: 54, borderRadius: 16,
-              background: 'rgba(255, 255, 255, 0.03)',
-              border: '1px solid var(--glass-border)',
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              color: 'var(--text-muted)', marginBottom: 16
-            }}>
-              <Lock size={26} />
-            </div>
-            <h2 style={{ fontSize: 20, fontWeight: 800, margin: '0 0 8px 0', color: '#fff' }}>
-              LED Sign Remote Access
-            </h2>
-            {remoteCheckingToken ? (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, padding: '8px 0', color: '#94a3b8', fontSize: 13 }}>
-                <RefreshCw size={15} className="animate-spin" />
-                <span>{renderAnimatedMessage('Verifying remote access link...')}</span>
-              </div>
-            ) : remoteTokenValid && !remoteGoogleAuthed ? (
-              <>
-                <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 22px 0', lineHeight: 1.5 }}>
-                  Verify your identity with a one-time 6-digit code sent to your Google Chat.
-                </p>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center' }}>
-                  {remoteChatSentMsg && !remoteUnlockError && (
-                    <div style={{ color: '#34d399', fontSize: 12, fontWeight: 600 }}>
-                      {remoteChatSentMsg}
-                    </div>
-                  )}
-                  {remoteUnlockError && (
-                    <p role="alert" className="scan-passcode-error">
-                      {remoteUnlockError}
-                    </p>
-                  )}
-                  {!remoteChatChallengeId ? (
-                    <button
-                      type="button"
-                      onClick={handleSendRemoteChatCode}
-                      disabled={remoteChatSending}
-                      className="btn-styled"
-                      style={{
-                        width: '100%',
-                        padding: '12px 0',
-                        borderRadius: 12,
-                        fontSize: 14,
-                        fontWeight: 700,
-                        cursor: remoteChatSending ? 'not-allowed' : 'pointer',
-                        opacity: remoteChatSending ? 0.7 : 1,
-                      }}
-                    >
-                      {remoteChatSending ? renderAnimatedMessage('Sending code...') : 'Send Code to Google Chat'}
-                    </button>
-                  ) : (
-                    <form onSubmit={handleVerifyRemoteChatCode} style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 14 }}>
-                      <input
-                        autoFocus
-                        inputMode="numeric"
-                        autoComplete="one-time-code"
-                        maxLength={6}
-                        value={remoteChatCodeInput}
-                        onChange={(e) => { setRemoteChatCodeInput(e.target.value.replace(/\D/g, '').slice(0, 6)); setRemoteUnlockError(''); }}
-                        aria-label="Six-digit Verification Code"
-                        className="scan-passcode-input"
-                      />
-                      <button
-                        type="submit"
-                        disabled={remoteChatVerifying || remoteChatCodeInput.length !== 6}
-                        className="btn-styled"
-                        style={{
-                          width: '100%',
-                          padding: '12px 0',
-                          borderRadius: 12,
-                          fontSize: 14,
-                          fontWeight: 700,
-                          cursor: remoteChatVerifying || remoteChatCodeInput.length !== 6 ? 'not-allowed' : 'pointer',
-                          opacity: remoteChatVerifying || remoteChatCodeInput.length !== 6 ? 0.5 : 1,
-                        }}
-                      >
-                        {remoteChatVerifying ? renderAnimatedMessage('Verifying...') : 'Verify & Unlock'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleSendRemoteChatCode}
-                        disabled={remoteChatSending}
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: '#94a3b8',
-                          fontSize: 12,
-                          cursor: remoteChatSending ? 'not-allowed' : 'pointer',
-                          marginTop: 2,
-                        }}
-                      >
-                        {remoteChatSending ? 'Sending...' : 'Resend code'}
-                      </button>
-                    </form>
-                  )}
-                </div>
-              </>
-            ) : remoteVerifyNetworkError ? (
-              <>
-                <p style={{ fontSize: 13, color: '#94a3b8', margin: '0', lineHeight: 1.5 }}>
-                  Unable to reach the LED Sign host right now. The server or tunnel may still be starting up — please refresh in a moment.
-                </p>
-              </>
-            ) : (
-              <>
-                <p style={{ fontSize: 13, color: '#94a3b8', margin: '0', lineHeight: 1.5 }}>
-                  This remote access link is no longer valid or has expired. Request a new link from the LED Sign host.
-                </p>
-              </>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -4961,7 +4515,7 @@ function NavButton({ icon, label, active, onClick }) {
 }
 
 /* ─── Dashboard ─────────────────────────────────────────────────────── */
-function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, isSignUpdating, showPresetNotification, tunnelUrl, onTunnelUrlUpdated, handleCopyRemoteUrl, remoteCopied, lastLocalBrightnessChangeRef, onReorderSavedPresets }) {
+function DashboardView({ status, power, setPower, brightness, setBrightness, speed, setSpeed, macAddress, onMacInput, onMacBlur, onConnect, onDisconnect, onBeginChooseSign, isConnecting, connectionTarget, connectionError, onClear, isModalOpen, onPush, connectionFailed, apiError, deviceNames, setDeviceName, previewStamp, lastPushedId, setLastPushedId, setIsManualOverride, presets, savedPresets, setSavedPresets, savedDraggedIdx, setSavedDraggedIdx, savedDragOverIdx, setSavedDragOverIdx, now, pushMessage, setPushMessage, pushing, setPushing, pushingRef, pushingPresetTarget, setPushingPresetTarget, scanOpen, setScanOpen, passcodeTarget, bluetoothPasscode, setBluetoothPasscode, passcodeError, setPasscodeError, onSubmitPasscode, onClosePasscode, setSessionPasscode, clearSessionPasscode, syncHardwareSlots, fetchStatus, presetView, setPresetView, slotSaveProgress, setSlotSaveProgress, slotSavePhase, setSlotSavePhase, slotSaveAbortControllerRef, slotSaveProgressIdRef, onCancelSlotSave, isSignUpdating, showPresetNotification, lastLocalBrightnessChangeRef, onReorderSavedPresets }) {
   const [isLoaded, setIsLoaded] = useState(false);
   const passcodeInputRef = useRef(null);
 
@@ -5020,46 +4574,29 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     }
   }, [status?.connected, setPushMessage]);
 
-  // Remote Access & Webhook Settings
+  // Remote access over the work VPN: show this machine's addresses and the
+  // allowlist of VPN client IPs that may open the UI.
   const [remoteSettingsOpen, setRemoteSettingsOpen] = useState(false);
-  const [gchatWebhookUrl, setGchatWebhookUrl] = useState('');
-  const [hasSavedWebhook, setHasSavedWebhook] = useState(false);
-  const [autoSendGchat, setAutoSendGchat] = useState(false);
-  const [webhookConfigLoaded, setWebhookConfigLoaded] = useState(false);
-  const [isRegenerating, setIsRegenerating] = useState(false);
-  const [isSendingWebhook, setIsSendingWebhook] = useState(false);
+  const [remoteAccess, setRemoteAccess] = useState(null);
+  const [remoteAccessError, setRemoteAccessError] = useState('');
+  const [remoteIpInput, setRemoteIpInput] = useState('');
+  const [remoteAccessSaving, setRemoteAccessSaving] = useState(false);
+  const [copiedRemoteUrl, setCopiedRemoteUrl] = useState('');
+  // Google Chat webhook: posts the link when this computer's address changes.
+  const [webhookInput, setWebhookInput] = useState('');
   const [webhookNotice, setWebhookNotice] = useState(null);
+  const [webhookBusy, setWebhookBusy] = useState(false);
 
-  const loadWebhookConfig = async () => {
+  const loadRemoteAccess = async () => {
     try {
-      const res = await axios.get(`${API_BASE}/api/tunnel/webhook-config`);
-      const data = res.data || {};
-      setHasSavedWebhook(Boolean(data.has_webhook));
-      setGchatWebhookUrl(data.has_webhook ? (data.masked_webhook_url || '') : '');
-      setAutoSendGchat(Boolean(data.auto_send));
-      setWebhookConfigLoaded(true);
-      return true;
+      const res = await axios.get(`${API_BASE}/api/remote-access`);
+      setRemoteAccess(res.data || null);
+      setWebhookInput(res.data?.webhook?.masked_webhook_url || '');
+      setRemoteAccessError('');
     } catch (err) {
-      console.error('Failed to fetch webhook config:', err);
-      return false;
+      setRemoteAccessError(err.response?.data?.detail || 'Could not load remote access settings.');
     }
   };
-
-  useEffect(() => {
-    let cancelled = false;
-    let retryTimer = null;
-    const initLoad = async () => {
-      const ok = await loadWebhookConfig();
-      if (!ok && !cancelled) {
-        retryTimer = setTimeout(initLoad, 2000);
-      }
-    };
-    initLoad();
-    return () => {
-      cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
-    };
-  }, []);
 
   const openRemoteSettings = async (e) => {
     if (e) {
@@ -5067,80 +4604,126 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
       e.stopPropagation();
     }
     setRemoteSettingsOpen(true);
-    setWebhookNotice(null);
-    await loadWebhookConfig();
+    setRemoteAccessError('');
+    await loadRemoteAccess();
   };
 
-  const handleSaveWebhookConfig = async (newUrl, newAutoSend) => {
+  const saveAllowedIps = async (nextIps) => {
+    setRemoteAccessSaving(true);
+    setRemoteAccessError('');
     try {
-      const payload = {
-        auto_send: newAutoSend !== undefined ? newAutoSend : autoSendGchat
-      };
-      if (newUrl !== undefined && !String(newUrl).startsWith('•')) {
-        payload.webhook_url = newUrl;
-        setHasSavedWebhook(Boolean(String(newUrl).trim()));
-      }
-      await axios.post(`${API_BASE}/api/tunnel/webhook-config`, payload);
+      const res = await axios.post(`${API_BASE}/api/remote-access`, { allowed_ips: nextIps });
+      setRemoteAccess(prev => ({ ...(prev || {}), allowed_ips: res.data?.allowed_ips || nextIps }));
+      return true;
     } catch (err) {
-      console.error('Failed to save webhook config:', err);
-    }
-  };
-
-  const handleRegenerateTunnel = async () => {
-    if (isRegenerating) return;
-    setIsRegenerating(true);
-    setWebhookNotice({ type: 'info', text: 'Generating new link...' });
-    try {
-      const res = await fetch('/api/tunnel/regenerate', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok && (data.status === 'ready' || data.status === 'ok') && data.url) {
-        if (onTunnelUrlUpdated) onTunnelUrlUpdated(data.url);
-        let noticeText = 'New remote access link generated!';
-        if (data.webhook_status === 'sent') {
-          noticeText = 'New link sent to Google Chat!';
-        } else if (data.webhook_status === 'error') {
-          noticeText += ' (Webhook delivery failed)';
-        }
-        setWebhookNotice({ type: 'success', text: noticeText });
-      } else {
-        setWebhookNotice({ type: 'error', text: data.detail || 'Failed to regenerate link.' });
-      }
-    } catch (err) {
-      setWebhookNotice({ type: 'error', text: 'Network error while regenerating link.' });
+      setRemoteAccessError(err.response?.data?.detail || 'Could not save remote access settings.');
+      return false;
     } finally {
-      setIsRegenerating(false);
+      setRemoteAccessSaving(false);
     }
   };
 
-  const handleSendGchatWebhook = async () => {
-    if (isSendingWebhook) return;
-    const trimmed = gchatWebhookUrl.trim();
-    const isMasked = trimmed.startsWith('•');
-    if (!trimmed && !hasSavedWebhook) {
-      setWebhookNotice({ type: 'error', text: 'Please enter a Google Chat webhook URL first.' });
-      return;
+  const handleAddAllowedIp = async (e) => {
+    if (e) e.preventDefault();
+    const value = remoteIpInput.trim();
+    if (!isValidAllowEntry(value)) return;
+    const current = remoteAccess?.allowed_ips || [];
+    if (await saveAllowedIps([...current, value])) setRemoteIpInput('');
+  };
+
+  const handleAllowDeniedIp = async (ip) => {
+    const current = remoteAccess?.allowed_ips || [];
+    if (await saveAllowedIps([...current, ip])) {
+      setRemoteAccess(prev => ({
+        ...(prev || {}),
+        recent_denied: (prev?.recent_denied || []).filter(entry => entry.ip !== ip),
+      }));
     }
-    setIsSendingWebhook(true);
+  };
+
+  const handleRemoveAllowedIp = (ip) => {
+    const current = remoteAccess?.allowed_ips || [];
+    saveAllowedIps(current.filter(entry => entry !== ip));
+  };
+
+  const applyWebhookConfig = (data) => {
+    if (!data) return;
+    const webhook = {};
+    for (const key of ['has_webhook', 'masked_webhook_url', 'auto_send', 'last_sent_link']) {
+      if (data[key] !== undefined) webhook[key] = data[key];
+    }
+    setRemoteAccess(prev => ({ ...(prev || {}), webhook: { ...(prev?.webhook || {}), ...webhook } }));
+    if (webhook.masked_webhook_url !== undefined) setWebhookInput(webhook.masked_webhook_url || '');
+  };
+
+  const saveWebhookConfig = async (payload) => {
+    setWebhookBusy(true);
     setWebhookNotice(null);
     try {
-      if (!isMasked && trimmed) {
-        await handleSaveWebhookConfig(trimmed, autoSendGchat);
-      }
-      const res = await fetch('/api/tunnel/send-webhook', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(isMasked ? {} : { webhook_url: trimmed })
-      });
-      const data = await res.json();
-      if (res.ok && (data.status === 'ok' || data.success)) {
-        setWebhookNotice({ type: 'success', text: 'Link successfully sent to Google Chat!' });
-      } else {
-        setWebhookNotice({ type: 'error', text: data.detail || data.error || 'Failed to send to Google Chat.' });
-      }
+      const res = await axios.post(`${API_BASE}/api/remote-access/webhook`, payload);
+      applyWebhookConfig(res.data);
+      return true;
     } catch (err) {
-      setWebhookNotice({ type: 'error', text: 'Failed to send webhook request.' });
+      setWebhookNotice({ type: 'error', text: err.response?.data?.detail || 'Could not save the webhook.' });
+      return false;
     } finally {
-      setIsSendingWebhook(false);
+      setWebhookBusy(false);
+    }
+  };
+
+  const handleSaveWebhook = async (e) => {
+    if (e) e.preventDefault();
+    const value = webhookInput.trim();
+    if (!value || value.startsWith('•')) return;
+    if (await saveWebhookConfig({ webhook_url: value })) {
+      setWebhookNotice({ type: 'success', text: 'Webhook saved.' });
+    }
+  };
+
+  const handleSendLinkToChat = async () => {
+    setWebhookBusy(true);
+    setWebhookNotice(null);
+    try {
+      const value = webhookInput.trim();
+      if (value && !value.startsWith('•')) {
+        const res = await axios.post(`${API_BASE}/api/remote-access/webhook`, { webhook_url: value });
+        applyWebhookConfig(res.data);
+      }
+      const res = await axios.post(`${API_BASE}/api/remote-access/send-link`);
+      applyWebhookConfig(res.data);
+      setWebhookNotice({ type: 'success', text: 'Link sent to Google Chat.' });
+    } catch (err) {
+      setWebhookNotice({ type: 'error', text: err.response?.data?.detail || 'Could not send to Google Chat.' });
+    } finally {
+      setWebhookBusy(false);
+    }
+  };
+
+  const handleCopyRemoteUrl = async (url) => {
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(url);
+      copied = true;
+    } catch {
+      // The async clipboard API is unavailable on plain-http pages opened by IP
+      // (e.g. over the VPN) or when permission is denied; fall back to a selection copy.
+      const area = document.createElement('textarea');
+      area.value = url;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      try {
+        copied = document.execCommand('copy');
+      } catch (err) {
+        console.error('Failed to copy remote url', err);
+      }
+      document.body.removeChild(area);
+    }
+    if (copied) {
+      setCopiedRemoteUrl(url);
+      setTimeout(() => setCopiedRemoteUrl(prev => (prev === url ? '' : prev)), 2000);
     }
   };
 
@@ -5962,7 +5545,9 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               </div>
             )}
 
-            {Boolean(pushing && pushingPresetTarget) && (
+            {/* Any sign update (including background event saves, which blank the
+                screen) shows the spinner until it completes. */}
+            {Boolean(pushing) && (
               <div
                 className="preview-push-overlay"
                 style={{
@@ -5971,9 +5556,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  background: 'rgba(0, 0, 0, 0.4)',
-                  backdropFilter: 'blur(2px)',
-                  WebkitBackdropFilter: 'blur(2px)',
+                  // Opaque: neither the old nor the new content shows until the sign has changed.
+                  background: '#000000',
                   zIndex: 20,
                   pointerEvents: 'none',
                   borderRadius: 'inherit'
@@ -7068,7 +6652,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 }}>
                   <RemoteIcon size={18} />
                 </div>
-                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Remote Access Settings</h3>
+                <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Remote Access (VPN)</h3>
               </div>
               <button 
                 type="button" 
@@ -7081,8 +6665,8 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
               </button>
             </div>
 
-            {webhookNotice && (
-              <div style={{
+            {remoteAccessError && (
+              <div role="alert" style={{
                 marginBottom: 16,
                 padding: '9px 12px',
                 borderRadius: 10,
@@ -7091,178 +6675,316 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 display: 'flex',
                 alignItems: 'center',
                 gap: 8,
-                background: webhookNotice.type === 'error' ? 'rgba(239, 68, 68, 0.12)' : webhookNotice.type === 'success' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(56, 189, 248, 0.12)',
-                color: webhookNotice.type === 'error' ? '#f87171' : webhookNotice.type === 'success' ? '#34d399' : '#38bdf8',
-                border: `1px solid ${webhookNotice.type === 'error' ? 'rgba(239,68,68,0.25)' : webhookNotice.type === 'success' ? 'rgba(16,185,129,0.25)' : 'rgba(56,189,248,0.25)'}`
+                background: 'rgba(239, 68, 68, 0.12)',
+                color: '#f87171',
+                border: '1px solid rgba(239,68,68,0.25)'
               }}>
-                {webhookNotice.type === 'info' && <RefreshCw size={13} className="animate-spin flex-shrink-0" />}
-                {webhookNotice.type === 'success' && <Check size={13} className="flex-shrink-0" />}
-                {webhookNotice.type === 'error' && <AlertCircle size={13} className="flex-shrink-0" />}
-                <span>{renderAnimatedMessage(webhookNotice.text)}</span>
+                <AlertCircle size={13} className="flex-shrink-0" />
+                <span>{remoteAccessError}</span>
               </div>
             )}
 
-            <div style={{ marginBottom: 18 }}>
-              <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
-                Current Remote Link
-              </label>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  type="text"
-                  readOnly
-                  value={tunnelUrl || 'Initializing remote tunnel...'}
-                  className="input-field font-mono"
-                  style={{ flex: 1, fontSize: 12, padding: '8px 12px' }}
-                  onClick={(e) => e.target.select()}
-                />
-                <button
-                  type="button"
-                  onClick={handleCopyRemoteUrl}
-                  className="btn-styled"
-                  aria-label="Copy remote access link"
-                  style={{
-                    width: 38,
-                    minWidth: 38,
-                    height: 38,
-                    padding: 0,
-                    borderRadius: 10,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                    background: remoteCopied ? 'rgba(74, 222, 128, 0.2)' : undefined,
-                    border: remoteCopied ? '1px solid rgba(74, 222, 128, 0.5)' : undefined,
-                    boxShadow: remoteCopied ? '0 0 0 1px rgba(74, 222, 128, 0.4), 0 2px 10px rgba(74, 222, 128, 0.35)' : undefined,
-                    color: remoteCopied ? '#4ade80' : undefined,
-                    transition: 'background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease'
-                  }}
-                  title={remoteCopied ? "Copied remote access link!" : "Copy remote access link"}
-                >
-                  {remoteCopied ? <Check size={14} className="flex-shrink-0" /> : <Copy size={14} className="flex-shrink-0" />}
-                </button>
-                <button
-                  type="button"
-                  disabled={isRegenerating}
-                  onClick={handleRegenerateTunnel}
-                  className="btn-styled"
-                  title="Generate new link"
-                  aria-label="Generate new link"
-                  style={{
-                    width: 38,
-                    minWidth: 38,
-                    height: 38,
-                    padding: 0,
-                    borderRadius: 10,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                    cursor: isRegenerating ? 'not-allowed' : 'pointer',
-                    opacity: isRegenerating ? 0.6 : 1
-                  }}
-                >
-                  <RefreshCw size={14} className={isRegenerating ? 'animate-spin' : ''} />
-                </button>
+            {!remoteAccess && !remoteAccessError ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#94a3b8', fontSize: 13, padding: '8px 0' }}>
+                <RefreshCw size={14} className="animate-spin" />
+                <span>{renderAnimatedMessage('Loading remote access settings...')}</span>
               </div>
-              <p style={{ fontSize: 11, color: '#64748b', marginTop: 6, lineHeight: 1.4 }}>
-                This link allows secure access to this web app from any device. It includes an encrypted authentication key to keep it private.
-              </p>
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
-                Google Chat Webhook
-              </label>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
-                <input
-                  type="text"
-                  placeholder={webhookConfigLoaded ? "https://chat.googleapis.com/v1/spaces/.../messages?key=..." : "Loading saved webhook..."}
-                  value={gchatWebhookUrl}
-                  onFocus={(e) => {
-                    if (gchatWebhookUrl.startsWith('•')) e.target.select();
-                  }}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setGchatWebhookUrl(val);
-                    const trimmed = val.trim();
-                    if (trimmed.startsWith('https://chat.googleapis.com/')) {
-                      handleSaveWebhookConfig(trimmed, autoSendGchat);
-                    }
-                  }}
-                  className="input-field"
-                  style={{ flex: 1, fontSize: 12, padding: '8px 12px' }}
-                />
-                <button
-                  type="button"
-                  disabled={isSendingWebhook || (!gchatWebhookUrl.trim() && !hasSavedWebhook)}
-                  onClick={handleSendGchatWebhook}
-                  className="btn-styled"
-                  title="Send link to Google Chat"
-                  aria-label="Send link to Google Chat"
-                  style={{
-                    width: 38,
-                    minWidth: 38,
-                    height: 38,
-                    padding: 0,
-                    borderRadius: 10,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                    cursor: isSendingWebhook || (!gchatWebhookUrl.trim() && !hasSavedWebhook) ? 'not-allowed' : 'pointer',
-                    opacity: isSendingWebhook || (!gchatWebhookUrl.trim() && !hasSavedWebhook) ? 0.5 : 1
-                  }}
-                >
-                  <Send size={14} className={isSendingWebhook ? 'animate-pulse' : ''} />
-                </button>
-              </div>
-              <div
-                role="checkbox"
-                aria-checked={autoSendGchat && Boolean(gchatWebhookUrl.trim())}
-                aria-disabled={!gchatWebhookUrl.trim()}
-                onClick={() => {
-                  if (!gchatWebhookUrl.trim()) return;
-                  const next = !autoSendGchat;
-                  setAutoSendGchat(next);
-                  handleSaveWebhookConfig(gchatWebhookUrl, next);
-                }}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '10px',
-                  fontSize: '12px',
-                  fontWeight: 500,
-                  color: autoSendGchat && gchatWebhookUrl.trim() ? '#e2e8f0' : '#94a3b8',
-                  cursor: !gchatWebhookUrl.trim() ? 'not-allowed' : 'pointer',
-                  opacity: !gchatWebhookUrl.trim() ? 0.45 : 1,
-                  userSelect: 'none'
-                }}
-              >
-                <div
-                  style={{
-                    width: '18px',
-                    height: '18px',
-                    borderRadius: '6px',
-                    background: autoSendGchat
-                      ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))'
-                      : 'rgba(255, 255, 255, 0.08)',
-                    border: autoSendGchat
-                      ? 'none'
-                      : '1px solid rgba(255, 255, 255, 0.2)',
-                    boxShadow: autoSendGchat ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    transition: 'all 0.2s ease',
-                    color: '#ffffff',
-                    flexShrink: 0
-                  }}
-                >
-                  {autoSendGchat && <Check size={13} strokeWidth={3.5} />}
+            ) : remoteAccess && (
+              <>
+                <div style={{ marginBottom: 20 }}>
+                  {(() => {
+                    const port = remoteAccess.ui_port || 5173;
+                    const addresses = remoteAccess.local_addresses || [];
+                    // Only the Wi-Fi/Ethernet address is reachable over the VPN; other
+                    // adapters (NordVPN, Tailscale, VMware) can't be used by remote devices.
+                    const main = addresses.find(a => a.primary);
+                    const urlFor = (addr) => `http://${addr.ip}:${port}/`;
+                    const copyButton = (url, size = 34) => {
+                      const copied = copiedRemoteUrl === url;
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => handleCopyRemoteUrl(url)}
+                          className={copied ? undefined : 'btn-styled'}
+                          aria-label={copied ? 'Copied link' : `Copy ${url}`}
+                          title={copied ? 'Copied!' : 'Copy link'}
+                          style={{
+                            width: size, minWidth: size, height: size, padding: 0, borderRadius: 10,
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                            cursor: 'pointer',
+                            transition: 'background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease',
+                            ...(copied ? {
+                              background: 'rgba(74, 222, 128, 0.2)',
+                              border: '1px solid rgba(74, 222, 128, 0.5)',
+                              boxShadow: '0 0 0 1px rgba(74, 222, 128, 0.4), 0 2px 10px rgba(74, 222, 128, 0.35)',
+                              color: '#4ade80'
+                            } : {})
+                          }}
+                        >
+                          {copied ? <Check size={14} /> : <Copy size={14} />}
+                        </button>
+                      );
+                    };
+                    return (
+                      <>
+                        <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+                          Link for your other device
+                        </label>
+                        {!main ? (
+                          <p style={{ fontSize: 12, color: '#fbbf24', margin: 0, lineHeight: 1.4 }}>
+                            Couldn't find this computer's Wi-Fi or Ethernet address. Check that it's connected to the office network, then reopen this window.
+                          </p>
+                        ) : (
+                          <div style={{
+                            display: 'flex', gap: 10, alignItems: 'center',
+                            padding: '12px 12px 12px 14px', borderRadius: 12,
+                            background: 'rgba(139, 92, 246, 0.10)', border: '1px solid rgba(139, 92, 246, 0.35)'
+                          }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <a
+                                href={urlFor(main)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-mono"
+                                style={{ display: 'block', fontSize: 15, fontWeight: 700, color: '#f8fafc', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                              >
+                                {urlFor(main)}
+                              </a>
+                            </div>
+                            {copyButton(urlFor(main), 38)}
+                          </div>
+                        )}
+                        <p style={{ fontSize: 11, color: '#64748b', margin: '8px 0 0', lineHeight: 1.4 }}>
+                          Connect the other device to the work VPN with{' '}
+                          <a href={PRITUNL_INSTALL_URL} target="_blank" rel="noopener noreferrer" style={{ color: '#a78bfa', textDecoration: 'underline' }}>Pritunl</a>,
+                          open this link, then allow its address below. This address can change if the computer reconnects to the network.
+                        </p>
+                      </>
+                    );
+                  })()}
                 </div>
-                <span>Automatically send link to Google Chat whenever a new link is generated</span>
-              </div>
-            </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                    Allowed VPN addresses
+                  </label>
+                  <p style={{ fontSize: 11, color: '#64748b', margin: '0 0 8px', lineHeight: 1.4 }}>
+                    Only connections from these addresses (and this computer) can control LED Sign.
+                  </p>
+                  {(remoteAccess.allowed_ips || []).length === 0 ? (
+                    <p style={{ fontSize: 12, color: '#94a3b8', margin: '0 0 10px' }}>No VPN addresses allowed yet.</p>
+                  ) : (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                      {(remoteAccess.allowed_ips || []).map(ip => (
+                        <span key={ip} className="font-mono" style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12,
+                          padding: '4px 6px 4px 10px', borderRadius: 8,
+                          background: 'rgba(255,255,255,0.05)', border: '1px solid var(--glass-border)'
+                        }}>
+                          {ip}
+                          {!remoteAccess.is_remote && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveAllowedIp(ip)}
+                              disabled={remoteAccessSaving}
+                              aria-label={`Remove ${ip}`}
+                              style={{ background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 0 }}
+                            >
+                              <X size={13} />
+                            </button>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {remoteAccess.is_remote ? (
+                    <p style={{ fontSize: 11, color: '#94a3b8', margin: 0, lineHeight: 1.4 }}>
+                      You're connected from {remoteAccess.client_ip}. The allowed list can only be changed on the LED Sign host.
+                    </p>
+                  ) : (
+                    <form onSubmit={handleAddAllowedIp} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <input
+                        type="text"
+                        placeholder="VPN address or range"
+                        aria-label="VPN address or range to allow"
+                        value={remoteIpInput}
+                        onChange={(e) => { setRemoteIpInput(e.target.value); setRemoteAccessError(''); }}
+                        className="input-field font-mono"
+                        style={{ flex: 1, minWidth: 0, fontSize: 12, padding: '8px 12px' }}
+                      />
+                      <button
+                        type="submit"
+                        disabled={remoteAccessSaving || !isValidAllowEntry(remoteIpInput)}
+                        className="btn-styled"
+                        style={{
+                          padding: '8px 14px', borderRadius: 10, fontSize: 12, fontWeight: 700, flexShrink: 0,
+                          cursor: remoteAccessSaving || !isValidAllowEntry(remoteIpInput) ? 'not-allowed' : 'pointer',
+                          opacity: remoteAccessSaving || !isValidAllowEntry(remoteIpInput) ? 0.5 : 1
+                        }}
+                      >
+                        Add
+                      </button>
+                    </form>
+                  )}
+                </div>
+
+                {!remoteAccess.is_remote && (remoteAccess.recent_denied || []).length > 0 && (
+                  <div style={{ marginTop: 20 }}>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                      Recently blocked
+                    </label>
+                    <p style={{ fontSize: 11, color: '#64748b', margin: '0 0 8px', lineHeight: 1.4 }}>
+                      Connections that were refused. If one is you over the VPN, allow it here. Don't allow addresses you don't recognize.
+                    </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {(remoteAccess.recent_denied || []).map(entry => (
+                        <div key={entry.ip} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="font-mono" style={{ fontSize: 12, color: '#e2e8f0' }}>{entry.ip}</div>
+                            {entry.last_seen && (
+                              <div style={{ fontSize: 10, color: '#64748b' }}>
+                                {new Date(entry.last_seen * 1000).toLocaleString()}
+                              </div>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleAllowDeniedIp(entry.ip)}
+                            disabled={remoteAccessSaving}
+                            className="btn-styled"
+                            style={{
+                              padding: '8px 14px', borderRadius: 10, fontSize: 12, fontWeight: 700, flexShrink: 0,
+                              cursor: remoteAccessSaving ? 'not-allowed' : 'pointer',
+                              opacity: remoteAccessSaving ? 0.5 : 1
+                            }}
+                          >
+                            Allow
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {!remoteAccess.is_remote && remoteAccess.webhook && (() => {
+                  const webhook = remoteAccess.webhook;
+                  const typed = webhookInput.trim();
+                  const typedNew = Boolean(typed) && !typed.startsWith('•');
+                  const canSend = !webhookBusy && (webhook.has_webhook || typedNew);
+                  const autoOn = Boolean(webhook.auto_send) && webhook.has_webhook;
+                  return (
+                    <div style={{ marginTop: 20 }}>
+                      <label style={{ display: 'block', fontSize: '11px', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                        Google Chat
+                      </label>
+                      <p style={{ fontSize: 11, color: '#64748b', margin: '0 0 8px', lineHeight: 1.4 }}>
+                        Send the link to Google Chat so you can access it from your other device.
+                      </p>
+                      {webhookNotice && (
+                        <div role={webhookNotice.type === 'error' ? 'alert' : 'status'} style={{
+                          marginBottom: 10, padding: '8px 12px', borderRadius: 10, fontSize: 12, fontWeight: 600,
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          background: webhookNotice.type === 'error' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(16, 185, 129, 0.12)',
+                          color: webhookNotice.type === 'error' ? '#f87171' : '#34d399',
+                          border: `1px solid ${webhookNotice.type === 'error' ? 'rgba(239,68,68,0.25)' : 'rgba(16,185,129,0.25)'}`
+                        }}>
+                          {webhookNotice.type === 'error' ? <AlertCircle size={13} className="flex-shrink-0" /> : <Check size={13} className="flex-shrink-0" />}
+                          <span>{webhookNotice.text}</span>
+                        </div>
+                      )}
+                      <form onSubmit={handleSaveWebhook} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                        <input
+                          type="text"
+                          placeholder="https://chat.googleapis.com/v1/spaces/.../messages?key=..."
+                          aria-label="Google Chat webhook URL"
+                          value={webhookInput}
+                          onFocus={(e) => { if (webhookInput.startsWith('•')) e.target.select(); }}
+                          onChange={(e) => { setWebhookInput(e.target.value); setWebhookNotice(null); }}
+                          className="input-field"
+                          style={{ flex: 1, minWidth: 0, fontSize: 12, padding: '8px 12px' }}
+                        />
+                        {typedNew && (
+                          <button type="submit" disabled={webhookBusy} className="btn-styled" style={{ padding: '8px 12px', borderRadius: 10, fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
+                            Save
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleSendLinkToChat}
+                          disabled={!canSend}
+                          className="btn-styled"
+                          title="Send the link to Google Chat now"
+                          aria-label="Send the link to Google Chat now"
+                          style={{
+                            width: 38, minWidth: 38, height: 38, padding: 0, borderRadius: 10,
+                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                            cursor: canSend ? 'pointer' : 'not-allowed', opacity: canSend ? 1 : 0.5
+                          }}
+                        >
+                          <Send size={14} className={webhookBusy ? 'animate-pulse' : ''} />
+                        </button>
+                      </form>
+                      <div
+                        role="checkbox"
+                        aria-checked={autoOn}
+                        aria-disabled={!webhook.has_webhook || webhookBusy}
+                        tabIndex={webhook.has_webhook ? 0 : -1}
+                        onClick={() => {
+                          if (!webhook.has_webhook || webhookBusy) return;
+                          saveWebhookConfig({ auto_send: !autoOn });
+                        }}
+                        onKeyDown={(e) => {
+                          if ((e.key === ' ' || e.key === 'Enter') && webhook.has_webhook && !webhookBusy) {
+                            e.preventDefault();
+                            saveWebhookConfig({ auto_send: !autoOn });
+                          }
+                        }}
+                        style={{
+                          fontSize: '13px',
+                          fontWeight: 700,
+                          color: '#cbd5e1',
+                          cursor: webhook.has_webhook && !webhookBusy ? 'pointer' : 'not-allowed',
+                          opacity: webhook.has_webhook ? 1 : 0.45,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          userSelect: 'none'
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: '18px',
+                            height: '18px',
+                            borderRadius: '6px',
+                            background: autoOn
+                              ? 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))'
+                              : 'rgba(255, 255, 255, 0.08)',
+                            border: autoOn
+                              ? 'none'
+                              : '1px solid rgba(255, 255, 255, 0.2)',
+                            boxShadow: autoOn ? '0 0 10px rgba(139, 92, 246, 0.45)' : 'none',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            transition: 'all 0.2s ease',
+                            color: '#ffffff',
+                            flexShrink: 0
+                          }}
+                        >
+                          {autoOn && <Check size={13} strokeWidth={3.5} />}
+                        </div>
+                        <span>Send the new link automatically when this computer's address changes</span>
+                      </div>
+                      {webhook.last_sent_link && (
+                        <p style={{ fontSize: 11, color: '#64748b', margin: '6px 0 0' }}>
+                          Last sent: <span className="font-mono">{webhook.last_sent_link}</span>
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
+              </>
+            )}
           </div>
         </div>,
         document.body
@@ -7295,7 +7017,7 @@ function GoogleCalendarLogo({ size = 16, style = {} }) {
 }
 
 /* ─── Calendar ───────────────────────────────────────────────────────── */
-function CalendarView({ status, events, invites, loading, eventsDate, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify, syncStatus, onSyncNow, onRemoteSignOut }) {
+function CalendarView({ status, events, invites, loading, eventsDate, fetchEvents, now, onPush, pushMessage, pushing, cleanName, setCleanName, isSignUpdating, onNotify, syncStatus, onSyncNow }) {
   const [calError, setCalError] = useState('');
   const [acceptingId, setAcceptingId] = useState(null);
   const [scopeModalOpen, setScopeModalOpen] = useState(false);
@@ -7398,14 +7120,11 @@ function CalendarView({ status, events, invites, loading, eventsDate, fetchEvent
               <button onClick={() => fetchEvents(true)} className="btn-styled inactive" style={{ padding: '6px 10px', marginLeft: 4 }} disabled={loading} title="Refresh">
                 <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
               </button>
-              <button 
+              {!isRemoteHost() && (
+              <button
                 onClick={async () => {
-                  if (isRemoteHost() && onRemoteSignOut) {
-                    await onRemoteSignOut();
-                  } else {
-                    await axios.post(`${API_BASE}/auth/logout`);
-                    window.location.reload();
-                  }
+                  await axios.post(`${API_BASE}/auth/logout`);
+                  window.location.reload();
                 }} 
                 className="btn-styled inactive" 
                 style={{ padding: '6px 12px', fontSize: 12, marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}
@@ -7413,6 +7132,7 @@ function CalendarView({ status, events, invites, loading, eventsDate, fetchEvent
                 <LogOut size={13} />
                 <span>Sign out</span>
               </button>
+              )}
             </>
           )}
         </div>

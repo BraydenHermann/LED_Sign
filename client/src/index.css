@@ -767,6 +767,19 @@ body.preset-dragging .preset-card.empty-slot.preset-card-reserved { border-color
   border: 1px solid rgba(255,255,255,0.25);
 }
 
+/* Focus ring uses the same purple-to-pink gradient as the Connect button
+   (dark fill on the padding box, gradient showing through the border). */
+.scan-passcode-input:focus,
+.scan-passcode-input:focus-visible {
+  outline: none;
+  border: 2px solid transparent;
+  padding: 11px;
+  background:
+    linear-gradient(#0e0d14, #0e0d14) padding-box,
+    linear-gradient(135deg, var(--accent-primary), var(--accent-secondary)) border-box;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.35);
+}
+
 .scan-passcode-error {
   margin: 0 2px;
   color: #fca5a5;

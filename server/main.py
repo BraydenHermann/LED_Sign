@@ -80,7 +80,7 @@ import urllib.parse
 import urllib.request
 from typing import List, Optional, Any, Union, Dict
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -93,7 +93,8 @@ import openai_service
 from loy_space_service import loy_space_service, USER_SESSION_FILE
 from sync_service import DriveSync, SyncUnavailable
 from event_text import event_sign_text, event_slot_preset
-from tunnel_service import tunnel_service
+import remote_access
+import link_notifier
 
 
 def hex_to_rgb_global(hex_str: Optional[str], default=(0,0,0)):
@@ -200,6 +201,23 @@ async def safe_write_gatt_char(char_uuid: str, data: Union[bytes, bytearray], re
     else:
         raise RuntimeError("Sign is not connected")
 
+async def _reauthenticate_sign() -> bool:
+    """Re-send this session's passcode. A protected sign answers error 14 when it
+    no longer considers the app signed in, which happens after a live push: it
+    still plays content but refuses slot uploads until the passcode is sent again."""
+    mac = ((connected_client.address if connected_client else "") or "").upper()
+    passcode = _session_passcodes.get(mac) or (_session_passcodes.get(last_connected_mac) if last_connected_mac else "")
+    if not passcode:
+        return False
+    try:
+        result = await _password_request(protocol.device_info_all_command(passcode), timeout=2.5)
+    except asyncio.TimeoutError:
+        result = None
+    ok = bool(result and result.get("ok"))
+    print(f"[auth] Re-sent passcode after error 14: {'accepted' if ok else 'not accepted'}")
+    return ok
+
+
 async def write_slot_packet(packet: bytes, label: str, large: bool = False, retries: int = 0):
     """Write one slot-transfer packet and wait for the sign to accept it.
 
@@ -209,8 +227,11 @@ async def write_slot_packet(packet: bytes, label: str, large: bool = False, retr
     """
     sno = struct.unpack('<H', packet[6:8])[0]
     timeout = 5.0 if label == "the transfer start" else SLOT_ACK_TIMEOUT
-    max_attempts = 1 + max(0, retries)
-    for attempt in range(max_attempts):
+    timeouts_left = max(0, retries)
+    reauthenticated = False
+    attempt = 0
+    while True:
+        attempt += 1
         waiter = asyncio.get_running_loop().create_future()
         _slot_ack_waiters[sno] = waiter
         try:
@@ -221,11 +242,16 @@ async def write_slot_packet(packet: bytes, label: str, large: bool = False, retr
             try:
                 error_code = await asyncio.wait_for(waiter, timeout=timeout)
             except asyncio.TimeoutError:
-                if attempt < max_attempts - 1:
-                    print(f"[write_slot_packet] Warning: sign did not confirm {label} on attempt {attempt + 1}, retrying in 0.25s...")
+                if timeouts_left > 0:
+                    timeouts_left -= 1
+                    print(f"[write_slot_packet] Warning: sign did not confirm {label} on attempt {attempt}, retrying in 0.25s...")
                     await asyncio.sleep(0.25)
                     continue
                 raise RuntimeError(f"Sign did not confirm {label}; the transfer was stopped before saving")
+            if error_code == 14 and not reauthenticated:
+                reauthenticated = True
+                if await _reauthenticate_sign():
+                    continue
             if error_code != 0:
                 raise RuntimeError(f"Sign rejected {label} (error {error_code}); the transfer was stopped before saving")
             return
@@ -373,10 +399,8 @@ async def calendar_background_loop():
 @app.on_event("startup")
 async def startup_event():
     print("LED Sign Server running!")
-    try:
-        tunnel_service.get_status()
-    except Exception as e:
-        print(f"[tunnel] Startup error: {e}")
+    remote_access.EXECUTOR.submit(remote_access.list_local_addresses)  # warm the address cache
+    link_notifier.start_watcher()  # post the new link to Google Chat if this computer's address changes
 
 protocol = LOYWebProtocol()
 calendar_service = CalendarService()
@@ -733,88 +757,20 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def remote_security_middleware(request: Request, call_next):
-    # Determine if request is coming from a remote connection (e.g. via Cloudflare tunnel)
-    cf_ip = request.headers.get("cf-connecting-ip")
-    xf_host = request.headers.get("x-forwarded-host", "")
-    host = request.headers.get("host", "")
-    is_remote = bool(cf_ip or ".trycloudflare.com" in xf_host or ".trycloudflare.com" in host)
+async def remote_access_middleware(request: Request, call_next):
+    """Only this machine and allowlisted VPN clients may use the API.
 
-    if is_remote:
-        path = request.url.path
-        # Whitelisted paths that don't need auth (favicon, manifest, token verification, OAuth callback)
-        if path in ("/favicon.png", "/manifest.json", "/api/remote/verify-token", "/auth/callback") or path.startswith("/static/"):
-            return await call_next(request)
-
-        if tunnel_service.is_link_expired():
-            if not getattr(tunnel_service, "_is_regenerating", False):
-                asyncio.create_task(asyncio.to_thread(tunnel_service.regenerate_link))
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Remote access link has expired after 7 days. A new link is being generated.", "code": "token_expired"}
-            )
-
-        expected_token = tunnel_service.get_token()
-
-        token = request.headers.get("x-remote-token")
-        if not token:
-            auth_header = request.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:].strip()
-        if not token:
-            token = request.query_params.get("token")
-        if not token:
-            token = request.cookies.get("led_remote_token")
-
-        if not token or not secrets.compare_digest(token.strip(), expected_token):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Unauthorized: Valid remote access token required", "code": "token_required"}
-            )
-
-        # Endpoints allowed with a valid link token so the user can complete verification
-        if path in (
-            "/api/remote/google-auth-url",
-            "/api/remote/google-auth-status",
-            "/api/remote/send-chat-code",
-            "/api/remote/verify-chat-code",
-            "/api/remote/logout",
-        ):
-            response = await call_next(request)
-            response.set_cookie(
-                key="led_remote_token",
-                value=expected_token,
-                max_age=7 * 24 * 3600,
-                httponly=False,
-                samesite="lax",
-                path="/"
-            )
-            return response
-
-        # Require verified Google Sign-In session for all other remote API requests
-        google_session = (
-            request.headers.get("x-remote-google-session")
-            or request.cookies.get("led_remote_google_session")
-            or ""
-        ).strip()
-        authed_email = tunnel_service.verify_google_session(google_session)
-        if not authed_email:
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Google Sign-In required to access LED Sign", "code": "google_auth_required"}
-            )
-
-        response = await call_next(request)
-        response.set_cookie(
-            key="led_remote_token",
-            value=expected_token,
-            max_age=7 * 24 * 3600,
-            httponly=False,
-            samesite="lax",
-            path="/"
-        )
-        return response
-
+    The UI normally reaches the backend through the Vite proxy, which enforces the
+    same allowlist and forwards the real client IP in REMOTE_PEER_HEADER. Direct
+    connections (if LED_SIGN_HOST exposes port 8000) are checked here as well.
+    """
+    peer = remote_access.normalize_ip(request.client.host if request.client else "")
+    if not remote_access.is_loopback(peer) and not remote_access.is_allowed(peer):
+        return JSONResponse(status_code=403, content={"detail": "This device is not allowed to access LED Sign."})
+    forwarded_peer = remote_access.normalize_ip(request.headers.get(remote_access.REMOTE_PEER_HEADER))
+    if forwarded_peer and not remote_access.is_allowed(forwarded_peer):
+        return JSONResponse(status_code=403, content={"detail": "This device is not allowed to access LED Sign."})
+    request.state.remote_peer = forwarded_peer or (None if remote_access.is_loopback(peer) else peer)
     return await call_next(request)
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -1113,57 +1069,67 @@ def process_video(req: ProcessVideoRequest):
                 pass
 
 
-@app.get("/api/tunnel/url")
-@app.get("/api/tunnel/status")
-@app.get("/tunnel-url")
-@app.get("/tunnel-status")
-async def get_tunnel_url():
+class RemoteAccessConfigRequest(BaseModel):
+    allowed_ips: List[str]
+
+
+@app.get("/api/remote-access")
+async def get_remote_access(request: Request):
+    remote_peer = getattr(request.state, "remote_peer", None)
+    # Own executor: the shared default pool is often busy with Bluetooth work.
+    addresses = await asyncio.get_running_loop().run_in_executor(
+        remote_access.EXECUTOR, remote_access.list_local_addresses
+    )
+    return {
+        "allowed_ips": remote_access.get_allowed_entries(),
+        "recent_denied": [] if remote_peer else remote_access.get_recent_denied(),
+        "local_addresses": addresses,
+        "ui_port": 5173,
+        "is_remote": bool(remote_peer),
+        "client_ip": remote_peer,
+        "webhook": None if remote_peer else link_notifier.get_public_config(),
+    }
+
+
+@app.post("/api/remote-access")
+async def set_remote_access(req: RemoteAccessConfigRequest, request: Request):
+    if getattr(request.state, "remote_peer", None):
+        raise HTTPException(status_code=403, detail="Remote access can only be changed on the LED Sign host.")
     try:
-        return tunnel_service.get_status()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        allowed = remote_access.set_allowed_entries(req.allowed_ips)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid IP address or range: {e}")
+    return {"status": "ok", "allowed_ips": allowed}
 
 
-class SendWebhookRequest(BaseModel):
-    webhook_url: Optional[str] = None
-    message: Optional[str] = None
+def _require_host(request: Request):
+    if getattr(request.state, "remote_peer", None):
+        raise HTTPException(status_code=403, detail="This can only be changed on the LED Sign host.")
 
 
-class WebhookConfigRequest(BaseModel):
+class RemoteLinkWebhookRequest(BaseModel):
     webhook_url: Optional[str] = None
     auto_send: Optional[bool] = None
+    clear_webhook: bool = False
 
 
-@app.post("/api/tunnel/regenerate")
-async def regenerate_tunnel():
+@app.post("/api/remote-access/webhook")
+async def set_remote_link_webhook(req: RemoteLinkWebhookRequest, request: Request):
+    _require_host(request)
     try:
-        return tunnel_service.regenerate_link()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        link_notifier.set_config(req.webhook_url, req.auto_send, clear_webhook=req.clear_webhook)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", **link_notifier.get_public_config()}
 
 
-@app.post("/api/tunnel/send-webhook")
-async def send_tunnel_webhook(req: SendWebhookRequest):
-    try:
-        res = tunnel_service.send_google_chat_webhook(req.webhook_url, req.message)
-        if not res.get("success"):
-            raise HTTPException(status_code=400, detail=res.get("error", "Failed to send to Google Chat"))
-        return {"status": "ok", **res}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/tunnel/webhook-config")
-async def get_tunnel_webhook_config():
-    return tunnel_service.get_public_webhook_config()
-
-
-@app.post("/api/tunnel/webhook-config")
-async def set_tunnel_webhook_config(req: WebhookConfigRequest):
-    tunnel_service.set_webhook_config(req.webhook_url, req.auto_send)
-    return {"status": "ok", **tunnel_service.get_public_webhook_config()}
+@app.post("/api/remote-access/send-link")
+async def send_remote_link(request: Request):
+    _require_host(request)
+    res = await asyncio.get_running_loop().run_in_executor(remote_access.EXECUTOR, link_notifier.send_link)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Failed to send to Google Chat")
+    return {"status": "ok", **res, **link_notifier.get_public_config()}
 
 
 LOCAL_PRESETS_FILE = os.path.join(STATIC_DIR, "local_presets.json")
@@ -1172,35 +1138,43 @@ local_presets_ts: float = round(os.path.getmtime(LOCAL_PRESETS_FILE), 3) if os.p
 
 @app.get("/api/local-presets")
 @app.get("/local-presets")
-async def get_local_presets(response: Response):
-    response.headers["X-Local-Presets-Ts"] = str(local_presets_ts)
+async def get_local_presets():
+    headers = {"X-Local-Presets-Ts": str(local_presets_ts), "Cache-Control": "no-store"}
     if os.path.exists(LOCAL_PRESETS_FILE):
-        try:
-            with open(LOCAL_PRESETS_FILE, "r", encoding="utf-8") as f:
-                return _json.load(f)
-        except Exception as e:
-            print(f"[presets] Error reading local_presets.json: {e}")
-    return []
+        # Stream the saved JSON as-is. Parsing it and letting FastAPI re-encode it
+        # took many seconds for large media presets and froze the whole server.
+        return FileResponse(LOCAL_PRESETS_FILE, media_type="application/json", headers=headers)
+    return JSONResponse([], headers=headers)
+
+
+def _write_local_presets(raw: bytes) -> int:
+    """Validate and save the presets list; runs in a worker thread."""
+    global local_presets_ts
+    body = _json.loads(raw)
+    if not isinstance(body, list):
+        raise ValueError("Expected list of presets")
+    with _local_presets_lock:
+        temp_path = f"{LOCAL_PRESETS_FILE}.{threading.get_ident()}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            # Compact: indenting puts every pixel value on its own line and made this file ~10x larger.
+            _json.dump(body, f, separators=(",", ":"))
+        os.replace(temp_path, LOCAL_PRESETS_FILE)
+        local_presets_ts = round(time.time(), 3)
+    return len(body)
 
 
 @app.post("/api/local-presets")
 @app.post("/local-presets")
 async def save_local_presets(request: Request):
-    global local_presets_ts
+    raw = await request.body()
     try:
-        body = await request.json()
-        if isinstance(body, list):
-            with _local_presets_lock:
-                temp_path = f"{LOCAL_PRESETS_FILE}.{threading.get_ident()}.tmp"
-                with open(temp_path, "w", encoding="utf-8") as f:
-                    _json.dump(body, f, indent=2)
-                os.replace(temp_path, LOCAL_PRESETS_FILE)
-                local_presets_ts = round(time.time(), 3)
-            return {"status": "ok", "count": len(body), "local_presets_ts": local_presets_ts}
-        raise HTTPException(status_code=400, detail="Expected list of presets")
+        count = await asyncio.to_thread(_write_local_presets, raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"[presets] Error saving local_presets.json: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "ok", "count": count, "local_presets_ts": local_presets_ts}
 
 
 @app.post("/api/ui-state")
@@ -1270,119 +1244,6 @@ async def claim_notification(request: Request):
         return {"claimed": True}
     except Exception:
         return {"claimed": True}
-
-
-class VerifyTokenRequest(BaseModel):
-    token: str
-    google_session: Optional[str] = None
-
-
-@app.post("/api/remote/verify-token")
-async def verify_remote_token(req: VerifyTokenRequest, request: Request, response: Response):
-    if tunnel_service.is_link_expired():
-        if not getattr(tunnel_service, "_is_regenerating", False):
-            asyncio.create_task(asyncio.to_thread(tunnel_service.regenerate_link))
-        return JSONResponse(status_code=401, content={"valid": False, "detail": "Remote link has expired after 7 days"})
-
-    expected = tunnel_service.get_token()
-    provided = (req.token or "").strip()
-    if provided and secrets.compare_digest(provided, expected):
-        response.set_cookie(
-            key="led_remote_token",
-            value=expected,
-            max_age=7 * 24 * 3600,
-            httponly=False,
-            samesite="lax",
-            path="/"
-        )
-        gsess = (
-            req.google_session
-            or request.headers.get("x-remote-google-session")
-            or request.cookies.get("led_remote_google_session")
-            or ""
-        ).strip()
-        authed_email = tunnel_service.verify_google_session(gsess)
-        return {
-            "valid": True,
-            "google_authenticated": bool(authed_email),
-            "email": authed_email,
-        }
-    return JSONResponse(status_code=401, content={"valid": False, "detail": "Invalid access token"})
-
-
-@app.get("/api/remote/google-auth-url")
-async def get_remote_google_auth_url():
-    try:
-        challenge_id = tunnel_service.create_google_challenge()
-        url = await asyncio.to_thread(calendar_service.get_remote_auth_url, challenge_id)
-        return {"url": url, "challenge_id": challenge_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/remote/google-auth-status")
-async def get_remote_google_auth_status(challenge: str, response: Response):
-    info = tunnel_service.get_google_challenge(challenge)
-    if info.get("status") == "authenticated" and info.get("session_token"):
-        response.set_cookie(
-            key="led_remote_google_session",
-            value=info["session_token"],
-            max_age=7 * 24 * 3600,
-            httponly=False,
-            samesite="lax",
-            path="/"
-        )
-    return info
-
-
-class VerifyChatCodeRequest(BaseModel):
-    challenge_id: str
-    code: str
-
-
-@app.post("/api/remote/send-chat-code")
-async def send_remote_chat_code():
-    owner_email = await asyncio.to_thread(calendar_service.get_primary_user_email)
-    res = await asyncio.to_thread(tunnel_service.create_chat_verification_code, owner_email)
-    if not res.get("success"):
-        raise HTTPException(status_code=400, detail=res.get("error") or "Failed to send verification code")
-    return res
-
-
-@app.post("/api/remote/verify-chat-code")
-async def verify_remote_chat_code(req: VerifyChatCodeRequest, response: Response):
-    res = tunnel_service.verify_chat_verification_code(req.challenge_id, req.code)
-    if not res.get("success"):
-        return JSONResponse(status_code=401, content={"valid": False, "detail": res.get("error") or "Invalid code"})
-    session_token = res.get("session_token")
-    if session_token:
-        response.set_cookie(
-            key="led_remote_google_session",
-            value=session_token,
-            max_age=7 * 24 * 3600,
-            httponly=False,
-            samesite="lax",
-            path="/"
-        )
-    return {
-        "valid": True,
-        "session_token": session_token,
-        "email": res.get("email"),
-    }
-
-
-@app.post("/api/remote/logout")
-async def remote_logout(request: Request, response: Response):
-    """Sign out only the remote browser session without disconnecting the host's Google account."""
-    gsess = (
-        request.headers.get("x-remote-google-session")
-        or request.cookies.get("led_remote_google_session")
-        or ""
-    ).strip()
-    if gsess:
-        tunnel_service.revoke_google_session(gsess)
-    response.delete_cookie("led_remote_google_session", path="/")
-    return {"status": "ok"}
 
 
 @app.get("/api/gemini/status")
@@ -2126,10 +1987,6 @@ async def disconnect_ble_client():
 @app.on_event("shutdown")
 async def shutdown_event():
     print("[shutdown] Server shutting down, disconnecting Bluetooth sign...", flush=True)
-    try:
-        tunnel_service.stop()
-    except Exception as e:
-        print(f"[tunnel] Shutdown error: {e}", flush=True)
     await disconnect_ble_client()
 
 
@@ -2234,14 +2091,40 @@ async def set_sign_password(req: SignPasswordRequest):
         print(f"[sign-password] Local recovery-contact record failed: {exc}")
     return {"enabled": True, "recovery_configured": True}
 
-@app.get("/hardware-slots")
-async def get_hardware_slots(mac: str = ""):
-    global connected_client, connection_ready, hardware_slots_state
-            
-    current_mac = (mac or (connected_client.address if connected_client else "") or "").replace(':', '').lower()
+# Parsed slot-preview caches keyed by path -> (mtime, data). These files can be
+# several MB each (GIF/video frames), so re-reading them on every poll was costly.
+_slot_preview_cache: Dict[str, tuple] = {}
+
+
+def _load_slot_preview(json_path: str) -> Optional[dict]:
+    try:
+        mtime = os.path.getmtime(json_path)
+    except OSError:
+        return None
+    cached = _slot_preview_cache.get(json_path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        with open(json_path, "r") as fj:
+            data = _json.load(fj)
+    except Exception:
+        return None
+    # Older video uploads cached compact stitched RGB without
+    # preview pixels. Recover those rows for the card player.
+    if isinstance(data, dict) and data.get("pixelsRgbB64") and not data.get("pixels"):
+        import base64
+        rgb = base64.b64decode(data["pixelsRgbB64"])
+        data["pixels"] = ["#" + rgb[i:i + 3].hex() for i in range(0, len(rgb), 3)]
+        data.pop("pixelsRgbB64", None)
+    _slot_preview_cache[json_path] = (mtime, data)
+    return data
+
+
+def _build_hardware_slots_json(current_mac: str, slots_state: Dict[int, dict]) -> bytes:
+    """Build the /hardware-slots body in a worker thread (file reads + JSON encoding)."""
     slots_res = []
     for slot_id in range(MAX_HW_SLOTS):
-        slot_data = hardware_slots_state.get(slot_id, {"slot_id": slot_id, "occupied": False})
+        slot_data = slots_state.get(slot_id, {"slot_id": slot_id, "occupied": False})
         slot_info = dict(slot_data)
         slot_info["slot_id"] = slot_id
         # What the sign's own inventory reports, independent of local caches;
@@ -2256,21 +2139,11 @@ async def get_hardware_slots(mac: str = ""):
             if os.path.exists(jf): json_path = jf
             if os.path.exists(gf): gif_path = gf
 
-        if json_path and os.path.exists(json_path):
-            try:
-                with open(json_path, "r") as fj:
-                    slot_info["preset_data"] = _json.load(fj)
-                    # Older video uploads cached compact stitched RGB without
-                    # preview pixels. Recover those rows for the card player.
-                    cached = slot_info["preset_data"]
-                    if cached.get("pixelsRgbB64") and not cached.get("pixels"):
-                        import base64
-                        rgb = base64.b64decode(cached["pixelsRgbB64"])
-                        cached["pixels"] = ["#" + rgb[i:i + 3].hex() for i in range(0, len(rgb), 3)]
-                        cached.pop("pixelsRgbB64", None)
-                    slot_info["occupied"] = True
-            except Exception:
-                pass
+        if json_path:
+            preset_data = _load_slot_preview(json_path)
+            if preset_data is not None:
+                slot_info["preset_data"] = preset_data
+                slot_info["occupied"] = True
         if gif_path and os.path.exists(gif_path):
             rel_name = os.path.basename(gif_path)
             slot_info["preview_url"] = f"/static/{rel_name}"
@@ -2283,7 +2156,17 @@ async def get_hardware_slots(mac: str = ""):
             slot_info["preview_url"] = None
 
         slots_res.append(slot_info)
-    return {"slots": slots_res}
+    return _json.dumps({"slots": slots_res}, separators=(",", ":")).encode("utf-8")
+
+
+@app.get("/hardware-slots")
+async def get_hardware_slots(mac: str = ""):
+    current_mac = (mac or (connected_client.address if connected_client else "") or "").replace(':', '').lower()
+    # Snapshot shared state on the event loop, then do the heavy work off it.
+    # Returning a Response skips FastAPI's slow jsonable_encoder for these large previews.
+    slots_state = {k: dict(v) for k, v in hardware_slots_state.items()}
+    body = await asyncio.to_thread(_build_hardware_slots_json, current_mac, slots_state)
+    return Response(content=body, media_type="application/json")
 @app.post("/clear")
 async def clear():
     global connected_client, connection_ready, active_scroller_task, current_display_mode, current_width
@@ -2586,12 +2469,7 @@ async def auth_url():
 
 @app.get("/auth/callback")
 async def auth_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
-    is_remote_login = bool(state and state.startswith("remote_login:"))
-    challenge_id = state.split("remote_login:", 1)[1] if is_remote_login else None
-
     if error:
-        if challenge_id:
-            tunnel_service.fail_google_challenge(challenge_id, f"Google authentication cancelled or failed: {error}")
         return HTMLResponse(
             status_code=400,
             content=f"""<!DOCTYPE html>
@@ -2607,89 +2485,6 @@ async def auth_callback(code: Optional[str] = None, state: Optional[str] = None,
         )
     if not code:
         raise HTTPException(status_code=400, detail="Missing authorization code from Google.")
-
-    if is_remote_login and challenge_id:
-        try:
-            signed_in_email = await asyncio.to_thread(calendar_service.verify_remote_login, code, state)
-            session_token = tunnel_service.complete_google_challenge(challenge_id, signed_in_email)
-            payload_json = _json.dumps({
-                "type": "led_remote_google_auth",
-                "status": "authenticated",
-                "session_token": session_token,
-                "email": signed_in_email,
-            })
-            return HTMLResponse(content=f"""<!DOCTYPE html>
-<html>
-<head>
-  <title>Signed In to LED Sign</title>
-  <style>
-    body {{
-      background: #050505;
-      color: #f8fafc;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-      margin: 0;
-    }}
-    .card {{
-      background: rgba(20, 20, 25, 0.9);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 24px;
-      padding: 40px;
-      text-align: center;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-    }}
-    h2 {{ margin: 0 0 12px 0; font-size: 22px; color: #34d399; }}
-    p {{ margin: 0; color: #94a3b8; font-size: 14px; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>Signed in as {html.escape(signed_in_email)}!</h2>
-    <p>Remote access unlocked. You can close this window now.</p>
-  </div>
-  <script>
-    try {{
-      if (window.opener) {{
-        window.opener.postMessage({payload_json}, "*");
-      }}
-    }} catch (e) {{}}
-    setTimeout(() => {{
-      try {{ window.close(); }} catch(e) {{}}
-    }}, 1200);
-  </script>
-</body>
-</html>""")
-        except Exception as e:
-            err_msg = str(e)
-            tunnel_service.fail_google_challenge(challenge_id, err_msg)
-            err_json = _json.dumps({
-                "type": "led_remote_google_auth",
-                "status": "error",
-                "error": err_msg,
-            })
-            return HTMLResponse(
-                status_code=403,
-                content=f"""<!DOCTYPE html>
-<html>
-<head><title>Access Denied</title></head>
-<body style="background:#050505;color:#f8fafc;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-  <div style="background:rgba(20,20,25,0.9);border:1px solid rgba(255,255,255,0.1);border-radius:24px;padding:40px;text-align:center;max-width:460px;">
-    <h2 style="margin:0 0 12px;color:#f87171;">Access Denied</h2>
-    <p style="margin:0;color:#94a3b8;line-height:1.5;">{html.escape(err_msg)}</p>
-  </div>
-  <script>
-    try {{
-      if (window.opener) {{
-        window.opener.postMessage({err_json}, "*");
-      }}
-    }} catch (e) {{}}
-  </script>
-</body>
-</html>"""
-            )
 
     try:
         calendar_service.fetch_token(code=code, state=state)
@@ -2989,6 +2784,15 @@ def save_gif_preview(frames_pixels: List[List[Any]], bg_color_hex: str, delay_se
             pass
         raise
 
+async def send_still_frame(packets: List[bytes]):
+    """Draw a still frame (e.g. static text) once. Unlike animations it does not
+    need re-sending in a loop; the sign keeps showing it after the session ends."""
+    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_start_command(), response=False)
+    for packet in packets:
+        await write_large_gatt_char(connected_client, protocol.WRITE_UUID, bytearray(packet), response=False, delay=0.0)
+    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.session_end_command(), response=True)
+
+
 async def animation_worker(frames_pixels: List[List[Any]], bg_color_hex: str, speed: int, frame_duration_ms: Optional[float] = None):
     """Background task to loop animation frames on physical sign over BLE."""
     global connected_client, connection_ready
@@ -3039,7 +2843,12 @@ async def animation_worker(frames_pixels: List[List[Any]], bg_color_hex: str, sp
             
         frame_idx = 0
         num_frames = len(frame_packets)
-        
+
+        if num_frames == 1:
+            if connected_client and connected_client.is_connected and connection_ready:
+                await send_still_frame(frame_packets[0])
+            return
+
         while True:
             if not connected_client or not connected_client.is_connected or not connection_ready:
                 print("[animation_worker] Connection lost. Stopping animation.")

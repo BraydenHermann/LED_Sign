@@ -9,6 +9,9 @@ import {
   getLoyAuthStatus, loyLogin, loyLogout, uploadLoyMaterial,
   getLoyMyMaterials 
 } from './serverApi';
+// Small copy of the logo built into the bundle, so the icon never waits on a
+// network request (the browser can queue /loyspace.png behind slow API calls).
+import loySpaceIconUrl from './assets/loyspace-icon.png?inline';
 
 // Official LOY SPACE Brand Colors & Gradient (from user-provided LOY SPACE logo)
 export const LOY_GRADIENT = 'linear-gradient(135deg, #D80204 0%, #FB8D00 20%, #FADC02 40%, #1CAB1E 60%, #017FD6 80%, #843FB3 100%)';
@@ -17,7 +20,7 @@ export const LOY_SHADOW = '0 0 0 1px rgba(255, 255, 255, 0.2), 0 2px 10px rgba(2
 // Official LOY SPACE Logo Image (using authentic photo)
 export const LoySpaceLogo = ({ size = 20, className = "", style = {} }) => (
   <img 
-    src="/loyspace.png" 
+    src={loySpaceIconUrl} 
     alt="LOY SPACE" 
     width={size} 
     height={size} 
