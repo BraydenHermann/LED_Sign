@@ -2754,8 +2754,18 @@ export default function App() {
     const resolved = typeof val === 'function' ? val(isManualOverrideRef.current) : val;
     isManualOverrideRef.current = resolved;
     setIsManualOverrideState(resolved);
-    if (!fromServer && statusRef.current?.connected) {
-      syncUiStateToServer(lastPushedIdRef.current, resolved);
+    if (!fromServer) {
+      const signMac = (statusRef.current?.address || DEFAULT_MAC).toUpperCase();
+      const overrideKey = 'loy_manual_override_event_id_' + signMac;
+      if (resolved) {
+        const curEv = selectCalendarEvent(eventsRef.current || [], new Date());
+        localStorage.setItem(overrideKey, curEv ? `${curEv.id}-${curEv.start_iso}` : 'none');
+      } else {
+        localStorage.removeItem(overrideKey);
+      }
+      if (statusRef.current?.connected) {
+        syncUiStateToServer(lastPushedIdRef.current, resolved);
+      }
     }
   };
 
@@ -2805,6 +2815,8 @@ export default function App() {
     catch { return {}; }
   });
   const [events, setEvents] = useState(null);
+  const eventsRef = useRef(null);
+  eventsRef.current = events;
   const [eventsDate, setEventsDate] = useState(null);
   const [invites, setInvites] = useState([]);
   const [cleanName, setCleanName] = useState(() => localStorage.getItem('loy_clean_name') !== 'false');
@@ -3591,11 +3603,22 @@ export default function App() {
     // Check for calendar event transitions to clear manual override (5 min early)
     try {
       if (events) {
+        const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
         const nextEvent = selectCalendarEvent(events, now);
         const nextEventId = nextEvent ? `${nextEvent.id}-${nextEvent.start_iso}` : null;
         if (!hasInitializedEventIdRef.current) {
           hasInitializedEventIdRef.current = true;
           lastActiveEventIdRef.current = nextEventId;
+          if (isManualOverride) {
+            const overrideKey = 'loy_manual_override_event_id_' + targetMac;
+            const storedOverrideEvId = localStorage.getItem(overrideKey);
+            const currentWindowKey = nextEventId || 'none';
+            if ((storedOverrideEvId !== null && storedOverrideEvId !== currentWindowKey) ||
+                (storedOverrideEvId === null && nextEventId && !String(lastPushedId || '').startsWith('event-'))) {
+              console.log(`[auto-push] Clearing stale manual override from ${storedOverrideEvId || 'previous window'} on active event ${currentWindowKey}.`);
+              setIsManualOverride(false);
+            }
+          }
         } else if (nextEventId !== lastActiveEventIdRef.current) {
           console.log(`[auto-push] Event window transition: ${lastActiveEventIdRef.current || 'none'} -> ${nextEventId || 'none'}. Clearing manual override.`);
           setIsManualOverride(false);
