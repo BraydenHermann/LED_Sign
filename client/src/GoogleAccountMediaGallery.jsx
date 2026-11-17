@@ -147,13 +147,22 @@ export default function GoogleAccountMediaGallery({
     try {
       const info = await getGoogleAccountStatus();
       setAccount(info);
-      if (!info?.signed_in) setIssue(null);
+      if (!info?.signed_in) {
+        setIssue(null);
+      } else if (!isDrive && info?.photos_permitted === false) {
+        setIssue({
+          reason: 'needs_permission',
+          message: 'Sign in with Google again to let LED Sign see your Google Photos.'
+        });
+      } else if (!isDrive && info?.photos_permitted === true) {
+        setIssue(prev => (prev?.reason === 'needs_permission' ? null : prev));
+      }
       return info;
     } catch (err) {
       console.warn('[GoogleAccountMediaGallery] Could not check Google sign-in:', err);
       return null;
     }
-  }, []);
+  }, [isDrive]);
 
   useEffect(() => {
     refreshAccount();

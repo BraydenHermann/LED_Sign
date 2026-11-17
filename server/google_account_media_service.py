@@ -158,7 +158,13 @@ class GoogleAccountMedia:
             token_updated = int(os.path.getmtime(token_path) * 1000) if creds and token_path else 0
         except OSError:
             token_updated = 0
-        return {"signed_in": bool(creds), "token_updated": token_updated}
+        scopes = getattr(creds, "scopes", None) if creds else None
+        photos_permitted = bool(PHOTOS_PICKER_SCOPE in scopes) if scopes is not None else bool(creds)
+        return {
+            "signed_in": bool(creds),
+            "token_updated": token_updated,
+            "photos_permitted": photos_permitted,
+        }
 
     # -- Google Drive ---------------------------------------------------------
 

@@ -425,6 +425,7 @@ brightness: int = 15
 brightness_pct: Optional[float] = None
 _last_ble_brightness: Optional[int] = None
 active_last_pushed_id: Optional[str] = None
+active_last_pushed_date: Optional[str] = None
 active_manual_override: bool = False
 saved_slot_orders: Dict[str, List[int]] = {}
 saved_device_names: Dict[str, str] = {}
@@ -444,7 +445,7 @@ _local_presets_lock = threading.Lock()
 
 
 def _load_ui_state():
-    global brightness, brightness_pct, active_last_pushed_id, active_manual_override, saved_slot_orders, saved_device_names, saved_clean_name
+    global brightness, brightness_pct, active_last_pushed_id, active_last_pushed_date, active_manual_override, saved_slot_orders, saved_device_names, saved_clean_name
     import json as _json
     if os.path.exists(UI_STATE_FILE):
         try:
@@ -457,6 +458,8 @@ def _load_ui_state():
                     brightness_pct = round(float(data["brightness_pct"]), 1)
                 if "last_pushed_id" in data:
                     active_last_pushed_id = data["last_pushed_id"]
+                if "last_pushed_date" in data:
+                    active_last_pushed_date = data["last_pushed_date"]
                 if "is_manual_override" in data and data["is_manual_override"] is not None:
                     active_manual_override = bool(data["is_manual_override"])
                 if isinstance(data.get("saved_slot_orders"), dict):
@@ -487,6 +490,7 @@ def _save_ui_state():
                     "brightness": brightness,
                     "brightness_pct": brightness_pct,
                     "last_pushed_id": active_last_pushed_id,
+                    "last_pushed_date": active_last_pushed_date,
                     "is_manual_override": active_manual_override,
                     "saved_slot_orders": saved_slot_orders,
                     "device_names": saved_device_names,
@@ -1203,12 +1207,14 @@ async def save_local_presets(request: Request):
 @app.post("/api/ui-state")
 @app.post("/ui-state")
 async def update_ui_state(request: Request):
-    global active_last_pushed_id, active_manual_override, brightness_pct, saved_slot_orders, saved_device_names, saved_clean_name
+    global active_last_pushed_id, active_last_pushed_date, active_manual_override, brightness_pct, saved_slot_orders, saved_device_names, saved_clean_name
     try:
         body = await request.json()
         if isinstance(body, dict):
             if "last_pushed_id" in body:
                 active_last_pushed_id = body["last_pushed_id"]
+            if "last_pushed_date" in body:
+                active_last_pushed_date = body["last_pushed_date"]
             if "is_manual_override" in body and body["is_manual_override"] is not None:
                 active_manual_override = bool(body["is_manual_override"])
             if "brightness_pct" in body and body["brightness_pct"] is not None:
@@ -1227,6 +1233,7 @@ async def update_ui_state(request: Request):
         return {
             "status": "ok",
             "last_pushed_id": active_last_pushed_id,
+            "last_pushed_date": active_last_pushed_date,
             "is_manual_override": active_manual_override,
             "brightness": brightness,
             "brightness_pct": brightness_pct,
@@ -1700,6 +1707,7 @@ async def get_status():
         "brightness": brightness,
         "brightness_pct": brightness_pct if brightness_pct is not None else max(7, min(100, round(brightness * 100 / 15))),
         "last_pushed_id": active_last_pushed_id,
+        "last_pushed_date": active_last_pushed_date,
         "is_manual_override": active_manual_override,
         "saved_slot_orders": saved_slot_orders,
         "device_names": saved_device_names,

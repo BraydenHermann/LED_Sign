@@ -154,6 +154,18 @@ class GoogleAccountMediaTests(unittest.TestCase):
             media.photos_media("unknown", thumb=True)
         self.assertEqual(ctx.exception.reason, "expired")
 
+    def test_status_reports_photos_permission(self):
+        cal = FakeCalendar(creds=True)
+        cal.creds.scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+        media = GoogleAccountMedia(cal)
+        self.assertFalse(media.status()["photos_permitted"])
+
+        cal.creds.scopes = [
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
+        ]
+        self.assertTrue(media.status()["photos_permitted"])
+
 
 if __name__ == "__main__":
     unittest.main()

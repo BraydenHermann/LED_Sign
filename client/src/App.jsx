@@ -2465,7 +2465,7 @@ export default function App() {
             }).catch(() => {});
           }
         }
-        if (res.data.is_manual_override !== undefined && Boolean(res.data.is_manual_override) !== isManualOverrideRef.current) {
+        if (res.data.is_manual_override !== undefined && Boolean(res.data.is_manual_override) !== isManualOverrideRef.current && !recentlyPushedHere) {
           setIsManualOverride(Boolean(res.data.is_manual_override), true);
         }
       }
@@ -2733,20 +2733,43 @@ export default function App() {
   const calendarReturnPresetRef = useRef(null);
   const playbackSignRef = useRef(null);
 
-  const syncUiStateToServer = (nextLastPushedId, nextManualOverride) => {
-    axios.post(`${API_BASE}/api/ui-state`, {
+  const getLocalDayKey = (d = new Date()) => {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const getSavedLastPushedDate = (mac) => {
+    if (!mac) return null;
+    const upper = mac.toUpperCase();
+    return localStorage.getItem(`loy_last_pushed_date_${upper}`) || localStorage.getItem(`loy_last_pushed_date_${mac}`) || null;
+  };
+
+  const syncUiStateToServer = (nextLastPushedId, nextManualOverride, nextLastPushedDate = undefined) => {
+    const payload = {
       last_pushed_id: nextLastPushedId,
       is_manual_override: nextManualOverride
-    }).catch(() => {});
+    };
+    if (nextLastPushedDate !== undefined) {
+      payload.last_pushed_date = nextLastPushedDate;
+    }
+    axios.post(`${API_BASE}/api/ui-state`, payload).catch(() => {});
   };
 
   const setLastPushedId = (val, fromServer = false) => {
     const resolved = typeof val === 'function' ? val(lastPushedIdRef.current) : val;
     lastPushedIdRef.current = resolved;
     setLastPushedIdState(resolved);
-    if (!fromServer) lastLocalPushedAtRef.current = Date.now();
-    if (!fromServer && statusRef.current?.connected) {
-      syncUiStateToServer(resolved, isManualOverrideRef.current);
+    if (!fromServer) {
+      lastLocalPushedAtRef.current = Date.now();
+      const dayKey = resolved ? getLocalDayKey(new Date()) : undefined;
+      if (dayKey && statusRef.current?.address) {
+        localStorage.setItem(`loy_last_pushed_date_${statusRef.current.address.toUpperCase()}`, dayKey);
+      }
+      if (statusRef.current?.connected) {
+        syncUiStateToServer(resolved, isManualOverrideRef.current, dayKey);
+      }
     }
   };
 
@@ -2755,16 +2778,20 @@ export default function App() {
     isManualOverrideRef.current = resolved;
     setIsManualOverrideState(resolved);
     if (!fromServer) {
+      lastLocalPushedAtRef.current = Date.now();
       const signMac = (statusRef.current?.address || DEFAULT_MAC).toUpperCase();
       const overrideKey = 'loy_manual_override_event_id_' + signMac;
+      let dayKey = undefined;
       if (resolved) {
         const curEv = selectCalendarEvent(eventsRef.current || [], new Date());
         localStorage.setItem(overrideKey, curEv ? `${curEv.id}-${curEv.start_iso}` : 'none');
+        dayKey = getLocalDayKey(new Date());
+        localStorage.setItem(`loy_last_pushed_date_${signMac}`, dayKey);
       } else {
         localStorage.removeItem(overrideKey);
       }
       if (statusRef.current?.connected) {
-        syncUiStateToServer(lastPushedIdRef.current, resolved);
+        syncUiStateToServer(lastPushedIdRef.current, resolved, dayKey);
       }
     }
   };
@@ -3309,19 +3336,25 @@ export default function App() {
 
   // Day rollover detection: whenever `now` ticks (every 10s), detect if the local calendar day changed
   const lastCalendarDayRef = useRef(new Date().toDateString());
+  const pendingNewDayDefaultPushRef = useRef(false);
+  const handleCalendarDayRollover = (todayStr) => {
+    console.log(`[calendar] Day transition detected: ${lastCalendarDayRef.current} -> ${todayStr}. Updating to new day immediately.`);
+    lastCalendarDayRef.current = todayStr;
+    setIsManualOverride(false);
+    calendarReturnPresetRef.current = null;
+    lastActiveEventIdRef.current = null;
+    pendingNewDayDefaultPushRef.current = true;
+    setEventsDate(null);
+    setCalLoading(true);
+    // Immediately drop yesterday's events so they vanish from the display right away
+    setEvents(prev => dropPastDayEvents(prev));
+    setInvites(prev => dropPastDayEvents(prev));
+  };
+
   useEffect(() => {
     const todayStr = now.toDateString();
     if (lastCalendarDayRef.current !== todayStr) {
-      console.log(`[calendar] Day transition detected: ${lastCalendarDayRef.current} -> ${todayStr}. Updating to new day immediately.`);
-      lastCalendarDayRef.current = todayStr;
-      setIsManualOverride(false);
-      calendarReturnPresetRef.current = null;
-      lastActiveEventIdRef.current = null;
-      setEventsDate(null);
-      setCalLoading(true);
-      // Immediately drop yesterday's events so they vanish from the display right away
-      setEvents(prev => dropPastDayEvents(prev));
-      setInvites(prev => dropPastDayEvents(prev));
+      handleCalendarDayRollover(todayStr);
       // Fetch fresh events for today immediately
       fetchEventsRef.current?.(true);
     }
@@ -3345,14 +3378,7 @@ export default function App() {
       setNow(nowDate);
       const todayStr = nowDate.toDateString();
       if (lastCalendarDayRef.current !== todayStr) {
-        lastCalendarDayRef.current = todayStr;
-        setIsManualOverride(false);
-        calendarReturnPresetRef.current = null;
-        lastActiveEventIdRef.current = null;
-        setEventsDate(null);
-        setCalLoading(true);
-        setEvents(prev => dropPastDayEvents(prev));
-        setInvites(prev => dropPastDayEvents(prev));
+        handleCalendarDayRollover(todayStr);
       }
       console.log("[app] Window focused/visible/online, refreshing calendar events...");
       fetchEventsRef.current?.(true);
@@ -3650,6 +3676,7 @@ export default function App() {
       if (targetId !== lastPushedId) {
         const targetMac = (status.address || DEFAULT_MAC).toUpperCase();
         if (targetContent.type === 'event') {
+          pendingNewDayDefaultPushRef.current = false;
           if (autoPushFailedRef.current.id === targetId && Date.now() - autoPushFailedRef.current.time < 30000) {
             return;
           }
@@ -3708,11 +3735,15 @@ export default function App() {
           console.log(`[auto-push] Auto-applying event 5m before start: "${currentEvent.summary}"`);
           handlePush(targetContent.summary, false, false, targetId).catch(() => {});
         } else {
+          const isNewDayDefaultPush = pendingNewDayDefaultPushRef.current;
           const wasShowingEvent = String(lastPushedId || '').startsWith('event-') ||
             lastPushedId === 'hw-slot-0' ||
             Boolean(calendarReturnPresetRef.current);
-          if (!wasShowingEvent) {
+          if (!wasShowingEvent && !isNewDayDefaultPush) {
             return;
+          }
+          if (isNewDayDefaultPush) {
+            pendingNewDayDefaultPushRef.current = false;
           }
           const returnPreset = calendarReturnPresetRef.current;
           calendarReturnPresetRef.current = null;
@@ -3774,6 +3805,8 @@ export default function App() {
           return;
         }
         setLastPushedId(targetId);
+      } else if (pendingNewDayDefaultPushRef.current) {
+        pendingNewDayDefaultPushRef.current = false;
       }
     } catch (err) {
       console.error("[auto-push] Error:", err);
@@ -3959,11 +3992,14 @@ export default function App() {
           await syncHardwareSlots();
         }
         const serverLastPushedId = status.last_pushed_id;
+        const todayKey = getLocalDayKey(new Date());
+        const savedLastPushedDate = status.last_pushed_date || getSavedLastPushedDate(targetMac);
+        const isNewDaySinceLastPush = !isRemoteHost() && Boolean(savedLastPushedDate && savedLastPushedDate !== todayKey);
         const hasActiveDisplay = Boolean(
           serverLastPushedId ||
           (status.display_mode && status.display_mode !== 'none' && status.display_mode !== 'static')
         );
-        if (isRemoteHost() || hasActiveDisplay) {
+        if (isRemoteHost() || (hasActiveDisplay && !isNewDaySinceLastPush)) {
           const effectiveId = serverLastPushedId ||
             priorLastPushedId ||
             (status.display_mode && status.display_mode.startsWith('preset-')
@@ -3977,6 +4013,11 @@ export default function App() {
           }
           setLastPushedId(effectiveId, Boolean(serverLastPushedId));
           return;
+        }
+        if (isNewDaySinceLastPush) {
+          console.log(`[connect] New calendar day since last push (${savedLastPushedDate} -> ${todayKey}); clearing manual override and restoring default/active preset.`);
+          setIsManualOverride(false);
+          pendingNewDayDefaultPushRef.current = false;
         }
         // 1. Calendar Slot (hardware slot 0, slot 1 in UI) - check first so active event shows immediately
         let evs = events;
@@ -4045,7 +4086,7 @@ export default function App() {
         }
 
         if (!active) {
-          if (isRemoteHost() || (status.display_mode && status.display_mode !== 'none' && status.display_mode !== 'static')) {
+          if (isRemoteHost() || (!isNewDaySinceLastPush && status.display_mode && status.display_mode !== 'none' && status.display_mode !== 'static')) {
             console.log("[connect] Sign is already running/remote session connected; preserving active display:", status.display_mode);
             setLastPushedId(status.display_mode || 'hw-slot-1');
             return;
@@ -4053,9 +4094,10 @@ export default function App() {
           // Calendar slot 0 is sign-specific. Without an active event, never
           // seed it from another sign's cached calendar preset.
           const savedLastPushedId = priorLastPushedId;
-          const isSavedNonDefault = savedLastPushedId &&
+          const defFallback = def || presets.find(p => p.mode === 'clock');
+          const isSavedNonDefault = !isNewDaySinceLastPush && savedLastPushedId &&
             savedLastPushedId !== 'hw-slot-1' &&
-            (!def?.id || savedLastPushedId !== def.id) &&
+            (!defFallback?.id || savedLastPushedId !== defFallback.id) &&
             !String(savedLastPushedId).startsWith('event-') &&
             (savedLastPushedId !== 'hw-slot-0' || priorManualOverride);
 
@@ -4063,16 +4105,16 @@ export default function App() {
             console.log(`[connect] Preserving last pushed preset without re-sending: ${savedLastPushedId}`);
             setIsManualOverride(true);
             setLastPushedId(savedLastPushedId);
-          } else if (!defaultJustSavedToSign && isDefaultAlreadyLastPushed(def, targetMac, savedLastPushedId)) {
+          } else if (!defaultJustSavedToSign && isDefaultAlreadyLastPushed(defFallback, targetMac, savedLastPushedId)) {
             console.log("[connect] Default preset was already the last preset pushed; skipping re-send.");
             setIsManualOverride(false);
-            setLastPushedId(def?.mode === 'clock' ? (def.id || 'clock-default') : 'hw-slot-1');
+            setLastPushedId(defFallback?.mode === 'clock' ? (defFallback.id || 'clock-default') : 'hw-slot-1');
           } else {
             setIsManualOverride(false);
-            if (def) {
-              const defName = def.name || (def.mode === 'clock' ? 'Clock' : 'Default');
+            if (defFallback) {
+              const defName = defFallback.name || (defFallback.mode === 'clock' ? 'Clock' : 'Default');
               console.log(`[connect] Restoring default preset "${defName}"`);
-              await handlePush(def, false, false, def.id || 'hw-slot-1');
+              await handlePush(defFallback, false, false, defFallback.id || 'hw-slot-1');
             }
           }
         }
