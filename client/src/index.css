@@ -460,10 +460,7 @@ body.preset-dragging .preset-card.empty-slot.preset-card-reserved { border-color
 
 .preview-push-overlay {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  inset: -1px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -472,7 +469,6 @@ body.preset-dragging .preset-card.empty-slot.preset-card-reserved { border-color
   -webkit-backdrop-filter: blur(2px);
   backface-visibility: hidden;
   z-index: 20;
-  border-radius: inherit;
   color: #ffffff;
 }
 

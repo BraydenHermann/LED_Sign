@@ -15,7 +15,10 @@ SCOPES = [
     'https://www.googleapis.com/auth/calendar.events',
     'https://www.googleapis.com/auth/calendar.readonly',
     # Hidden per-app Drive folder used to sync presets and settings between devices
-    'https://www.googleapis.com/auth/drive.appdata'
+    'https://www.googleapis.com/auth/drive.appdata',
+    # Create/Edit Preset > Media: pick images from the user's Google Drive and Google Photos
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/photospicker.mediaitems.readonly'
 ]
 REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8000/auth/callback')
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")

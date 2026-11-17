@@ -366,3 +366,53 @@ export const getGoogleProxyMediaUrl = (url) => {
   if (!url) return '';
   return `/api/google/proxy-media?url=${encodeURIComponent(url)}`;
 };
+
+// --- Signed-in Google account: Google Drive images & Google Photos -----------
+
+export const getGoogleAccountStatus = async () => {
+  const { data } = await axios.get('/api/google/account/status');
+  return data;
+};
+
+export const getGoogleSignInUrl = async () => {
+  const { data } = await axios.get('/auth/url');
+  return data?.url;
+};
+
+export const googleSignOut = async () => {
+  await axios.post('/auth/logout');
+};
+
+export const listGoogleDriveImages = async ({ q = '', category = 'all', pageToken, limit = 24 } = {}) => {
+  const { data } = await axios.get('/api/google/account/drive/images', {
+    params: { q, category, page_token: pageToken || undefined, limit },
+  });
+  return data;
+};
+
+export const getGoogleDriveThumbnailUrl = (id) => `/api/google/account/drive/thumbnail/${encodeURIComponent(id)}`;
+export const getGoogleDriveFileUrl = (id) => `/api/google/account/drive/file/${encodeURIComponent(id)}`;
+
+export const createGooglePhotosSession = async () => {
+  const { data } = await axios.post('/api/google/account/photos/sessions');
+  return data;
+};
+
+export const getGooglePhotosSession = async (id) => {
+  const { data } = await axios.get(`/api/google/account/photos/sessions/${encodeURIComponent(id)}`);
+  return data;
+};
+
+export const deleteGooglePhotosSession = async (id) => {
+  await axios.delete(`/api/google/account/photos/sessions/${encodeURIComponent(id)}`);
+};
+
+export const listGooglePhotosItems = async ({ sessionId, pageToken } = {}) => {
+  const { data } = await axios.get('/api/google/account/photos/items', {
+    params: { session_id: sessionId, page_token: pageToken || undefined },
+  });
+  return data;
+};
+
+export const getGooglePhotosMediaUrl = (id, thumb = false) =>
+  `/api/google/account/photos/media/${encodeURIComponent(id)}${thumb ? '?thumb=true' : ''}`;

@@ -14,6 +14,7 @@ dev server (client/vite.config.js), which enforces it for the UI on port 5173.
 import ipaddress
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -45,6 +46,24 @@ def normalize_ip(ip: Optional[str]) -> str:
 def is_loopback(ip: Optional[str]) -> bool:
     try:
         return ipaddress.ip_address(normalize_ip(ip)).is_loopback
+    except ValueError:
+        return False
+
+
+def is_trusted_host_header(host: Optional[str]) -> bool:
+    """True for Host headers naming this server by IP address or localhost."""
+    host = (host or "").strip().lower()
+    if not host:
+        return True  # HTTP/1.0 clients and test harnesses send none
+    if host.startswith("["):
+        name = host[1:host.find("]")] if "]" in host else ""
+    else:
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    if name in ("localhost",) or name.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
     except ValueError:
         return False
 
@@ -99,26 +118,52 @@ def is_allowed(ip: Optional[str]) -> bool:
     return any(addr in net for net in _allowed_networks() if net.version == addr.version)
 
 
-def get_recent_denied() -> List[Dict[str, Any]]:
-    """Recently refused devices that are still not allowed."""
+def _read_denied() -> List[Dict[str, Any]]:
     try:
         with open(DENIED_FILE, "r", encoding="utf-8") as f:
             rows = json.load(f)
     except (OSError, ValueError):
         return []
-    if not isinstance(rows, list):
-        return []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def get_recent_denied() -> List[Dict[str, Any]]:
+    """Recently refused devices: addresses that are still not allowed, and allowed
+    addresses that were refused because a different device was using them."""
+    pins = get_pinned_macs()
     result = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
+    seen = set()
+    for row in _read_denied():
         ip = normalize_ip(str(row.get("ip") or ""))
-        if ip and not is_allowed(ip):
+        if not ip or ip in seen:
+            continue
+        if row.get("reason") == "mac_mismatch":
+            mac = normalize_mac(row.get("mac"))
+            if mac and pins.get(ip) and pins[ip] != mac and is_allowed(ip):
+                seen.add(ip)
+                result.append({"ip": ip, "last_seen": row.get("last_seen"), "reason": "mac_mismatch"})
+        elif not is_allowed(ip):
+            seen.add(ip)
             result.append({"ip": ip, "last_seen": row.get("last_seen")})
     return result
 
 
-def set_allowed_entries(entries: List[str]) -> List[str]:
+def record_denied(ip: str, reason: str, mac: Optional[str] = None):
+    """Remember a refused connection so the host can see it (same file as the Vite gate)."""
+    row: Dict[str, Any] = {"ip": ip, "last_seen": time.time(), "reason": reason}
+    if mac:
+        row["mac"] = mac
+    rows = [row] + [r for r in _read_denied() if normalize_ip(str(r.get("ip") or "")) != ip][:9]
+    try:
+        with open(DENIED_FILE, "w", encoding="utf-8") as f:
+            json.dump(rows, f, indent=2)
+    except OSError as e:
+        print(f"[remote-access] Could not record denied device: {e}")
+
+
+def set_allowed_entries(entries: List[str], repin: Optional[List[str]] = None) -> List[str]:
+    """Save the allowlist. Single addresses are pinned to the network hardware
+    (MAC) currently using them; `repin` re-trusts the device now using an address."""
     cleaned: List[str] = []
     for entry in entries:
         entry = str(entry).strip()
@@ -128,11 +173,130 @@ def set_allowed_entries(entries: List[str]) -> List[str]:
         text = str(net.network_address) if net.num_addresses == 1 else str(net)
         if text not in cleaned:
             cleaned.append(text)
+    repin_set = {normalize_ip(ip) for ip in (repin or [])}
+    old_pins = get_pinned_macs()
+    pins: Dict[str, str] = {}
+    for text in cleaned:
+        if "/" in text:
+            continue
+        if text in old_pins and text not in repin_set:
+            pins[text] = old_pins[text]
+            continue
+        mac = neighbor_mac(text, max_age=0)
+        if mac:
+            pins[text] = mac
+    _write_config({"allowed_ips": cleaned, "pinned_macs": pins})
+    return cleaned
+
+
+def _write_config(data: Dict[str, Any]):
     tmp = CONFIG_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"allowed_ips": cleaned}, f, indent=2)
+        json.dump(data, f, indent=2)
     os.replace(tmp, CONFIG_FILE)
-    return cleaned
+
+
+# -- Spoofing protection --------------------------------------------------------
+#
+# A TCP connection can't come from a forged address off the local network, but
+# any device on the office network can take over an allowed address (e.g. the
+# Pritunl server's). Each allowed single address is pinned to the MAC address
+# that was using it when it was allowed; a different device using that address
+# is refused. Routed (off-link) peers have no ARP entry and rely on the IP check.
+
+_MAC_RE = re.compile(r"([0-9a-fA-F]{1,2}(?:[-:][0-9a-fA-F]{1,2}){5})")
+_IP_RE = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3})")
+_ARP_MAX_AGE = 2.0
+_arp_lock = threading.Lock()
+_arp_cache: Dict[str, Any] = {"at": float("-inf"), "table": {}}
+# Separate worker so ARP lookups never wait behind slower adapter scans.
+ARP_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="remote-access-arp")
+
+
+def normalize_mac(mac: Optional[str]) -> Optional[str]:
+    if not mac:
+        return None
+    parts = re.split(r"[-:]", str(mac).strip().lower())
+    if len(parts) != 6:
+        return None
+    try:
+        return "-".join(f"{int(p, 16):02x}" for p in parts)
+    except ValueError:
+        return None
+
+
+def parse_arp(output: str) -> Dict[str, str]:
+    """IP -> MAC from `arp -a` output (Windows and macOS/Linux formats)."""
+    table: Dict[str, str] = {}
+    for line in output.splitlines():
+        ip_match = _IP_RE.search(line)
+        mac_match = _MAC_RE.search(line)
+        if not ip_match or not mac_match:
+            continue
+        mac = normalize_mac(mac_match.group(1))
+        if not mac or mac in ("ff-ff-ff-ff-ff-ff", "00-00-00-00-00-00") or mac.startswith("01-00-5e"):
+            continue
+        table[ip_match.group(1)] = mac
+    return table
+
+
+def _read_arp_table() -> Dict[str, str]:
+    cmd = ["arp", "-a"] if sys.platform == "win32" else ["arp", "-an"]
+    out = subprocess.check_output(
+        cmd, text=True, timeout=5, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=CREATE_NO_WINDOW, errors="replace",
+    )
+    return parse_arp(out)
+
+
+def neighbor_mac(ip: str, max_age: float = _ARP_MAX_AGE) -> Optional[str]:
+    """MAC address the OS currently has for an on-link IP, or None if unknown."""
+    ip = normalize_ip(ip)
+    with _arp_lock:
+        if time.monotonic() - _arp_cache["at"] > max_age:
+            try:
+                _arp_cache["table"] = _read_arp_table()
+            except Exception as e:
+                print(f"[remote-access] Could not read the ARP table: {e}")
+                _arp_cache["table"] = {}
+            _arp_cache["at"] = time.monotonic()
+        return _arp_cache["table"].get(ip)
+
+
+def get_pinned_macs() -> Dict[str, str]:
+    pins = _read_config().get("pinned_macs") or {}
+    if not isinstance(pins, dict):
+        return {}
+    result = {}
+    for ip, mac in pins.items():
+        mac = normalize_mac(mac)
+        if mac:
+            result[normalize_ip(str(ip))] = mac
+    return result
+
+
+def check_peer(ip: Optional[str]) -> Optional[str]:
+    """None if this peer may connect, otherwise why not ('not_allowed' or 'mac_mismatch').
+    Blocking (may run `arp`); call from a worker thread."""
+    ip = normalize_ip(ip)
+    if is_loopback(ip):
+        return None
+    if not is_allowed(ip):
+        return "not_allowed"
+    config = _read_config()
+    allowed = [str(e).strip() for e in (config.get("allowed_ips") or [])]
+    pins = get_pinned_macs()
+    current = neighbor_mac(ip)
+    pinned = pins.get(ip)
+    if pinned and current and current != pinned:
+        print(f"[remote-access] Refused {ip}: it is now used by {current}, not the allowed device {pinned} (possible spoofing)")
+        record_denied(ip, "mac_mismatch", current)
+        return "mac_mismatch"
+    if not pinned and current and ip in allowed:
+        # Entries saved before pinning existed: trust the device using it now.
+        pins[ip] = current
+        _write_config({**config, "pinned_macs": pins})
+    return None
 
 
 def _windows_interfaces() -> List[Dict[str, str]]:

@@ -92,6 +92,7 @@ import gemini_service
 import openai_service
 from loy_space_service import loy_space_service, USER_SESSION_FILE
 from sync_service import DriveSync, SyncUnavailable
+from google_account_media_service import GoogleAccountMedia, GoogleMediaUnavailable
 from event_text import event_sign_text, event_slot_preset
 import remote_access
 import link_notifier
@@ -405,6 +406,7 @@ async def startup_event():
 protocol = LOYWebProtocol()
 calendar_service = CalendarService()
 drive_sync = DriveSync(calendar_service, USER_SESSION_FILE)
+google_account_media = GoogleAccountMedia(calendar_service)
 
 # Hardware State
 connected_client: Optional[BleakClient] = None
@@ -764,13 +766,30 @@ async def remote_access_middleware(request: Request, call_next):
     same allowlist and forwards the real client IP in REMOTE_PEER_HEADER. Direct
     connections (if LED_SIGN_HOST exposes port 8000) are checked here as well.
     """
+    denied = JSONResponse(status_code=403, content={"detail": "This device is not allowed to access LED Sign."})
+    # DNS rebinding: a web page in this computer's browser could point its own
+    # domain at 127.0.0.1 and drive the API as "this machine". Real requests
+    # always name the host by IP address or localhost.
+    if not remote_access.is_trusted_host_header(request.headers.get("host")):
+        return denied
     peer = remote_access.normalize_ip(request.client.host if request.client else "")
-    if not remote_access.is_loopback(peer) and not remote_access.is_allowed(peer):
-        return JSONResponse(status_code=403, content={"detail": "This device is not allowed to access LED Sign."})
-    forwarded_peer = remote_access.normalize_ip(request.headers.get(remote_access.REMOTE_PEER_HEADER))
-    if forwarded_peer and not remote_access.is_allowed(forwarded_peer):
-        return JSONResponse(status_code=403, content={"detail": "This device is not allowed to access LED Sign."})
-    request.state.remote_peer = forwarded_peer or (None if remote_access.is_loopback(peer) else peer)
+    if remote_access.is_loopback(peer):
+        # Only the local Vite proxy may say which device a request came from;
+        # it strips any client-supplied copy. A loopback value is never valid there.
+        forwarded_peer = remote_access.normalize_ip(request.headers.get(remote_access.REMOTE_PEER_HEADER))
+        remote_peer = forwarded_peer or None
+        if remote_peer and remote_access.is_loopback(remote_peer):
+            return denied
+    else:
+        # Direct connection: the header is ignored, the TCP address is what counts.
+        remote_peer = peer
+    if remote_peer:
+        reason = await asyncio.get_running_loop().run_in_executor(
+            remote_access.ARP_EXECUTOR, remote_access.check_peer, remote_peer
+        )
+        if reason:
+            return denied
+    request.state.remote_peer = remote_peer
     return await call_next(request)
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -1071,6 +1090,8 @@ def process_video(req: ProcessVideoRequest):
 
 class RemoteAccessConfigRequest(BaseModel):
     allowed_ips: List[str]
+    # Addresses whose pinned device should be replaced by the one using them now.
+    repin: List[str] = []
 
 
 @app.get("/api/remote-access")
@@ -1096,7 +1117,9 @@ async def set_remote_access(req: RemoteAccessConfigRequest, request: Request):
     if getattr(request.state, "remote_peer", None):
         raise HTTPException(status_code=403, detail="Remote access can only be changed on the LED Sign host.")
     try:
-        allowed = remote_access.set_allowed_entries(req.allowed_ips)
+        allowed = await asyncio.get_running_loop().run_in_executor(
+            remote_access.ARP_EXECUTOR, lambda: remote_access.set_allowed_entries(req.allowed_ips, repin=req.repin)
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid IP address or range: {e}")
     return {"status": "ok", "allowed_ips": allowed}
@@ -1464,6 +1487,70 @@ async def get_google_proxy_media(url: str):
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch media: {e}")
+
+
+# -------------------------------------------------------------------------
+# Signed-in Google account: Google Drive images & Google Photos (Picker API)
+# -------------------------------------------------------------------------
+
+async def _google_account_call(fn, *args):
+    try:
+        return await asyncio.to_thread(fn, *args)
+    except GoogleMediaUnavailable as err:
+        # 409 tells the panel what the user must do (sign in, allow access,
+        # enable the API); the reason is machine-readable.
+        raise HTTPException(status_code=err.status, detail={"reason": err.reason, "message": str(err)})
+
+
+def _google_media_response(result):
+    content, content_type = result
+    return Response(content=content, media_type=content_type, headers={"Cache-Control": "private, max-age=3600"})
+
+
+@app.get("/api/google/account/status")
+async def google_account_status():
+    return google_account_media.status()
+
+
+@app.get("/api/google/account/drive/images")
+async def google_drive_images(q: str = "", category: str = "all", page_token: Optional[str] = None, limit: int = 24):
+    return await _google_account_call(google_account_media.list_drive_images, q, category, page_token, limit)
+
+
+@app.get("/api/google/account/drive/thumbnail/{file_id}")
+async def google_drive_thumbnail(file_id: str):
+    return _google_media_response(await _google_account_call(google_account_media.drive_thumbnail, file_id))
+
+
+@app.get("/api/google/account/drive/file/{file_id}")
+async def google_drive_file(file_id: str):
+    return _google_media_response(await _google_account_call(google_account_media.drive_file, file_id))
+
+
+@app.post("/api/google/account/photos/sessions")
+async def google_photos_create_session():
+    return await _google_account_call(google_account_media.create_photos_session)
+
+
+@app.get("/api/google/account/photos/sessions/{session_id}")
+async def google_photos_get_session(session_id: str):
+    return await _google_account_call(google_account_media.get_photos_session, session_id)
+
+
+@app.delete("/api/google/account/photos/sessions/{session_id}")
+async def google_photos_delete_session(session_id: str):
+    await _google_account_call(google_account_media.delete_photos_session, session_id)
+    return {"status": "deleted"}
+
+
+@app.get("/api/google/account/photos/items")
+async def google_photos_items(session_id: str, page_token: Optional[str] = None):
+    return await _google_account_call(google_account_media.list_photos_items, session_id, page_token)
+
+
+@app.get("/api/google/account/photos/media/{item_id}")
+async def google_photos_media(item_id: str, thumb: bool = False):
+    return _google_media_response(await _google_account_call(google_account_media.photos_media, item_id, thumb))
 
 
 # -------------------------------------------------------------------------
@@ -2491,7 +2578,7 @@ async def auth_callback(code: Optional[str] = None, state: Optional[str] = None,
         return HTMLResponse(content="""<!DOCTYPE html>
 <html>
 <head>
-  <title>Connected to Google Calendar</title>
+  <title>Connected to Google</title>
   <style>
     body {
       background: #050505;
@@ -2517,7 +2604,7 @@ async def auth_callback(code: Optional[str] = None, state: Optional[str] = None,
 </head>
 <body>
   <div class="card">
-    <h2>Connected to Google Calendar!</h2>
+    <h2>Connected to Google!</h2>
     <p>You can close this window now.</p>
   </div>
   <script>

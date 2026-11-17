@@ -7,6 +7,7 @@ import { runSync, applyPresetChanges, SYNC_APPLIED_EVENT } from './cloudSync';
 import GeminiMediaGenerator, { GeminiLogo, OpenAILogo } from './GeminiMediaGenerator';
 import LoySpaceGallery, { LoySpaceLogo } from './LoySpaceGallery';
 import GoogleMediaGallery, { GoogleLogo } from './GoogleMediaGallery';
+import GoogleAccountMediaGallery, { GooglePhotosLogo, GoogleDriveLogo } from './GoogleAccountMediaGallery';
 import { getGoogleProxyMediaUrl } from './serverApi';
 import { getLoyProxyMediaUrl } from './serverApi';
 
@@ -4608,11 +4609,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     await loadRemoteAccess();
   };
 
-  const saveAllowedIps = async (nextIps) => {
+  const saveAllowedIps = async (nextIps, repin = []) => {
     setRemoteAccessSaving(true);
     setRemoteAccessError('');
     try {
-      const res = await axios.post(`${API_BASE}/api/remote-access`, { allowed_ips: nextIps });
+      const res = await axios.post(`${API_BASE}/api/remote-access`, { allowed_ips: nextIps, repin });
       setRemoteAccess(prev => ({ ...(prev || {}), allowed_ips: res.data?.allowed_ips || nextIps }));
       return true;
     } catch (err) {
@@ -4631,9 +4632,12 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
     if (await saveAllowedIps([...current, value])) setRemoteIpInput('');
   };
 
-  const handleAllowDeniedIp = async (ip) => {
+  const handleAllowDeniedIp = async (entry) => {
+    const { ip } = entry;
     const current = remoteAccess?.allowed_ips || [];
-    if (await saveAllowedIps([...current, ip])) {
+    // A "different device" entry is already allowed: trust the device using it now.
+    const next = current.includes(ip) ? current : [...current, ip];
+    if (await saveAllowedIps(next, entry.reason === 'mac_mismatch' ? [ip] : [])) {
       setRemoteAccess(prev => ({
         ...(prev || {}),
         recent_denied: (prev?.recent_denied || []).filter(entry => entry.ip !== ip),
@@ -5502,48 +5506,50 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
 
         <div className="preview-stack opacity-100 scale-100">
           <div className="preview-box">
-            {status?.connected ? (
-              status?.display_mode === 'clock' ? (
-                <ClockPresetCardPreview
-                  preset={{
-                    textColor: status.clock_color || '#ffffff',
-                    bgColor: status.clock_bg_color || '#000000',
-                    clockStyle: status.clock_style || 'default',
-                    timeFormat: status.clock_format || '24h',
-                    showSeconds: status.clock_show_seconds !== false
-                  }}
-                  style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
-                />
-              ) : activePreset ? (
-                <div style={{ width: '100%', height: '100%', position: 'relative' }}>
-                  <PresetCardMedia preset={activePreset} now={now} />
-                </div>
-              ) : status?.preview_url ? (
-                <>
-                  <img
-                    ref={previewRef}
-                    src={`${API_BASE}${status.preview_url}?t=${previewStamp}`}
-                    className={`${status.width && status.width > 64 ? "scrolling-preview" : "static-preview"} ${isLoaded ? 'loaded' : ''}`}
-                    style={status.width && status.width > 64 ? { '--scroll-duration': `${((64 + status.width) * Math.max(10, 80 - (activePreset?.speed !== undefined ? activePreset.speed : (status?.speed !== undefined ? status.speed : speed)) * 5)) / 1000}s` } : {}}
-                    onLoad={() => setIsLoaded(true)}
-                    onError={() => setIsLoaded(true)}
+            <div style={{ width: '100%', height: '100%', visibility: pushing ? 'hidden' : 'visible' }}>
+              {status?.connected ? (
+                status?.display_mode === 'clock' ? (
+                  <ClockPresetCardPreview
+                    preset={{
+                      textColor: status.clock_color || '#ffffff',
+                      bgColor: status.clock_bg_color || '#000000',
+                      clockStyle: status.clock_style || 'default',
+                      timeFormat: status.clock_format || '24h',
+                      showSeconds: status.clock_show_seconds !== false
+                    }}
+                    style={{ width: '100%', height: '100%', objectFit: 'fill', imageRendering: 'pixelated' }}
                   />
-                  {!isLoaded && (
-                    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000000', zIndex: 5 }}>
-                      <RefreshCw size={26} className="animate-spin text-violet-400" />
-                    </div>
-                  )}
-                </>
+                ) : activePreset ? (
+                  <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+                    <PresetCardMedia preset={activePreset} now={now} />
+                  </div>
+                ) : status?.preview_url ? (
+                  <>
+                    <img
+                      ref={previewRef}
+                      src={`${API_BASE}${status.preview_url}?t=${previewStamp}`}
+                      className={`${status.width && status.width > 64 ? "scrolling-preview" : "static-preview"} ${isLoaded ? 'loaded' : ''}`}
+                      style={status.width && status.width > 64 ? { '--scroll-duration': `${((64 + status.width) * Math.max(10, 80 - (activePreset?.speed !== undefined ? activePreset.speed : (status?.speed !== undefined ? status.speed : speed)) * 5)) / 1000}s` } : {}}
+                      onLoad={() => setIsLoaded(true)}
+                      onError={() => setIsLoaded(true)}
+                    />
+                    {!isLoaded && (
+                      <div style={{ position: 'absolute', inset: '-1px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000000', zIndex: 5 }}>
+                        <RefreshCw size={26} className="animate-spin text-violet-400" />
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000000' }}>
+                    <RefreshCw size={26} className="animate-spin text-violet-400" />
+                  </div>
+                )
               ) : (
-                <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000000' }}>
-                  <RefreshCw size={26} className="animate-spin text-violet-400" />
+                <div style={{width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '12px'}}>
+                  Disconnected
                 </div>
-              )
-            ) : (
-              <div style={{width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '12px'}}>
-                Disconnected
-              </div>
-            )}
+              )}
+            </div>
 
             {/* Any sign update (including background event saves, which blank the
                 screen) shows the spinner until it completes. */}
@@ -5552,15 +5558,19 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                 className="preview-push-overlay"
                 style={{
                   position: 'absolute',
-                  inset: 0,
+                  inset: '-1px',
+                  width: 'auto',
+                  height: 'auto',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   // Opaque: neither the old nor the new content shows until the sign has changed.
                   background: '#000000',
+                  backdropFilter: 'none',
+                  WebkitBackdropFilter: 'none',
                   zIndex: 20,
                   pointerEvents: 'none',
-                  borderRadius: 'inherit'
+                  borderRadius: 0
                 }}
               >
                 <RefreshCw size={28} className="animate-spin text-white" aria-label="Pushing to sign" style={{ color: '#ffffff' }} />
@@ -6841,6 +6851,11 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                         <div key={entry.ip} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div className="font-mono" style={{ fontSize: 12, color: '#e2e8f0' }}>{entry.ip}</div>
+                            {entry.reason === 'mac_mismatch' && (
+                              <div style={{ fontSize: 10, color: '#fbbf24', lineHeight: 1.4 }}>
+                                Allowed address, but a different device is using it. Only allow if the VPN server's network hardware changed.
+                              </div>
+                            )}
                             {entry.last_seen && (
                               <div style={{ fontSize: 10, color: '#64748b' }}>
                                 {new Date(entry.last_seen * 1000).toLocaleString()}
@@ -6849,7 +6864,7 @@ function DashboardView({ status, power, setPower, brightness, setBrightness, spe
                           </div>
                           <button
                             type="button"
-                            onClick={() => handleAllowDeniedIp(entry.ip)}
+                            onClick={() => handleAllowDeniedIp(entry)}
                             disabled={remoteAccessSaving}
                             className="btn-styled"
                             style={{
@@ -7530,29 +7545,10 @@ function InviteCard({ invite, cleanName, onAccept, isAccepting, onReject, isReje
             disabled={isAccepting || isRejecting}
             className="btn-styled"
             style={{
-              height: '30px',
-              padding: '0 12px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-              boxSizing: 'border-box',
-              fontSize: '11px',
-              fontWeight: 800,
-              borderRadius: '9px',
-              background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
-              border: 'none',
-              color: '#ffffff',
+              // Same look as Remote Access > Recently blocked > Allow
+              padding: '8px 14px', borderRadius: 10, fontSize: 12, fontWeight: 700, flexShrink: 0,
               cursor: (isAccepting || isRejecting) ? 'not-allowed' : 'pointer',
-              boxShadow: '0 0 10px rgba(139, 92, 246, 0.45)',
-              transition: 'all 0.2s ease'
-            }}
-            onMouseOver={e => {
-              if (isAccepting || isRejecting) return;
-              e.currentTarget.style.boxShadow = '0 0 10px rgba(139, 92, 246, 0.55)';
-            }}
-            onMouseOut={e => {
-              e.currentTarget.style.boxShadow = '0 0 10px rgba(139, 92, 246, 0.45)';
+              opacity: (isAccepting || isRejecting) ? 0.5 : 1
             }}
             title="Accept Invite"
           >
@@ -8359,6 +8355,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
   const [isAiExpanded, setIsAiExpanded] = useState(false);
   const [isLoyExpanded, setIsLoyExpanded] = useState(false);
   const [isGoogleExpanded, setIsGoogleExpanded] = useState(false);
+  // 'photos' | 'drive' | null: signed-in Google account media side panel
+  const [googleAccountPanel, setGoogleAccountPanel] = useState(null);
   const [aiProvider, setAiProvider] = useState(() => {
     return localStorage.getItem('led_last_generated_provider') === 'openai' ? 'openai' : 'gemini';
   });
@@ -8372,6 +8370,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       setIsAiExpanded(false);
       setIsLoyExpanded(false);
       setIsGoogleExpanded(false);
+      setGoogleAccountPanel(null);
     }
   }, [isModalOpen]);
 
@@ -8380,6 +8379,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       setIsAiExpanded(false);
       setIsLoyExpanded(false);
       setIsGoogleExpanded(false);
+      setGoogleAccountPanel(null);
     }
   }, [form.mode]);
 
@@ -8412,6 +8412,43 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       setIsLoadingMedia(false);
       throw err;
     }
+  };
+
+  const handleSelectGoogleAccountMedia = async (item) => {
+    if (!item?.fileUrl) return;
+    try {
+      setIsLoadingMedia(true);
+      setSaveError('');
+      const resp = await fetch(item.fileUrl);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      if (!blob.type || !blob.type.startsWith('image/')) {
+        throw new Error('Unsupported image format. Please choose another image.');
+      }
+      const ext = blob.type === 'image/gif' ? 'gif' : (blob.type.includes('png') ? 'png' : (blob.type.includes('jpeg') ? 'jpg' : (blob.type.split('/')[1] || 'png')));
+      const base = (item.title || 'google_media').replace(/\.[a-z0-9]+$/i, '').slice(0, 24).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const file = new File([blob], `${base}.${ext}`, { type: blob.type });
+      setForm(prev => ({ ...prev, mode: 'image' }));
+      handleMediaFile(file);
+    } catch (err) {
+      console.error('[handleSelectGoogleAccountMedia] Error loading media:', err);
+      setSaveError(`Failed to load media: ${err.message}`);
+      setIsLoadingMedia(false);
+      throw err;
+    }
+  };
+
+  const toggleGoogleAccountPanel = (source) => {
+    if (isSaving) return;
+    setGoogleAccountPanel(prev => {
+      const next = prev === source ? null : source;
+      if (next) {
+        setIsAiExpanded(false);
+        setIsGoogleExpanded(false);
+        setIsLoyExpanded(false);
+      }
+      return next;
+    });
   };
 
   const handleSelectLoyMedia = async (item) => {
@@ -9337,8 +9374,8 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
       }
       if (event.key === 'Enter') {
         if (event.isComposing || event.repeat) return;
-        if (isGoogleExpanded || isAiExpanded || isLoyExpanded) return;
-        if (event.target?.closest('[data-ai-side-panel]') || event.target?.closest('[data-loy-side-panel]') || event.target?.closest('[data-google-side-panel]')) return;
+        if (isGoogleExpanded || isAiExpanded || isLoyExpanded || googleAccountPanel) return;
+        if (event.target?.closest('[data-ai-side-panel]') || event.target?.closest('[data-loy-side-panel]') || event.target?.closest('[data-google-side-panel]') || event.target?.closest('[data-google-account-side-panel]')) return;
         if (event.target?.tagName === 'BUTTON' && event.target?.innerText?.toLowerCase().includes('delete')) return;
         if (canSavePreset) {
           event.preventDefault();
@@ -9348,7 +9385,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isModalOpen, isSaving, form, canSavePreset, handleSave, isGoogleExpanded, isAiExpanded, isLoyExpanded]);
+  }, [isModalOpen, isSaving, form, canSavePreset, handleSave, isGoogleExpanded, isAiExpanded, isLoyExpanded, googleAccountPanel]);
 
   const exportOriginalMedia = () => {
     if (!form.imgSrc) return;
@@ -9712,7 +9749,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                 alignItems: 'flex-start',
                 justifyContent: 'flex-start',
                 gap: '16px', 
-                width: (isAiExpanded || isLoyExpanded || isGoogleExpanded) && form.mode === 'image' ? '1244px' : '768px',
+                width: (isAiExpanded || isLoyExpanded || isGoogleExpanded || googleAccountPanel) && form.mode === 'image' ? '1244px' : '768px',
                 maxWidth: 'none',
                 maxHeight: '92vh',
                 transition: 'max-width 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
@@ -10750,6 +10787,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                             setIsAiExpanded(prev => {
                               const next = !prev;
                               if (next) {
+                                setGoogleAccountPanel(null);
                                 setIsLoyExpanded(false);
                                 setIsGoogleExpanded(false);
                               }
@@ -10788,6 +10826,7 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                             setIsGoogleExpanded(prev => {
                               const next = !prev;
                               if (next) {
+                                setGoogleAccountPanel(null);
                                 setIsAiExpanded(false);
                                 setIsLoyExpanded(false);
                               }
@@ -10817,11 +10856,60 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                         <button
                           type="button"
                           disabled={isSaving}
+                          onClick={() => toggleGoogleAccountPanel('photos')}
+                          className={`btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5 transition-all ${googleAccountPanel !== 'photos' ? 'inactive' : ''}`}
+                          aria-label="Google Photos"
+                          style={{
+                            borderRadius: '12px',
+                            opacity: isSaving ? 0.35 : 1,
+                            cursor: isSaving ? 'not-allowed' : 'pointer',
+                            pointerEvents: isSaving ? 'none' : 'auto',
+                            background: isSaving
+                              ? 'rgba(255, 255, 255, 0.05)'
+                              : 'linear-gradient(#ffffff, #ffffff) padding-box, linear-gradient(135deg, #4285F4 0%, #EA4335 33%, #FBBC05 66%, #34A853 100%) border-box',
+                            border: isSaving ? '1px solid rgba(255, 255, 255, 0.08)' : '2px solid transparent',
+                            color: isSaving ? '#64748b' : '#0f172a',
+                            boxShadow: isSaving
+                              ? 'none'
+                              : '0 2px 10px rgba(0, 0, 0, 0.25), 0 0 8px rgba(66, 133, 244, 0.35)'
+                          }}
+                          title={googleAccountPanel === 'photos' ? "Close Google Photos" : "Google Photos"}
+                        >
+                          <GooglePhotosLogo size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSaving}
+                          onClick={() => toggleGoogleAccountPanel('drive')}
+                          className={`btn-styled text-[10px] px-3 py-2 flex items-center gap-1.5 transition-all ${googleAccountPanel !== 'drive' ? 'inactive' : ''}`}
+                          aria-label="Google Drive"
+                          style={{
+                            borderRadius: '12px',
+                            opacity: isSaving ? 0.35 : 1,
+                            cursor: isSaving ? 'not-allowed' : 'pointer',
+                            pointerEvents: isSaving ? 'none' : 'auto',
+                            background: isSaving
+                              ? 'rgba(255, 255, 255, 0.05)'
+                              : 'linear-gradient(#ffffff, #ffffff) padding-box, linear-gradient(135deg, #4285F4 0%, #EA4335 33%, #FBBC05 66%, #34A853 100%) border-box',
+                            border: isSaving ? '1px solid rgba(255, 255, 255, 0.08)' : '2px solid transparent',
+                            color: isSaving ? '#64748b' : '#0f172a',
+                            boxShadow: isSaving
+                              ? 'none'
+                              : '0 2px 10px rgba(0, 0, 0, 0.25), 0 0 8px rgba(66, 133, 244, 0.35)'
+                          }}
+                          title={googleAccountPanel === 'drive' ? "Close Google Drive" : "Google Drive"}
+                        >
+                          <GoogleDriveLogo size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isSaving}
                           onClick={() => {
                             if (isSaving) return;
                             setIsLoyExpanded(prev => {
                               const next = !prev;
                               if (next) {
+                                setGoogleAccountPanel(null);
                                 setIsAiExpanded(false);
                                 setIsGoogleExpanded(false);
                               }
@@ -11494,6 +11582,48 @@ function MediaView({ status, isModalOpen, setIsModalOpen, presets, setPresets, o
                     onSelectMedia={handleSelectGoogleMedia}
                     onNotify={setUnifiedPushMessage}
                     form={form}
+                    style={{
+                      borderRadius: '24px',
+                      padding: '24px'
+                    }}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Google Photos / Google Drive Side Panel (signed-in Google account) */}
+            <AnimatePresence>
+              {googleAccountPanel && form.mode === 'image' && (
+                <motion.div
+                  key={googleAccountPanel}
+                  data-google-account-side-panel={googleAccountPanel}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.22, ease: 'easeOut' }}
+                  style={{
+                    position: 'absolute',
+                    left: '784px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    width: '460px',
+                    maxWidth: '460px',
+                    height: 'auto',
+                    maxHeight: '92vh',
+                    overflow: 'hidden',
+                    borderRadius: '24px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    opacity: isSaving ? 0.45 : 1,
+                    pointerEvents: isSaving ? 'none' : 'auto',
+                    cursor: isSaving ? 'not-allowed' : 'default'
+                  }}
+                >
+                  <GoogleAccountMediaGallery
+                    source={googleAccountPanel}
+                    onClose={() => !isSaving && setGoogleAccountPanel(null)}
+                    onSelectMedia={handleSelectGoogleAccountMedia}
+                    onNotify={setUnifiedPushMessage}
                     style={{
                       borderRadius: '24px',
                       padding: '24px'
