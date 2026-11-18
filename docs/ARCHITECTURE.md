@@ -56,4 +56,14 @@ flowchart TD
     Protocol --> |Raw Bytes| BLE[Bleak BLE Client]
     
     BLE <--> |Bluetooth Low Energy| Hardware[Physical LED Sign]
-```
+```
+
+## Remote Access Configuration
+
+Remote UI access (port `5173`) is gated by `client/vite.config.js` and `server/remote_access.py` using `server/.remote_access.json` (gitignored):
+
+- **`allowed_ips`**: Always-allowed IPs/CIDRs regardless of network (e.g. `["192.168.8.136"]` for the Pritunl VPN server's office-network IP).
+- **`ssid_scoped_ips`**: Optional map of Wi-Fi SSID → list of IPs/CIDRs active **only** when this Windows host is connected to that Wi-Fi SSID (e.g. `{"RavenConnected": ["192.168.9.xxx"]}` to allow a specific office device without VPN while on the office Wi-Fi, without exposing it on other networks).
+- **`pinned_macs`**: Automatically populated by `server/remote_access.py` for single-IP entries on the local link to prevent IP spoofing.
+- **Windows Firewall**: Port `5173` (TCP inbound) must be allowed in Windows Firewall when the host's Wi-Fi profile is set to `Public`.
+

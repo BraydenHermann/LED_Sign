@@ -180,6 +180,37 @@ class RemoteAccessTests(unittest.TestCase):
             self.assertIsNone(remote_access.check_peer("172.16.0.5"))
         self.assertEqual(remote_access.get_pinned_macs(), {"172.16.0.5": "cc-cc-cc-cc-cc-cc"})
 
+    def test_parse_wlan_ssid(self):
+        sample = (
+            "There is 1 interface on the system:\n\n"
+            "    Name                   : Wi-Fi\n"
+            "    State                  : connected\n"
+            "    SSID                   : RavenConnected\n"
+            "    AP BSSID               : 9e:25:4a:14:75:db\n"
+        )
+        self.assertEqual(remote_access.parse_wlan_ssid(sample), "RavenConnected")
+        self.assertIsNone(remote_access.parse_wlan_ssid("State : disconnected\n"))
+
+    def test_ssid_scoped_ips_only_allowed_on_matching_ssid_and_preserved(self):
+        remote_access._write_config({
+            "allowed_ips": ["192.168.8.136"],
+            "ssid_scoped_ips": {"RavenConnected": ["192.168.9.162"]},
+        })
+        with patch.object(remote_access, "current_wifi_ssid", return_value="OtherWiFi"):
+            self.assertTrue(remote_access.is_allowed("192.168.8.136"))
+            self.assertFalse(remote_access.is_allowed("192.168.9.162"))
+
+        with patch.object(remote_access, "current_wifi_ssid", return_value="RavenConnected"), \
+             patch.object(remote_access, "_read_arp_table", return_value={"192.168.9.162": "dd-dd-dd-dd-dd-dd"}):
+            remote_access._arp_cache["at"] = float("-inf")
+            self.assertTrue(remote_access.is_allowed("192.168.9.162"))
+            self.assertIsNone(remote_access.check_peer("192.168.9.162"))
+            self.assertEqual(remote_access.get_pinned_macs().get("192.168.9.162"), "dd-dd-dd-dd-dd-dd")
+
+        # Updating allowed_ips via set_allowed_entries preserves ssid_scoped_ips.
+        remote_access.set_allowed_entries(["192.168.8.136"])
+        self.assertEqual(remote_access.get_ssid_scoped_entries(), {"RavenConnected": ["192.168.9.162"]})
+
 
 if __name__ == "__main__":
     unittest.main()

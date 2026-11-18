@@ -87,6 +87,69 @@ def get_allowed_entries() -> List[str]:
     return [str(e).strip() for e in entries if str(e).strip()]
 
 
+def get_ssid_scoped_entries() -> Dict[str, List[str]]:
+    """Map of Wi-Fi SSID -> allowed IP/CIDR entries active only on that SSID."""
+    raw = _read_config().get("ssid_scoped_ips") or {}
+    if not isinstance(raw, dict):
+        return {}
+    result: Dict[str, List[str]] = {}
+    for ssid, entries in raw.items():
+        ssid_name = str(ssid).strip()
+        if not ssid_name or not isinstance(entries, list):
+            continue
+        cleaned = [str(e).strip() for e in entries if str(e).strip()]
+        if cleaned:
+            result[ssid_name] = cleaned
+    return result
+
+
+_SSID_MAX_AGE = 5.0
+_ssid_lock = threading.Lock()
+_ssid_cache: Dict[str, Any] = {"at": float("-inf"), "ssid": None}
+_SSID_LINE_RE = re.compile(r"^\s*SSID\s*:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def parse_wlan_ssid(output: str) -> Optional[str]:
+    """Extract the connected Wi-Fi SSID from `netsh wlan show interfaces` output."""
+    match = _SSID_LINE_RE.search(output or "")
+    if not match:
+        return None
+    ssid = match.group(1).strip()
+    return ssid or None
+
+
+def current_wifi_ssid(max_age: float = _SSID_MAX_AGE) -> Optional[str]:
+    """Return the currently connected Wi-Fi SSID on Windows, cached briefly."""
+    if sys.platform != "win32":
+        return None
+    with _ssid_lock:
+        if time.monotonic() - _ssid_cache["at"] <= max_age:
+            return _ssid_cache["ssid"]
+        ssid = None
+        try:
+            out = subprocess.check_output(
+                ["netsh", "wlan", "show", "interfaces"],
+                text=True, timeout=3, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW, errors="replace",
+            )
+            ssid = parse_wlan_ssid(out)
+        except Exception:
+            ssid = None
+        _ssid_cache["ssid"] = ssid
+        _ssid_cache["at"] = time.monotonic()
+        return ssid
+
+
+def _parse_networks(entries: List[str]) -> List[ipaddress._BaseNetwork]:
+    networks = []
+    for entry in entries:
+        try:
+            networks.append(parse_entry(entry))
+        except ValueError:
+            print(f"[remote-access] Ignoring invalid allowlist entry: {entry!r}")
+    return networks
+
+
 def _allowed_networks() -> List[ipaddress._BaseNetwork]:
     try:
         mtime = os.path.getmtime(CONFIG_FILE)
@@ -94,12 +157,7 @@ def _allowed_networks() -> List[ipaddress._BaseNetwork]:
         mtime = None
     with _lock:
         if _cache["mtime"] != mtime:
-            networks = []
-            for entry in get_allowed_entries():
-                try:
-                    networks.append(parse_entry(entry))
-                except ValueError:
-                    print(f"[remote-access] Ignoring invalid allowlist entry: {entry!r}")
+            networks = _parse_networks(get_allowed_entries())
             _cache["mtime"] = mtime
             _cache["networks"] = networks
         return list(_cache["networks"])
@@ -115,7 +173,14 @@ def is_allowed(ip: Optional[str]) -> bool:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return any(addr in net for net in _allowed_networks() if net.version == addr.version)
+    if any(addr in net for net in _allowed_networks() if net.version == addr.version):
+        return True
+    scoped = get_ssid_scoped_entries()
+    if scoped:
+        ssid = current_wifi_ssid()
+        if ssid and ssid in scoped:
+            return any(addr in net for net in _parse_networks(scoped[ssid]) if net.version == addr.version)
+    return False
 
 
 def _read_denied() -> List[Dict[str, Any]]:
@@ -174,9 +239,19 @@ def set_allowed_entries(entries: List[str], repin: Optional[List[str]] = None) -
         if text not in cleaned:
             cleaned.append(text)
     repin_set = {normalize_ip(ip) for ip in (repin or [])}
+    old_config = _read_config()
     old_pins = get_pinned_macs()
     pins: Dict[str, str] = {}
-    for text in cleaned:
+    scoped = old_config.get("ssid_scoped_ips")
+    scoped_single_ips: List[str] = []
+    if isinstance(scoped, dict):
+        for entries_list in scoped.values():
+            if isinstance(entries_list, list):
+                for e in entries_list:
+                    e_str = str(e).strip()
+                    if e_str and "/" not in e_str:
+                        scoped_single_ips.append(e_str)
+    for text in cleaned + scoped_single_ips:
         if "/" in text:
             continue
         if text in old_pins and text not in repin_set:
@@ -185,7 +260,10 @@ def set_allowed_entries(entries: List[str], repin: Optional[List[str]] = None) -
         mac = neighbor_mac(text, max_age=0)
         if mac:
             pins[text] = mac
-    _write_config({"allowed_ips": cleaned, "pinned_macs": pins})
+    new_config: Dict[str, Any] = {"allowed_ips": cleaned, "pinned_macs": pins}
+    if isinstance(scoped, dict):
+        new_config["ssid_scoped_ips"] = scoped
+    _write_config(new_config)
     return cleaned
 
 
@@ -284,7 +362,12 @@ def check_peer(ip: Optional[str]) -> Optional[str]:
     if not is_allowed(ip):
         return "not_allowed"
     config = _read_config()
-    allowed = [str(e).strip() for e in (config.get("allowed_ips") or [])]
+    allowed = {str(e).strip() for e in (config.get("allowed_ips") or [])}
+    scoped = get_ssid_scoped_entries()
+    if scoped:
+        ssid = current_wifi_ssid()
+        if ssid and ssid in scoped:
+            allowed.update(scoped[ssid])
     pins = get_pinned_macs()
     current = neighbor_mac(ip)
     pinned = pins.get(ip)

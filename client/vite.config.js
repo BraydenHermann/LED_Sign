@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -8,7 +9,9 @@ const REMOTE_PEER_HEADER = 'x-led-remote-peer'
 
 // Mirrors server/remote_access.py: only this machine and the VPN client IPs in
 // server/.remote_access.json may use the UI.
-let allowlistCache = { mtimeMs: null, ranges: [] }
+let allowlistCache = { mtimeMs: null, ranges: [], ssidRanges: {} }
+let ssidCache = { at: 0, ssid: null }
+const SSID_CACHE_MS = 5000
 
 function normalizeIp(ip = '') {
   const text = String(ip).trim()
@@ -41,7 +44,27 @@ function parseRange(entry) {
   return { start, end: start + size - 1 }
 }
 
-function loadAllowedRanges() {
+function getCurrentWifiSsid() {
+  if (process.platform !== 'win32') return null
+  const now = Date.now()
+  if (now - ssidCache.at <= SSID_CACHE_MS) return ssidCache.ssid
+  let ssid = null
+  try {
+    const out = execFileSync('netsh', ['wlan', 'show', 'interfaces'], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true,
+    })
+    const match = /^\s*SSID\s*:\s*(.+?)\s*$/m.exec(out)
+    ssid = match ? match[1].trim() || null : null
+  } catch {
+    ssid = null
+  }
+  ssidCache = { at: now, ssid }
+  return ssid
+}
+
+function loadAllowlist() {
   let mtimeMs
   try {
     mtimeMs = fs.statSync(ALLOWLIST_FILE).mtimeMs
@@ -49,15 +72,25 @@ function loadAllowedRanges() {
     mtimeMs = null
   }
   if (allowlistCache.mtimeMs !== mtimeMs) {
-    let entries
+    let data = {}
     try {
-      entries = JSON.parse(fs.readFileSync(ALLOWLIST_FILE, 'utf8')).allowed_ips || []
+      data = JSON.parse(fs.readFileSync(ALLOWLIST_FILE, 'utf8')) || {}
     } catch {
-      entries = []
+      data = {}
     }
-    allowlistCache = { mtimeMs, ranges: entries.map(parseRange).filter(Boolean) }
+    const entries = Array.isArray(data.allowed_ips) ? data.allowed_ips : []
+    const ssidRanges = {}
+    if (data.ssid_scoped_ips && typeof data.ssid_scoped_ips === 'object') {
+      for (const [ssid, list] of Object.entries(data.ssid_scoped_ips)) {
+        const key = String(ssid).trim()
+        if (!key || !Array.isArray(list)) continue
+        const parsed = list.map(parseRange).filter(Boolean)
+        if (parsed.length > 0) ssidRanges[key] = parsed
+      }
+    }
+    allowlistCache = { mtimeMs, ranges: entries.map(parseRange).filter(Boolean), ssidRanges }
   }
-  return allowlistCache.ranges
+  return allowlistCache
 }
 
 function isAllowedPeer(ip) {
@@ -65,7 +98,15 @@ function isAllowedPeer(ip) {
   if (isLoopback(addr)) return true
   const value = ipv4ToInt(addr)
   if (value === null) return false
-  return loadAllowedRanges().some(r => value >= r.start && value <= r.end)
+  const { ranges, ssidRanges } = loadAllowlist()
+  if (ranges.some(r => value >= r.start && value <= r.end)) return true
+  if (Object.keys(ssidRanges).length > 0) {
+    const ssid = getCurrentWifiSsid()
+    if (ssid && ssidRanges[ssid]) {
+      return ssidRanges[ssid].some(r => value >= r.start && value <= r.end)
+    }
+  }
+  return false
 }
 
 const PRITUNL_INSTALL_URL = 'https://client.pritunl.com/#install'
