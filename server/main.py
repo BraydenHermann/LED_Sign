@@ -219,6 +219,93 @@ async def _reauthenticate_sign() -> bool:
     return ok
 
 
+async def _resubscribe_notifications() -> bool:
+    """Refresh the BLE NOTIFY_UUID subscription and clear any stale partial frame.
+
+    Long-idle Windows BLE connections can keep is_connected=True and accept GATT
+    writes while silently dropping notification events.
+    """
+    notification_buffer.clear()
+    client = connected_client
+    if not client or not getattr(client, "is_connected", False):
+        return False
+    start_fn = getattr(client, "start_notify", None)
+    if not callable(start_fn):
+        return False
+    stop_fn = getattr(client, "stop_notify", None)
+    if callable(stop_fn):
+        try:
+            await stop_fn(protocol.NOTIFY_UUID)
+        except Exception:
+            pass
+    try:
+        await start_fn(protocol.NOTIFY_UUID, notification_handler)
+        print("[BLE] Re-subscribed to NOTIFY_UUID notifications.")
+        return True
+    except Exception as e:
+        print(f"[BLE] Failed to re-subscribe to NOTIFY_UUID: {e}")
+        return False
+
+
+async def _prepare_sign_for_slot_transfer():
+    """Stop playback/clock and power off the panel to avoid SPI flash contention."""
+    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
+    await asyncio.sleep(0.02)
+    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
+    await asyncio.sleep(0.02)
+    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(False), response=True)
+    await asyncio.sleep(0.1)
+
+
+async def _reconnect_stale_ble_session() -> bool:
+    """Force a fresh BLE connection when the sign stops confirming slot transfers."""
+    global connected_client, connection_ready, _suppress_auto_reconnect
+    client = connected_client
+    target_mac = (getattr(client, "address", None) or last_connected_mac or "").strip().upper()
+    if not target_mac or not client or not callable(getattr(client, "disconnect", None)):
+        return False
+    print(f"[BLE] Transfer start unconfirmed; reconnecting stale BLE session to {target_mac}...")
+    _suppress_auto_reconnect = True
+    connection_ready = False
+    try:
+        if getattr(client, "is_connected", False):
+            stop_fn = getattr(client, "stop_notify", None)
+            if callable(stop_fn):
+                try:
+                    await stop_fn(protocol.NOTIFY_UUID)
+                except Exception:
+                    pass
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+    finally:
+        connected_client = None
+    await asyncio.sleep(0.5)
+    try:
+        await _connect_internal(ConnectRequest(address=target_mac), background=False, intent=_connection_intent)
+        return bool(connected_client and getattr(connected_client, "is_connected", False))
+    except Exception as e:
+        _suppress_auto_reconnect = False
+        print(f"[BLE] Reconnect for slot transfer failed: {e}")
+        return False
+
+
+async def _start_slot_transfer_session(slot_id: int):
+    """Send CMD=0x08 transfer start, reconnecting once if the BLE session is stale."""
+    init_pkt = protocol.build_slot_session_init(slot_id)
+    try:
+        await write_slot_packet(init_pkt, "the transfer start", retries=1)
+    except RuntimeError as exc:
+        if "did not confirm the transfer start" not in str(exc):
+            raise
+        if not await _reconnect_stale_ble_session():
+            raise
+        await _prepare_sign_for_slot_transfer()
+        init_pkt = protocol.build_slot_session_init(slot_id)
+        await write_slot_packet(init_pkt, "the transfer start", retries=0)
+
+
 async def write_slot_packet(packet: bytes, label: str, large: bool = False, retries: int = 0):
     """Write one slot-transfer packet and wait for the sign to accept it.
 
@@ -227,7 +314,7 @@ async def write_slot_packet(packet: bytes, label: str, large: bool = False, retr
     transfer packet must be acknowledged with error code 0 before continuing.
     """
     sno = struct.unpack('<H', packet[6:8])[0]
-    timeout = 5.0 if label == "the transfer start" else SLOT_ACK_TIMEOUT
+    timeout = SLOT_START_ACK_TIMEOUT if label == "the transfer start" else SLOT_ACK_TIMEOUT
     timeouts_left = max(0, retries)
     reauthenticated = False
     attempt = 0
@@ -245,7 +332,8 @@ async def write_slot_packet(packet: bytes, label: str, large: bool = False, retr
             except asyncio.TimeoutError:
                 if timeouts_left > 0:
                     timeouts_left -= 1
-                    print(f"[write_slot_packet] Warning: sign did not confirm {label} on attempt {attempt}, retrying in 0.25s...")
+                    print(f"[write_slot_packet] Warning: sign did not confirm {label} on attempt {attempt}, refreshing notifications and retrying in 0.25s...")
+                    await _resubscribe_notifications()
                     await asyncio.sleep(0.25)
                     continue
                 raise RuntimeError(f"Sign did not confirm {label}; the transfer was stopped before saving")
@@ -527,6 +615,7 @@ _auth_reply_sno: Optional[int] = None
 # Slot-transfer packets awaiting the sign's status reply, keyed by SNO.
 _slot_ack_waiters: dict = {}
 SLOT_ACK_TIMEOUT = 4.0
+SLOT_START_ACK_TIMEOUT = 5.0
 password_enabled: Optional[bool] = None
 password_command_lock = asyncio.Lock()
 password_diagnostic_notifications = 0
@@ -4701,12 +4790,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                 # Turn off physical screen display and cancel background playback while saving to hardware flash.
                 # When the screen is powered off, the MCU does not read SPI flash to refresh the matrix,
                 # completely eliminating SPI read/write bus contention and guaranteeing a solid black screen.
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
-                await asyncio.sleep(0.02)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-                await asyncio.sleep(0.02)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(False), response=True)
-                await asyncio.sleep(0.1)
+                await _prepare_sign_for_slot_transfer()
 
                 if is_anim:
                     # Animated GIF/video and animated text:
@@ -4717,8 +4801,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     stay_time = 0
 
                     await check_save_cancelled()
-                    init_pkt = protocol.build_slot_session_init(slot_id)
-                    await write_slot_packet(init_pkt, "the transfer start", retries=1)
+                    await _start_slot_transfer_session(slot_id)
                     await asyncio.sleep(0.05)
 
                     hdr_pkt = protocol.build_slot_file_header(slot_id, anim_code=anim_code, speed_val=speed_val, stay_time=stay_time)
@@ -4769,8 +4852,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     ystp_bytes = ystp_header + frame_bytes
 
                     await check_save_cancelled()
-                    init_pkt = protocol.build_slot_session_init(slot_id)
-                    await write_slot_packet(init_pkt, "the transfer start", retries=1)
+                    await _start_slot_transfer_session(slot_id)
                     await asyncio.sleep(0.05)
 
                     hdr_pkt = protocol.build_slot_file_header(slot_id, anim_code=anim_code, speed_val=speed_val, stay_time=stay_time)

@@ -58,6 +58,7 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
             "ble_lock": asyncio.Lock(),
             "notification_buffer": bytearray(),
             "SLOT_ACK_TIMEOUT": 0.05,
+            "SLOT_START_ACK_TIMEOUT": 0.05,
         }.items():
             patcher = patch.object(main, name, value)
             patcher.start()
@@ -256,6 +257,61 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
             await main.erase_hardware_slot(1)
         self.assertEqual(error.exception.status_code, 422)
         self.assertEqual(main.connected_client.writes, [])
+
+    async def test_resubscribes_notifications_when_transfer_start_times_out(self):
+        class StaleNotifySign(FakeSign):
+            def __init__(self):
+                super().__init__(silent=True)
+                self.notify_refreshes = 0
+
+            async def stop_notify(self, uuid):
+                pass
+
+            async def start_notify(self, uuid, callback):
+                self.notify_refreshes += 1
+                self.silent = False
+
+        sign = StaleNotifySign()
+        main.connected_client = sign
+        main.notification_buffer.extend(b"\xaa\x55\xff\xff\xfe\x0fpartial")
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            await main._start_slot_transfer_session(0)
+        self.assertEqual(sign.notify_refreshes, 1)
+        self.assertEqual(len(main.notification_buffer), 0)
+
+    async def test_reconnects_stale_ble_session_when_resubscribe_is_insufficient(self):
+        class WedgedSign(FakeSign):
+            def __init__(self):
+                super().__init__(silent=True)
+                self.disconnected = False
+
+            async def stop_notify(self, uuid):
+                pass
+
+            async def start_notify(self, uuid, callback):
+                pass
+
+            async def disconnect(self):
+                self.disconnected = True
+                self.is_connected = False
+
+        stale_sign = WedgedSign()
+        fresh_sign = FakeSign(silent=False)
+        main.connected_client = stale_sign
+
+        async def fake_connect(req, background=False, intent=None):
+            main.connected_client = fresh_sign
+            main.connection_ready = True
+            return {"status": "success"}
+
+        with patch.object(main, "_connect_internal", side_effect=fake_connect) as mock_connect, \
+             patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            await main._start_slot_transfer_session(0)
+
+        self.assertTrue(stale_sign.disconnected)
+        mock_connect.assert_awaited_once()
+        self.assertIs(main.connected_client, fresh_sign)
+        self.assertGreaterEqual(len(fresh_sign.writes), 4)
 
 
 if __name__ == "__main__":
