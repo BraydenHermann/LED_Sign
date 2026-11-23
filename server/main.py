@@ -248,24 +248,25 @@ async def _resubscribe_notifications() -> bool:
 
 
 async def _prepare_sign_for_slot_transfer():
-    """Stop playback/clock and power off the panel to avoid SPI flash contention."""
+    """Power off the panel first, then stop playback/clock to avoid SPI flash contention and ATOTO fallback."""
+    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(False), response=True)
+    await asyncio.sleep(0.02)
     await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
     await asyncio.sleep(0.02)
     await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
-    await asyncio.sleep(0.02)
-    await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(False), response=True)
     await asyncio.sleep(0.1)
 
 
 async def _reconnect_stale_ble_session() -> bool:
     """Force a fresh BLE connection when the sign stops confirming slot transfers."""
-    global connected_client, connection_ready, _suppress_auto_reconnect
+    global connected_client, connection_ready, _suppress_auto_reconnect, _reconnecting_for_transfer_mac
     client = connected_client
     target_mac = (getattr(client, "address", None) or last_connected_mac or "").strip().upper()
     if not target_mac or not client or not callable(getattr(client, "disconnect", None)):
         return False
     print(f"[BLE] Transfer start unconfirmed; reconnecting stale BLE session to {target_mac}...")
     _suppress_auto_reconnect = True
+    _reconnecting_for_transfer_mac = target_mac
     connection_ready = False
     try:
         if getattr(client, "is_connected", False):
@@ -283,17 +284,46 @@ async def _reconnect_stale_ble_session() -> bool:
         connected_client = None
     await asyncio.sleep(0.5)
     try:
-        await _connect_internal(ConnectRequest(address=target_mac), background=False, intent=_connection_intent)
+        res = await _connect_internal(ConnectRequest(address=target_mac), background=False, intent=_connection_intent)
+        if isinstance(res, dict) and res.get("notifications_ok") is False:
+            print(f"[BLE] Reconnected to {target_mac}, but NOTIFY_UUID is still silent; aborting slot transfer.")
+            return False
         return bool(connected_client and getattr(connected_client, "is_connected", False))
     except Exception as e:
         _suppress_auto_reconnect = False
         print(f"[BLE] Reconnect for slot transfer failed: {e}")
         return False
+    finally:
+        _reconnecting_for_transfer_mac = None
+
+
+def _mark_slot_transfer_opened(slot_id: int):
+    """Record that CMD=0x08 opened slot_id in flash, invalidating its previous hardware content until commit."""
+    mac_str = ((getattr(connected_client, "address", None) if connected_client else "") or last_connected_mac or "").replace(":", "").lower()
+    if mac_str:
+        _uncommitted_hw_slots.add((mac_str, slot_id))
+    if 0 <= slot_id < MAX_HW_SLOTS:
+        hardware_slots_state[slot_id] = {"slot_id": slot_id, "occupied": False, "key": ""}
+
+
+async def _ensure_notifications_ready_for_transfer():
+    """Verify NOTIFY_UUID is alive before blanking the panel or sending CMD=0x08 (which wipes the target slot)."""
+    global _ble_notifications_healthy
+    if _ble_notifications_healthy:
+        return
+    print("[BLE] Notifications were silent on connect; probing sign before starting slot transfer...")
+    await _resubscribe_notifications()
+    if await _read_sign_password_state() is not None or _ble_notifications_healthy:
+        _ble_notifications_healthy = True
+        return
+    if not await _reconnect_stale_ble_session() or not _ble_notifications_healthy:
+        raise RuntimeError("Sign did not confirm the transfer start; the transfer was stopped before saving")
 
 
 async def _start_slot_transfer_session(slot_id: int):
     """Send CMD=0x08 transfer start, reconnecting once if the BLE session is stale."""
     init_pkt = protocol.build_slot_session_init(slot_id)
+    _mark_slot_transfer_opened(slot_id)
     try:
         await write_slot_packet(init_pkt, "the transfer start", retries=1)
     except RuntimeError as exc:
@@ -303,6 +333,7 @@ async def _start_slot_transfer_session(slot_id: int):
             raise
         await _prepare_sign_for_slot_transfer()
         init_pkt = protocol.build_slot_session_init(slot_id)
+        _mark_slot_transfer_opened(slot_id)
         await write_slot_packet(init_pkt, "the transfer start", retries=0)
 
 
@@ -347,8 +378,10 @@ async def write_slot_packet(packet: bytes, label: str, large: bool = False, retr
         finally:
             _slot_ack_waiters.pop(sno, None)
 
-async def query_slot_inventory():
+async def query_slot_inventory() -> bool:
     """Refresh hardware_slots_state for every slot from the sign itself."""
+    global _inventory_loaded_for_mac
+    any_replied = False
     for start in range(0, MAX_HW_SLOTS, SLOT_QUERY_BATCH):
         packet = protocol.build_query_slots_command(start, min(SLOT_QUERY_BATCH, MAX_HW_SLOTS - start))
         sno = struct.unpack('<H', packet[6:8])[0]
@@ -357,10 +390,16 @@ async def query_slot_inventory():
         try:
             await safe_write_gatt_char(protocol.WRITE_UUID, packet, response=True)
             await asyncio.wait_for(waiter, timeout=2.0)
+            any_replied = True
         except asyncio.TimeoutError:
             print(f"[slots] No inventory reply for slots {start}-{start + SLOT_QUERY_BATCH - 1}")
         finally:
             _inventory_waiters.pop(sno, None)
+    if any_replied:
+        cur_mac = ((getattr(connected_client, "address", None) if connected_client else "") or last_connected_mac or "").replace(":", "").lower()
+        if cur_mac:
+            _inventory_loaded_for_mac = cur_mac
+    return any_replied
 
 async def stop_all_playback(blank: bool = False):
     """Halts the onboard hardware playlist engine, active slot playback, and clock."""
@@ -402,7 +441,9 @@ async def show_event_in_slot_one(sign_mac: str, summary: str, end_iso: str):
             cached_text = (_json.load(f).get("text") or "").strip()
     except (OSError, ValueError):
         pass
-    if cached_text == text:
+    if cached_text == text and (mac_str, 0) not in _uncommitted_hw_slots and (
+        _inventory_loaded_for_mac != mac_str or hardware_slots_state.get(0, {}).get("occupied")
+    ):
         async with preset_switch_lock:
             require_connected_sign(sign_mac)
             await _play_preset(0, sign_mac)
@@ -624,8 +665,14 @@ password_diagnostic_notifications = 0
 last_connected_mac: str = ""
 _reconnect_task: Optional[asyncio.Task] = None
 _suppress_auto_reconnect: bool = False
+_reconnecting_for_transfer_mac: Optional[str] = None
 _connection_intent: int = 0
 _session_passcodes: Dict[str, str] = {}
+_uncommitted_hw_slots: set = set()
+_inventory_loaded_for_mac: str = ""
+_ble_notifications_healthy: bool = True
+_last_ble_notification_monotonic: float = 0.0
+_consecutive_silent_connects: int = 0
 SERVER_SESSION_ID: str = str(uuid.uuid4())
 
 
@@ -686,8 +733,10 @@ async def _auto_reconnect(mac: str, delay: float = 4.0, intent: Optional[int] = 
     _reconnect_task = None
 
 def notification_handler(sender, data: bytearray):
-    global hardware_slots_state, notification_buffer, _auth_reply_waiter, _auth_reply_sno, connected_device_id, password_enabled, password_diagnostic_notifications
+    global hardware_slots_state, notification_buffer, _auth_reply_waiter, _auth_reply_sno, connected_device_id, password_enabled, password_diagnostic_notifications, _ble_notifications_healthy, _last_ble_notification_monotonic, _inventory_loaded_for_mac
     try:
+        _ble_notifications_healthy = True
+        _last_ble_notification_monotonic = time.monotonic()
         if password_diagnostic_notifications < 20:
             print(f"[BLE notify] bytes={len(data)} prefix={bytes(data[:2]).hex()}")
             password_diagnostic_notifications += 1
@@ -773,6 +822,9 @@ def notification_handler(sender, data: bytearray):
                 else:
                     entries = b''
 
+                cur_mac = ((getattr(connected_client, "address", None) if connected_client else "") or last_connected_mac or "").replace(":", "").lower()
+                if cur_mac:
+                    _inventory_loaded_for_mac = cur_mac
                 i = 0
                 while i + 21 <= len(entries):
                     s_id = entries[i]
@@ -784,6 +836,8 @@ def notification_handler(sender, data: bytearray):
                             "occupied": is_occ,
                             "key": s_key.hex()
                         }
+                        if cur_mac and is_occ:
+                            _uncommitted_hw_slots.discard((cur_mac, s_id))
                     i += 21
                 occ_slots = [s for s, v in hardware_slots_state.items() if v.get("occupied")]
                 print(f"[notification_handler] Hardware slot inventory updated. Occupied slots: {occ_slots}")
@@ -1751,8 +1805,8 @@ async def get_status():
     global connected_client, connection_ready, frames_sent, current_display_mode, current_width, current_speed, brightness, power
     global current_clock_color, current_clock_bg_color, current_clock_format, current_clock_show_seconds, current_clock_style
     
-    connected = connected_client is not None and connected_client.is_connected and connection_ready
-    address = connected_client.address if connected else None
+    connected = (connected_client is not None and connected_client.is_connected and connection_ready) or bool(_reconnecting_for_transfer_mac)
+    address = (connected_client.address if (connected_client is not None and connected_client.is_connected and connection_ready) else _reconnecting_for_transfer_mac) if connected else None
     
     preview_url = None
     preview_ts = 0
@@ -1817,7 +1871,7 @@ connect_lock = asyncio.Lock()
 
 async def _connect_internal(req: ConnectRequest, background: bool = False, intent: Optional[int] = None):
     async with connect_lock:
-        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode, _session_passcodes
+        global connected_client, connection_ready, _suppress_auto_reconnect, connected_device_id, password_enabled, notification_buffer, password_diagnostic_notifications, last_connected_mac, current_display_mode, _session_passcodes, _ble_notifications_healthy, _consecutive_silent_connects, _inventory_loaded_for_mac
         if intent is not None and intent != _connection_intent:
             raise HTTPException(status_code=409, detail="Connection replaced by a newer request")
         if background and (_suppress_auto_reconnect or (connected_client and connected_client.is_connected)):
@@ -1996,6 +2050,7 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
             if previous_sign_mac and (client_address or "").upper() != previous_sign_mac:
                 current_display_mode = "none"
                 hardware_slots_state.clear()
+                _inventory_loaded_for_mac = ""
 
             # Subscribe to notifications for slot query replies
             # Never carry an incomplete frame from a previous BLE session
@@ -2038,6 +2093,9 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
                 raise PasscodeRequiredError(auth_result["error_code"] if auth_rejected else 14)
             if auth_result is None and reported_password is None:
                 print("[connect] Sign did not answer password queries; status remains unknown")
+                if password_diagnostic_notifications == 0:
+                    await _resubscribe_notifications()
+                    reported_password = await _read_sign_password_state()
             if auth_result is not None and not auth_result["ok"]:
                 raise RuntimeError(f"Sign rejected the device-info request (error {auth_result['error_code']})")
 
@@ -2056,10 +2114,27 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
 
             # Preserve the sign's current onboard playback across BLE reconnects
             # instead of re-sending slot play commands or halting playback.
+            inventory_replied = False
             try:
-                await query_slot_inventory()
+                inventory_replied = bool(await query_slot_inventory())
             except Exception as se:
                 print(f"[connect] Warning initializing slots: {se}")
+
+            notifications_ok = bool(
+                password_diagnostic_notifications > 0
+                or auth_result is not None
+                or reported_password is not None
+                or inventory_replied
+            )
+            _ble_notifications_healthy = notifications_ok
+            if notifications_ok:
+                _consecutive_silent_connects = 0
+            else:
+                _consecutive_silent_connects += 1
+                print(f"[connect] Warning: zero BLE notifications received during connect handshake (consecutive silent connects: {_consecutive_silent_connects})")
+                if _consecutive_silent_connects >= 2 and "unittest" not in sys.modules:
+                    print("[connect] WinRT GATT notification channel unresponsive across reconnects. Restarting server to reset Bluetooth COM apartment...", flush=True)
+                    asyncio.get_event_loop().call_later(0.5, lambda: os._exit(1))
 
             if intent is not None and intent != _connection_intent:
                 raise ConnectSupersededError()
@@ -2072,7 +2147,7 @@ async def _connect_internal(req: ConnectRequest, background: bool = False, inten
                 if client_address:
                     _session_passcodes[client_address.upper()] = passcode
             passcode_status = ("enabled" if reported_password else "disabled") if reported_password is not None else ("authenticated" if auth_result is not None and auth_result["ok"] else "unknown")
-            return {"status": "success", "address": client_address, "passcode_status": passcode_status}
+            return {"status": "success", "address": client_address, "passcode_status": passcode_status, "notifications_ok": notifications_ok}
         except ConnectSupersededError:
             _suppress_auto_reconnect = True
             if client is not None and client.is_connected:
@@ -2119,6 +2194,15 @@ async def connect(req: ConnectRequest):
     global _suppress_auto_reconnect, _connection_intent, _reconnect_task
     target_mac = (req.address or "").strip().upper()
     passcode = (req.passcode or "").strip()
+    if (
+        not passcode
+        and (hardware_saving or _reconnecting_for_transfer_mac)
+        and (not target_mac or target_mac == (last_connected_mac or _reconnecting_for_transfer_mac or "").upper())
+    ):
+        async with preset_switch_lock:
+            if connected_client and connected_client.is_connected and connection_ready:
+                if not target_mac or (connected_client.address and connected_client.address.upper() == target_mac):
+                    return {"status": "success", "connected": True, "address": connected_client.address}
     if (
         not passcode
         and _reconnect_task is not None
@@ -2313,7 +2397,7 @@ def _build_hardware_slots_json(current_mac: str, slots_state: Dict[int, dict]) -
         slot_info["slot_id"] = slot_id
         # What the sign's own inventory reports, independent of local caches;
         # programs saved by the LOY SPACE app have no cached preview here.
-        slot_info["on_sign"] = bool(slot_data.get("occupied"))
+        slot_info["on_sign"] = bool(slot_data.get("occupied")) and (current_mac, slot_id) not in _uncommitted_hw_slots
 
         json_path = None
         gif_path = None
@@ -2466,9 +2550,27 @@ async def _play_preset(id: int, mac: str = ""):
         if not 0 <= id < MAX_HW_SLOTS:
             raise HTTPException(status_code=422, detail=f"Slot {id + 1} does not exist on this sign")
         on_sign_only = not os.path.exists(json_path) and not os.path.exists(gif_path)
+        slot_missing_on_sign = (mac_str, id) in _uncommitted_hw_slots or (
+            _inventory_loaded_for_mac == mac_str and not hardware_slots_state.get(id, {}).get("occupied")
+        )
         # Slots filled by the LOY SPACE app have no local cache; play them
         # from the sign without updating the preview.
-        if on_sign_only and not hardware_slots_state.get(id, {}).get("occupied"):
+        if on_sign_only and (not hardware_slots_state.get(id, {}).get("occupied") or (mac_str, id) in _uncommitted_hw_slots):
+            raise HTTPException(status_code=404, detail=f"Slot {id + 1} has no saved preset")
+        if slot_missing_on_sign and os.path.exists(json_path):
+            with open(json_path, "r") as fj:
+                cached_preset_data = _json.load(fj)
+            if cached_preset_data.get("mode") != "clock":
+                print(f"[_play_preset] Slot {id} is not committed on sign {mac_str}; uploading cached preset before playing...")
+                await _save_preset(SavePresetRequest(
+                    slot_id=id,
+                    address=mac or (connected_client.address if connected_client else ""),
+                    preset=PushTextRequest(**cached_preset_data),
+                    is_currently_playing=True,
+                    activate_on_save=True,
+                ))
+                return {"status": "success"}
+        elif slot_missing_on_sign and not os.path.exists(json_path):
             raise HTTPException(status_code=404, detail=f"Slot {id + 1} has no saved preset")
         current_display_mode = f"preset-{id}"
 
@@ -2538,11 +2640,10 @@ async def _play_preset(id: int, mac: str = ""):
         frames_sent += 1
 
         if connected_client and connected_client.is_connected and connection_ready:
-            # Halt any active playlist engine and clock before selecting new slot
+            # Turn off clock before selecting new slot; do not send stop_playlist_command()
+            # while the panel is on, as halting playback without an active slot triggers ATOTO fallback.
             try:
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
-                await asyncio.sleep(0.03)
-                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.stop_playlist_command(), response=True)
                 await asyncio.sleep(0.03)
                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.clock_off_command(), response=True)
                 await asyncio.sleep(0.03)
@@ -4782,14 +4883,18 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
             raise HTTPException(status_code=409, detail="The selected sign changed before the slot transfer")
         require_connected_sign(req.address)
         if connected_client and connected_client.is_connected and connection_ready:
+            screen_prepared_for_transfer = False
             try:
                 speed = preset.speed if preset.speed is not None else current_speed
                 speed = max(1, min(15, speed))
+
+                await _ensure_notifications_ready_for_transfer()
 
                 # Blank screen to black and halt onboard playback while saving to hardware flash.
                 # Turn off physical screen display and cancel background playback while saving to hardware flash.
                 # When the screen is powered off, the MCU does not read SPI flash to refresh the matrix,
                 # completely eliminating SPI read/write bus contention and guaranteeing a solid black screen.
+                screen_prepared_for_transfer = True
                 await _prepare_sign_for_slot_transfer()
 
                 if is_anim:
@@ -4827,6 +4932,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     await asyncio.sleep(0.1)
                     commit_pkt = protocol.build_slot_commit(slot_id, slot_payload)
                     await write_slot_packet(commit_pkt, "the slot commit")
+                    _uncommitted_hw_slots.discard((mac_str, slot_id))
                     await asyncio.sleep(0.2)
                     report_progress(95, "Finalizing on sign")
 
@@ -4878,6 +4984,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     await asyncio.sleep(0.05)
                     commit_pkt = protocol.build_slot_commit(slot_id, ystp_bytes)
                     await write_slot_packet(commit_pkt, "the slot commit")
+                    _uncommitted_hw_slots.discard((mac_str, slot_id))
                     await asyncio.sleep(0.1)
                     report_progress(95, "Finalizing on sign")
 
@@ -4908,12 +5015,24 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     current_display_mode = f"preset-{slot_id}"
                 else:
                     if prev_display_mode == f"preset-{slot_id}":
-                        # If previously showing this slot, make screen black
-                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(False), response=True)
-                        current_display_mode = "blank"
+                        # If previously showing this slot, play the newly committed slot rather than leaving screen blank/unselected
+                        select_pkt = protocol.build_slot_select_command(slot_id)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                        await asyncio.sleep(0.05)
+                        play_pkt = protocol.build_user_slot_play_command(slot_id, loop_mode=1)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+                        await asyncio.sleep(0.05)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
+                        if brightness != 15:
+                            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
+                        current_display_mode = f"preset-{slot_id}"
                     elif prev_display_mode and prev_display_mode.startswith("preset-"):
                         try:
                             prev_slot = int(prev_display_mode.split("-")[1])
+                            if (mac_str, prev_slot) in _uncommitted_hw_slots or (
+                                _inventory_loaded_for_mac == mac_str and not hardware_slots_state.get(prev_slot, {}).get("occupied")
+                            ):
+                                prev_slot = 1
                             select_pkt = protocol.build_slot_select_command(prev_slot)
                             await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
                             await asyncio.sleep(0.05)
@@ -4925,7 +5044,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                             if brightness != 15:
                                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
                                 await asyncio.sleep(0.05)
-                            current_display_mode = prev_display_mode
+                            current_display_mode = f"preset-{prev_slot}"
                         except Exception as restore_err:
                             print(f"[save_preset] Failed to restore previous preset: {restore_err}")
                     elif prev_display_mode == "clock":
@@ -4937,7 +5056,19 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                         except Exception as restore_err:
                             print(f"[save_preset] Failed to restore clock: {restore_err}")
                     else:
-                        current_display_mode = prev_display_mode or "blank"
+                        try:
+                            select_pkt = protocol.build_slot_select_command(1)
+                            await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                            await asyncio.sleep(0.05)
+                            play_pkt = protocol.build_user_slot_play_command(1, loop_mode=1)
+                            await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+                            await asyncio.sleep(0.05)
+                            await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
+                            if brightness != 15:
+                                await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
+                            current_display_mode = "preset-1"
+                        except Exception as restore_err:
+                            print(f"[save_preset] Failed to restore default slot 1: {restore_err}")
 
                 print(f"[save_preset] Done. Slot {slot_id} saved (is_anim={is_anim}, activated={activate}).")
                 written_to_sign = True
@@ -4948,6 +5079,19 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                     try:
                         await safe_write_gatt_char(protocol.WRITE_UUID, protocol.cancel_playlist_command(), response=True)
                         await asyncio.sleep(0.02)
+                        restore_slot = 1
+                        if prev_display_mode and prev_display_mode.startswith("preset-") and prev_display_mode != f"preset-{slot_id}":
+                            cand = int(prev_display_mode.split("-")[1])
+                            if (mac_str, cand) not in _uncommitted_hw_slots and (
+                                _inventory_loaded_for_mac != mac_str or hardware_slots_state.get(cand, {}).get("occupied")
+                            ):
+                                restore_slot = cand
+                        select_pkt = protocol.build_slot_select_command(restore_slot)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
+                        await asyncio.sleep(0.05)
+                        play_pkt = protocol.build_user_slot_play_command(restore_slot, loop_mode=1)
+                        await safe_write_gatt_char(protocol.WRITE_UUID, play_pkt, response=True)
+                        await asyncio.sleep(0.05)
                         await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
                         if brightness != 15:
                             await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
@@ -4956,11 +5100,15 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                 raise HTTPException(status_code=499, detail="Save cancelled by user")
             except Exception as e:
                 print(f"[save_preset] Error: {e}")
-                # If save failed, recover display state so the physical sign is not left black
-                if connected_client and connected_client.is_connected:
+                # If save failed after blanking the screen, recover display state so the physical sign is not left black
+                if screen_prepared_for_transfer and connected_client and connected_client.is_connected:
                     try:
                         if prev_display_mode and prev_display_mode.startswith("preset-") and prev_display_mode != f"preset-{slot_id}":
                             prev_slot = int(prev_display_mode.split("-")[1])
+                            if (mac_str, prev_slot) in _uncommitted_hw_slots or (
+                                _inventory_loaded_for_mac == mac_str and not hardware_slots_state.get(prev_slot, {}).get("occupied")
+                            ):
+                                prev_slot = 1
                             select_pkt = protocol.build_slot_select_command(prev_slot)
                             await safe_write_gatt_char(protocol.WRITE_UUID, select_pkt, response=True)
                             await asyncio.sleep(0.05)
@@ -4970,7 +5118,7 @@ async def _save_preset(req: SavePresetRequest, request: Request = None):
                             await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
                             if brightness != 15:
                                 await safe_write_gatt_char(protocol.WRITE_UUID, protocol.brightness_command(brightness), response=True)
-                            current_display_mode = prev_display_mode
+                            current_display_mode = f"preset-{prev_slot}"
                         elif prev_display_mode == "clock":
                             await safe_write_gatt_char(protocol.WRITE_UUID, protocol.power_command(True), response=True)
                             await asyncio.sleep(0.05)

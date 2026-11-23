@@ -3476,9 +3476,11 @@ export default function App() {
                 }
                 if (pData || previewUrl) {
                   const slot0Text = normalizeForSign((pData?.text || pData?.name || '').trim());
-                  if (slot0Text) {
+                  if (slot0Text && s.on_sign !== false) {
                     localStorage.setItem('loy_hw_cal_synced_' + activeMac, 'true');
                     localStorage.setItem('loy_hw_cal_text_' + activeMac, slot0Text);
+                  } else if (s.on_sign === false) {
+                    localStorage.removeItem('loy_hw_cal_synced_' + activeMac);
                   }
                   const hwPreset = {
                     ...(pData || {}),
@@ -3804,7 +3806,6 @@ export default function App() {
           }
           return;
         }
-        setLastPushedId(targetId);
       } else if (pendingNewDayDefaultPushRef.current) {
         pendingNewDayDefaultPushRef.current = false;
       }
@@ -3926,10 +3927,14 @@ export default function App() {
         }
       } catch (err) {
         console.warn('[auto-pre-save] Failed to pre-save next event to Slot 1:', err);
+        localStorage.removeItem('loy_hw_cal_synced_' + targetMac);
         const detail = err.response?.data?.detail || err.message || 'Failed to save event';
         if (String(detail).includes('(error 14)')) {
           slotUploadsBlockedRef.current = true;
           handleSetPushMessage('The sign is refusing saves. Power cycle the sign to save events to slot 1.');
+        } else if (String(detail).includes('did not confirm the transfer start')) {
+          slotUploadsBlockedRef.current = true;
+          handleSetPushMessage(`Error saving event: ${detail}`);
         } else {
           handleSetPushMessage(`Error saving event: ${detail}`);
         }
@@ -4337,6 +4342,7 @@ export default function App() {
             showPresetNotification(true, data.text || pushName || 'Event');
           } catch (saveErr) {
             console.warn('[push-event] Saved preset to slot 0 error:', saveErr);
+            localStorage.removeItem('loy_hw_cal_synced_' + targetMac);
             const saveDetail = saveErr.response?.data?.detail || saveErr.message || '';
             if (!manual && autoTargetId) {
               autoPushFailedRef.current = { id: autoTargetId, time: Date.now() };

@@ -59,6 +59,9 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
             "notification_buffer": bytearray(),
             "SLOT_ACK_TIMEOUT": 0.05,
             "SLOT_START_ACK_TIMEOUT": 0.05,
+            "_uncommitted_hw_slots": set(),
+            "_inventory_loaded_for_mac": "",
+            "_ble_notifications_healthy": True,
         }.items():
             patcher = patch.object(main, name, value)
             patcher.start()
@@ -312,6 +315,52 @@ class PresetRegressionTests(unittest.IsolatedAsyncioTestCase):
         mock_connect.assert_awaited_once()
         self.assertIs(main.connected_client, fresh_sign)
         self.assertGreaterEqual(len(fresh_sign.writes), 4)
+
+    async def test_playing_slot_after_aborted_transfer_resaves_cached_preset_instead_of_playing_empty_slot(self):
+        # Simulate Friday's cached Slot 0 on disk, followed by an aborted Monday save
+        # that sent CMD=0x08 (opening/wiping Slot 0 on the sign) and timed out.
+        cached_json = Path(self.directory.name) / "preset_aabbccddeeff_0.json"
+        cached_json.write_text(json.dumps({"mode": "text", "text": "Board Review 12:00", "animation": "continuous left shift"}))
+        main.connected_client = FakeSign(silent=True)
+        req = main.SavePresetRequest(
+            slot_id=0,
+            address=FakeSign.address,
+            preset=main.PushTextRequest(mode="text", text="New Event", animation="continuous left shift"),
+        )
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(HTTPException):
+                await main.save_preset(req)
+
+        self.assertIn(("aabbccddeeff", 0), main._uncommitted_hw_slots)
+        self.assertFalse(main.hardware_slots_state[0]["occupied"])
+
+        # Now when the sign recovers notifications and /preset?id=0 is called,
+        # it must upload & commit the cached preset rather than playing the wiped slot (which flashes ATOTO).
+        healthy_sign = FakeSign(silent=False)
+        main.connected_client = healthy_sign
+        with patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            res = await main.play_preset(0, mac=FakeSign.address)
+        self.assertEqual(res["status"], "success")
+        self.assertNotIn(("aabbccddeeff", 0), main._uncommitted_hw_slots)
+        self.assertTrue(main.hardware_slots_state[0]["occupied"])
+        commit_tag = bytes([0x35, 0x19, 0x00])
+        self.assertTrue(any(commit_tag in w for w in healthy_sign.writes))
+
+    async def test_silent_connect_notifications_abort_before_wiping_slot(self):
+        # When _connect_internal received 0 notifications (_ble_notifications_healthy=False),
+        # save_preset must not blank the panel or send CMD=0x08 if notifications remain dead.
+        silent_sign = FakeSign(silent=True)
+        main.connected_client = silent_sign
+        main._ble_notifications_healthy = False
+        with patch.object(main, "_reconnect_stale_ble_session", new=AsyncMock(return_value=False)), \
+             patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            with self.assertRaises(HTTPException) as error:
+                await main.save_preset(self.request())
+        self.assertIn("did not confirm", error.exception.detail)
+        # Ensure CMD=0x08 (build_slot_session_init) was never sent to wipe slot 8
+        init_tag = bytes([0x08, 0x02, 0x00, 8])
+        self.assertFalse(any(init_tag in w for w in silent_sign.writes))
+        self.assertNotIn(("aabbccddeeff", 8), main._uncommitted_hw_slots)
 
 
 if __name__ == "__main__":
