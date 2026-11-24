@@ -81,6 +81,74 @@ def clean_event_summary(summary: str, user_name: str = None) -> str:
     cleaned = ''.join(c for c in unicodedata.normalize('NFD', cleaned) if unicodedata.category(c) != 'Mn')
     return cleaned.strip() or "Untitled"
 
+
+_TRANSIENT_ERROR_TYPE_NAMES = {
+    "TransportError",
+    "SSLError",
+    "SSLEOFError",
+    "ConnectionError",
+    "ConnectionResetError",
+    "ConnectionAbortedError",
+    "BrokenPipeError",
+    "Timeout",
+    "TimeoutError",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "MaxRetryError",
+    "ProtocolError",
+    "RemoteDisconnected",
+    "ChunkedEncodingError",
+    "NewConnectionError",
+    "NameResolutionError",
+    "gaierror",
+}
+
+_TRANSIENT_ERROR_PATTERNS = (
+    "httpsconnectionpool",
+    "ssl:",
+    "sslerror",
+    "ssleoferror",
+    "eof occurred in violation of protocol",
+    "unexpected_eof_while_reading",
+    "max retries exceeded",
+    "connection aborted",
+    "connection reset",
+    "connection refused",
+    "remote end closed connection",
+    "server disconnected",
+    "timed out",
+    "read timed out",
+    "connect timeout",
+    "temporary failure in name resolution",
+    "getaddrinfo failed",
+    "name or service not known",
+    "network is unreachable",
+    "incomplete read",
+)
+
+
+def is_transient_network_error(err: Optional[BaseException]) -> bool:
+    """Return True when an exception from Google OAuth / API transport is a
+    transient network, DNS, socket, or TLS error rather than an expired/revoked
+    OAuth grant."""
+    seen = set()
+    cur = err
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        text_lower = str(cur).lower()
+        if "invalid_grant" in text_lower or "invalid_client" in text_lower or "unauthorized_client" in text_lower:
+            return False
+        if isinstance(cur, (TimeoutError, ConnectionError)):
+            return True
+        for cls in type(cur).__mro__:
+            if cls.__name__ in _TRANSIENT_ERROR_TYPE_NAMES:
+                return True
+        if any(pat in text_lower for pat in _TRANSIENT_ERROR_PATTERNS):
+            return True
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
+
+
 class CalendarService:
     def __init__(self, credentials_path="credentials.json", token_path="token.json"):
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -95,6 +163,7 @@ class CalendarService:
         self._last_code_verifier = None
         self._state_storage_path = os.path.join(base_dir, ".oauth_pending.json")
         self._schedule_lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
         self._schedule_cache = {}
         self._cache_ttl = 15
         self._service = None
@@ -105,10 +174,37 @@ class CalendarService:
             except Exception:
                 pass
 
-    def _ensure_valid(self):
-        if self.creds and self.creds.expired and self.creds.refresh_token:
+    def _refresh_creds_with_retry(self, creds, max_attempts: int = 3):
+        last_err = None
+        for attempt in range(max_attempts):
+            req = Request()
             try:
-                self.creds.refresh(Request())
+                creds.refresh(req)
+                return
+            except Exception as err:
+                last_err = err
+                if attempt + 1 < max_attempts and is_transient_network_error(err):
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                raise
+            finally:
+                session = getattr(req, "session", None)
+                if session is not None and hasattr(session, "close"):
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+        if last_err is not None:
+            raise last_err
+
+    def _ensure_valid(self):
+        if not (self.creds and (self.creds.expired or not self.creds.valid) and self.creds.refresh_token):
+            return
+        with self._refresh_lock:
+            if not (self.creds and (self.creds.expired or not self.creds.valid) and self.creds.refresh_token):
+                return
+            try:
+                self._refresh_creds_with_retry(self.creds)
                 with open(self.token_path, 'w') as f:
                     f.write(self.creds.to_json())
                 self._service = None
@@ -116,7 +212,7 @@ class CalendarService:
                 # If refresh failed with invalid_scope, fallback to reloading directly from token.json
                 if "invalid_scope" in str(e).lower() and os.path.exists(self.token_path):
                     self.creds = Credentials.from_authorized_user_file(self.token_path)
-                    self.creds.refresh(Request())
+                    self._refresh_creds_with_retry(self.creds)
                     with open(self.token_path, 'w') as f:
                         f.write(self.creds.to_json())
                     self._service = None

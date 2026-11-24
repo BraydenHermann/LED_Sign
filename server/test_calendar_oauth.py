@@ -88,6 +88,36 @@ class TestCalendarOAuth(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event_url"], "https://calendar.google.com/calendar/event?eid=ZXhhbXBsZWVpZDEyMw")
 
+    def test_ensure_valid_retries_transient_ssl_eof_error(self):
+        creds = MagicMock()
+        creds.expired = True
+        creds.valid = False
+        creds.refresh_token = "refresh_tok_123"
+        creds.to_json.return_value = '{"token": "refreshed"}'
+
+        attempts = {"count": 0}
+        ssl_eof_msg = (
+            "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): "
+            "Max retries exceeded with url: /token (Caused by SSLError(SSLEOFError(8, "
+            "'[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010)')))"
+        )
+
+        def fake_refresh(_req):
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError(ssl_eof_msg)
+            creds.expired = False
+            creds.valid = True
+
+        creds.refresh.side_effect = fake_refresh
+        self.service.creds = creds
+
+        with patch("calendar_service.time.sleep"):
+            self.service._ensure_valid()
+
+        self.assertEqual(attempts["count"], 2)
+        self.assertTrue(os.path.exists(self.token_path))
+
 
 if __name__ == '__main__':
     unittest.main()

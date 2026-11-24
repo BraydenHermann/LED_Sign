@@ -85,5 +85,27 @@ class SyncServiceTests(unittest.TestCase):
             self.assertEqual(json.load(f)["key"], "new")
 
 
+class SyncAuthErrorTests(unittest.TestCase):
+    def test_transient_ssl_error_during_token_refresh_reports_network_error_not_signed_out(self):
+        class FakeCreds:
+            valid = False
+
+        class FakeCalendarService:
+            creds = FakeCreds()
+
+            def _ensure_valid(self):
+                raise RuntimeError(
+                    "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): "
+                    "Max retries exceeded with url: /token (Caused by SSLError(SSLEOFError(8, "
+                    "'[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1010)')))"
+                )
+
+        real_sync = DriveSync(calendar_service=FakeCalendarService(), loy_session_path="unused.json")
+        with self.assertRaises(sync_service.SyncUnavailable) as ctx:
+            real_sync._drive()
+        self.assertEqual(ctx.exception.reason, "network_error")
+        self.assertNotIn("Google sign-in expired", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,8 @@ import threading
 from typing import Callable, Dict, Optional
 from urllib.parse import urlparse
 
+from calendar_service import is_transient_network_error
+
 DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 PHOTOS_PICKER_SCOPE = "https://www.googleapis.com/auth/photospicker.mediaitems.readonly"
 
@@ -99,6 +101,8 @@ class GoogleAccountMedia:
             if not service.creds.valid:
                 service._ensure_valid()
         except Exception as err:
+            if is_transient_network_error(err):
+                raise GoogleMediaUnavailable("error", f"Could not reach {PRODUCT_NAMES[product]}: {err}", status=502)
             raise GoogleMediaUnavailable("signed_out", f"Google sign-in expired: {err}")
         if not service.creds.valid:
             raise GoogleMediaUnavailable("signed_out", f"Sign in with Google to browse {PRODUCT_NAMES[product]}.")

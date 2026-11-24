@@ -142,6 +142,12 @@ const readSnapshot = () => {
 // applyPresetChanges on their latest list) and throws with `reason` when
 // Drive is unusable.
 export async function runSync(presets, apiBase = '') {
+  const wrapSyncError = (err) => {
+    const detail = err.response?.data?.detail;
+    const error = new Error(detail?.message || err.message);
+    error.reason = detail?.reason || 'error';
+    return error;
+  };
   const local = describeLocal({ presets, settings: readLocal(SYNCED_SETTINGS), secrets: readLocal(SYNCED_SECRETS) }, readSnapshot());
   let remote;
   try {
@@ -151,15 +157,16 @@ export async function runSync(presets, apiBase = '') {
       remote = { secrets: remote.secrets?.loySession ? { loySession: remote.secrets.loySession } : {}, needsPush: true };
     }
   } catch (err) {
-    const detail = err.response?.data?.detail;
-    const error = new Error(detail?.message || err.message);
-    error.reason = detail?.reason || 'error';
-    throw error;
+    throw wrapSyncError(err);
   }
   const plan = planSync(local, remote, Date.now());
   let downloaded = {};
   if (plan.download.length) {
-    downloaded = (await axios.post(`${apiBase}/sync/presets`, { ids: plan.download }, { timeout: 120000 })).data?.presets || {};
+    try {
+      downloaded = (await axios.post(`${apiBase}/sync/presets`, { ids: plan.download }, { timeout: 120000 })).data?.presets || {};
+    } catch (err) {
+      throw wrapSyncError(err);
+    }
     // A preset whose file is missing stays as it was locally.
     for (const id of plan.download) {
       if (!downloaded[id] && local.presets[id] && !local.presets[id].deleted) plan.manifest.presets[id] = local.presets[id];
@@ -173,7 +180,11 @@ export async function runSync(presets, apiBase = '') {
     !sameEntry(plan.manifest.order, remote.order) ||
     ['settings', 'secrets'].some(g => Object.keys(plan.manifest[g]).some(k => k !== 'loySession' && !sameEntry(plan.manifest[g][k], remote[g]?.[k])));
   if (changedRemote) {
-    await axios.post(`${apiBase}/sync/push`, { manifest: plan.manifest, presets: uploads }, { timeout: 120000 });
+    try {
+      await axios.post(`${apiBase}/sync/push`, { manifest: plan.manifest, presets: uploads }, { timeout: 120000 });
+    } catch (err) {
+      throw wrapSyncError(err);
+    }
   }
   writeLocal(plan.applySettings);
   writeLocal(plan.applySecrets);

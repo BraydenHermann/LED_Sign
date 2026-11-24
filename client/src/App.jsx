@@ -3079,9 +3079,13 @@ export default function App() {
       setSyncStatus({ state: 'ok', lastSync: Date.now() });
     } catch (e) {
       console.warn('[sync] Failed:', e);
-      // If network error/timeout on wake up, silently retry once after 5 seconds before showing an error banner
-      if (!isRetry && (e.message?.includes('timeout') || e.message?.includes('Network Error'))) {
+      // If network/SSL error or timeout on wake up, silently retry once after 5 seconds before showing an error banner
+      const isTransientError =
+        e.reason === 'network_error' ||
+        /timeout|Network Error|SSLError|SSLEOFError|UNEXPECTED_EOF|HTTPSConnectionPool|Max retries exceeded|Connection aborted|Connection reset|ECONNRESET|ETIMEDOUT/i.test(e.message || '');
+      if (!isRetry && isTransientError) {
         cloudSyncingRef.current = false;
+        setSyncStatus(prev => (prev.state === 'syncing' ? { ...prev, state: prev.lastSync ? 'ok' : 'idle' } : prev));
         setTimeout(() => {
           if (!cloudSyncingRef.current && statusRef.current?.calendar_connected) {
             runCloudSyncRef.current(true);

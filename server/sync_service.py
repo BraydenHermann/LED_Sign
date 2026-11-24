@@ -19,6 +19,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
+from calendar_service import is_transient_network_error
+
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
 MANIFEST_NAME = "manifest.json"
 LOY_SESSION_KEY = "loySession"
@@ -53,17 +55,23 @@ class DriveSync:
             if not service.creds.valid:
                 service._ensure_valid()
         except Exception as err:
+            if is_transient_network_error(err):
+                raise SyncUnavailable("network_error", f"Could not reach Google Drive: {err}")
             raise SyncUnavailable("signed_out", f"Google sign-in expired: {err}")
         return build("drive", "v3", credentials=service.creds, cache_discovery=False)
 
     @staticmethod
-    def _translate(err: HttpError) -> SyncUnavailable:
-        text = str(err)
-        if err.resp.status in (401, 403) and ("insufficient" in text.lower() or "scope" in text.lower()):
-            return SyncUnavailable("needs_permission", "Sign in with Google again to allow LED Sign to store its sync data in Drive.")
-        if err.resp.status == 403 and ("accessNotConfigured" in text or "has not been used" in text or "disabled" in text):
-            return SyncUnavailable("api_disabled", "Enable the Google Drive API for this app's Google Cloud project.")
-        return SyncUnavailable("error", f"Google Drive error: {err}")
+    def _translate(err: Exception) -> SyncUnavailable:
+        if isinstance(err, HttpError):
+            text = str(err)
+            if err.resp.status in (401, 403) and ("insufficient" in text.lower() or "scope" in text.lower()):
+                return SyncUnavailable("needs_permission", "Sign in with Google again to allow LED Sign to store its sync data in Drive.")
+            if err.resp.status == 403 and ("accessNotConfigured" in text or "has not been used" in text or "disabled" in text):
+                return SyncUnavailable("api_disabled", "Enable the Google Drive API for this app's Google Cloud project.")
+            return SyncUnavailable("error", f"Google Drive error: {err}")
+        if is_transient_network_error(err):
+            return SyncUnavailable("network_error", f"Could not reach Google Drive: {err}")
+        raise err
 
     def _file_ids(self, drive) -> Dict[str, str]:
         ids: Dict[str, str] = {}
@@ -142,7 +150,7 @@ class DriveSync:
             try:
                 ids = self._file_ids(drive)
                 manifest = self._read_json(drive, ids[MANIFEST_NAME]) if MANIFEST_NAME in ids else {}
-            except HttpError as err:
+            except Exception as err:
                 raise self._translate(err)
             self._apply_remote_loy_session(manifest)
             stored_session = (manifest.get("secrets") or {}).get(LOY_SESSION_KEY)
@@ -167,7 +175,7 @@ class DriveSync:
                     if name in ids:
                         found[preset_id] = self._read_json(drive, ids[name])
                 return found
-            except HttpError as err:
+            except Exception as err:
                 raise self._translate(err)
 
     def push(self, manifest: dict, presets: Dict[str, dict]):
@@ -194,5 +202,5 @@ class DriveSync:
                 manifest = {**manifest, "secrets": secrets}
                 self._include_local_loy_session(manifest)
                 self._write_json(drive, ids, MANIFEST_NAME, manifest)
-            except HttpError as err:
+            except Exception as err:
                 raise self._translate(err)
