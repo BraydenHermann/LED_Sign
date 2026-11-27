@@ -152,12 +152,22 @@ def force_kill_port(port: int, kill_tree: bool = True):
     try:
         output = subprocess.check_output("netstat -ano", shell=True, text=True, stderr=subprocess.DEVNULL)
         target = f":{port}"
+        # Only our own servers bind loopback or all interfaces. Listeners on a
+        # specific address (e.g. Tailscale Serve on the tailnet IP) belong to
+        # other software and must be left alone.
+        our_hosts = {"127.0.0.1", "0.0.0.0", "[::]", "[::1]"}
         pids = set()
         for line in output.splitlines():
-            if target in line and "LISTENING" in line:
-                parts = line.strip().split()
-                if len(parts) >= 5 and parts[-1].isdigit():
-                    pids.add(parts[-1])
+            parts = line.strip().split()
+            if len(parts) < 5 or parts[3] != "LISTENING" or not parts[-1].isdigit():
+                continue
+            local = parts[1]
+            if not local.endswith(target):
+                continue
+            if local[: -len(target)] not in our_hosts:
+                continue
+            if parts[-1] != "0":
+                pids.add(parts[-1])
         for pid in pids:
             cmd = ["taskkill", "/F", *(["/T"] if kill_tree else []), "/PID", pid]
             subprocess.run(cmd, capture_output=True, **hidden_process_kwargs())
@@ -322,7 +332,14 @@ def on_quit(icon, item):
     except Exception:
         pass
     stop_servers()
-    icon.stop()
+    try:
+        icon.stop()
+    finally:
+        # pystray's icon.stop() can return without ending the process. A
+        # lingering instance keeps the single-instance mutex with its guardian
+        # stopped, so later launches defer to it and no server ever starts.
+        launcher_log("Launcher exiting.")
+        os._exit(0)
 
 
 def run_tray():
